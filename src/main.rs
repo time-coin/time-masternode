@@ -1269,7 +1269,10 @@ async fn main() {
                         .filter(|info| {
                             // Don't re-lock outpoints we just released as stale —
                             // old registry entries can otherwise undo the stale-release.
-                            !info.masternode.collateral_outpoint.as_ref()
+                            !info
+                                .masternode
+                                .collateral_outpoint
+                                .as_ref()
                                 .map(|op| stale_local_outpoints.contains(op))
                                 .unwrap_or(false)
                         })
@@ -1511,10 +1514,10 @@ async fn main() {
                 let ip = &mn_for_sync.address;
 
                 // What outpoint is the conf currently advertising?
-                let conf_outpoint: Option<String> =
-                    mn_for_sync.collateral_outpoint.as_ref().map(|op| {
-                        format!("{}:{}", hex::encode(op.txid), op.vout)
-                    });
+                let conf_outpoint: Option<String> = mn_for_sync
+                    .collateral_outpoint
+                    .as_ref()
+                    .map(|op| format!("{}:{}", hex::encode(op.txid), op.vout));
 
                 // What outpoint does the chain anchor say is registered for this IP?
                 let on_chain_outpoint =
@@ -1541,11 +1544,9 @@ async fn main() {
                             "📤 Submitting CollateralUnlock for old collateral {}",
                             old_outpoint_str
                         );
-                        if let Some(unlock_tx) = build_collateral_unlock_tx(
-                            old_outpoint_str,
-                            ip,
-                            &wallet_key_for_sync,
-                        ) {
+                        if let Some(unlock_tx) =
+                            build_collateral_unlock_tx(old_outpoint_str, ip, &wallet_key_for_sync)
+                        {
                             match collateral_sync_consensus
                                 .submit_transaction(unlock_tx)
                                 .await
@@ -1555,10 +1556,9 @@ async fn main() {
                                     old_outpoint_str,
                                     hex::encode(txid)
                                 ),
-                                Err(e) => tracing::warn!(
-                                    "⚠️ CollateralUnlock submission failed: {}",
-                                    e
-                                ),
+                                Err(e) => {
+                                    tracing::warn!("⚠️ CollateralUnlock submission failed: {}", e)
+                                }
                             }
                         }
                     }
@@ -1567,7 +1567,8 @@ async fn main() {
                 // Register the new collateral if conf has one (only for paid tiers)
                 if let Some(ref new_outpoint_str) = conf_outpoint {
                     if on_chain_outpoint.as_deref() != Some(new_outpoint_str.as_str())
-                        && mn_for_sync.tier != types::MasternodeTier::Free {
+                        && mn_for_sync.tier != types::MasternodeTier::Free
+                    {
                         tracing::info!(
                             "📤 Submitting MasternodeReg for collateral {}",
                             new_outpoint_str
@@ -1577,19 +1578,15 @@ async fn main() {
                             &wallet_key_for_sync,
                             p2p_port_for_sync,
                         ) {
-                            match collateral_sync_consensus
-                                .submit_transaction(reg_tx)
-                                .await
-                            {
+                            match collateral_sync_consensus.submit_transaction(reg_tx).await {
                                 Ok(txid) => tracing::info!(
                                     "✅ MasternodeReg submitted: {} (tx {})",
                                     new_outpoint_str,
                                     hex::encode(txid)
                                 ),
-                                Err(e) => tracing::warn!(
-                                    "⚠️ MasternodeReg submission failed: {}",
-                                    e
-                                ),
+                                Err(e) => {
+                                    tracing::warn!("⚠️ MasternodeReg submission failed: {}", e)
+                                }
                             }
                         }
                     }
@@ -1612,7 +1609,10 @@ async fn main() {
         let entries: Vec<_> = all_masternodes
             .iter()
             .filter(|info| {
-                !info.masternode.collateral_outpoint.as_ref()
+                !info
+                    .masternode
+                    .collateral_outpoint
+                    .as_ref()
                     .map(|op| stale_local_outpoints.contains(op))
                     .unwrap_or(false)
             })
@@ -1755,7 +1755,9 @@ async fn main() {
                         }
                         // Check if a peer already delivered genesis while we were waiting
                         if blockchain_init.has_genesis() {
-                            tracing::info!("✅ Genesis block received from network before launch time");
+                            tracing::info!(
+                                "✅ Genesis block received from network before launch time"
+                            );
                             break;
                         }
                         let remaining = launch_ts - now;
@@ -1777,153 +1779,165 @@ async fn main() {
                 if blockchain_init.has_genesis() {
                     // fall through — the code below already handles this case
                 } else {
+                    // Wait for masternodes to discover each other with exponential backoff
+                    // Start with 30s, then 60s, then 90s - total 180s max wait
+                    const DISCOVERY_ROUNDS: u32 = 3;
+                    const BASE_DISCOVERY_WAIT: u64 = 10;
 
-                // Wait for masternodes to discover each other with exponential backoff
-                // Start with 30s, then 60s, then 90s - total 180s max wait
-                const DISCOVERY_ROUNDS: u32 = 3;
-                const BASE_DISCOVERY_WAIT: u64 = 10;
-
-                for round in 1..=DISCOVERY_ROUNDS {
-                    if blockchain_init.has_genesis() {
-                        break; // Genesis arrived while waiting
-                    }
-
-                    let wait_time = BASE_DISCOVERY_WAIT * round as u64;
-                    tracing::info!(
-                        "⏳ Discovery round {}/{}: waiting {}s for masternodes...",
-                        round,
-                        DISCOVERY_ROUNDS,
-                        wait_time
-                    );
-
-                    tokio::time::sleep(tokio::time::Duration::from_secs(wait_time)).await;
-
-                    // Check again if genesis arrived
-                    if blockchain_init.has_genesis() {
-                        tracing::info!("✅ Genesis block received during discovery wait");
-                        break;
-                    }
-
-                    let registered = bootstrap_registry.get_all().await;
-                    if registered.is_empty() {
-                        tracing::warn!("   No masternodes registered yet (round {})", round);
-                        continue;
-                    }
-
-                    tracing::info!(
-                        "   {} masternodes discovered, proceeding with leader election",
-                        registered.len()
-                    );
-
-                    // Sort masternodes deterministically by address
-                    let mut sorted_mns = registered.clone();
-                    sorted_mns.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
-                    let leader_address = sorted_mns[0].masternode.address.clone();
-
-                    tracing::info!(
-                        "🎲 Genesis leader election: {} masternodes, leader = {}",
-                        sorted_mns.len(),
-                        leader_address
-                    );
-
-                    // Check if we are the leader
-                    let are_we_leader_by_config =
-                        genesis_external_ip.as_deref() == Some(leader_address.as_str());
-                    let are_we_leader_by_registry = bootstrap_registry
-                        .get_local_masternode()
-                        .await
-                        .map(|mn| mn.masternode.address == leader_address)
-                        .unwrap_or(false);
-                    let are_we_leader = are_we_leader_by_config || are_we_leader_by_registry;
-
-                    tracing::info!(
-                        "🔍 Leader check: external_address={:?}, by_config={}, by_registry={}",
-                        genesis_external_ip,
-                        are_we_leader_by_config,
-                        are_we_leader_by_registry
-                    );
-
-                    if are_we_leader {
-                        // We are the leader - generate genesis
-                        tracing::info!("👑 We are the genesis leader - generating genesis block");
-
-                        // Double-check no genesis arrived in the meantime (prevent race)
+                    for round in 1..=DISCOVERY_ROUNDS {
                         if blockchain_init.has_genesis() {
-                            tracing::info!("✅ Genesis arrived just before generation - using received genesis");
+                            break; // Genesis arrived while waiting
+                        }
+
+                        let wait_time = BASE_DISCOVERY_WAIT * round as u64;
+                        tracing::info!(
+                            "⏳ Discovery round {}/{}: waiting {}s for masternodes...",
+                            round,
+                            DISCOVERY_ROUNDS,
+                            wait_time
+                        );
+
+                        tokio::time::sleep(tokio::time::Duration::from_secs(wait_time)).await;
+
+                        // Check again if genesis arrived
+                        if blockchain_init.has_genesis() {
+                            tracing::info!("✅ Genesis block received during discovery wait");
                             break;
                         }
 
-                        if let Err(e) = blockchain_init.generate_dynamic_genesis().await {
-                            tracing::error!("❌ Failed to generate genesis: {}", e);
-                            continue; // Try next round
+                        let registered = bootstrap_registry.get_all().await;
+                        if registered.is_empty() {
+                            tracing::warn!("   No masternodes registered yet (round {})", round);
+                            continue;
                         }
 
-                        // Broadcast genesis to all peers
-                        if let Ok(genesis) = blockchain_init.get_block_by_height(0).await {
-                            tracing::info!("📤 Broadcasting genesis block to all peers");
-                            let proposal =
-                                crate::network::message::NetworkMessage::TimeLockBlockProposal {
-                                    block: genesis,
-                                };
-                            peer_registry_for_sync.broadcast(proposal).await;
-                        }
-                        break;
-                    } else {
-                        // We are NOT the leader - wait for genesis from leader
-                        // Use longer timeout and re-request periodically
-                        tracing::info!("⏳ Waiting for genesis from leader ({})", leader_address);
+                        tracing::info!(
+                            "   {} masternodes discovered, proceeding with leader election",
+                            registered.len()
+                        );
 
-                        const LEADER_WAIT_SECS: u64 = 45;
-                        const REQUEST_INTERVAL: u64 = 10;
-                        let mut waited = 0u64;
+                        // Sort masternodes deterministically by address
+                        let mut sorted_mns = registered.clone();
+                        sorted_mns.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
+                        let leader_address = sorted_mns[0].masternode.address.clone();
 
-                        while waited < LEADER_WAIT_SECS && !blockchain_init.has_genesis() {
-                            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                            waited += 1;
+                        tracing::info!(
+                            "🎲 Genesis leader election: {} masternodes, leader = {}",
+                            sorted_mns.len(),
+                            leader_address
+                        );
 
-                            // Re-request genesis periodically
-                            if waited % REQUEST_INTERVAL == 0 {
-                                let connected = peer_registry_for_sync.get_connected_peers().await;
-                                for peer_ip in &connected {
-                                    let msg =
-                                        crate::network::message::NetworkMessage::GetBlocks(0, 0);
-                                    let _ = peer_registry_for_sync.send_to_peer(peer_ip, msg).await;
-                                }
-                            }
-                        }
+                        // Check if we are the leader
+                        let are_we_leader_by_config =
+                            genesis_external_ip.as_deref() == Some(leader_address.as_str());
+                        let are_we_leader_by_registry = bootstrap_registry
+                            .get_local_masternode()
+                            .await
+                            .map(|mn| mn.masternode.address == leader_address)
+                            .unwrap_or(false);
+                        let are_we_leader = are_we_leader_by_config || are_we_leader_by_registry;
 
-                        if blockchain_init.has_genesis() {
-                            tracing::info!("✅ Received genesis block from leader");
-                            break;
-                        }
+                        tracing::info!(
+                            "🔍 Leader check: external_address={:?}, by_config={}, by_registry={}",
+                            genesis_external_ip,
+                            are_we_leader_by_config,
+                            are_we_leader_by_registry
+                        );
 
-                        // Only generate fallback on LAST round to prevent race conditions
-                        if round == DISCOVERY_ROUNDS {
-                            tracing::warn!(
-                                "⚠️  Leader timeout after {} rounds - generating fallback genesis",
-                                DISCOVERY_ROUNDS
+                        if are_we_leader {
+                            // We are the leader - generate genesis
+                            tracing::info!(
+                                "👑 We are the genesis leader - generating genesis block"
                             );
 
-                            // Final check before fallback generation
+                            // Double-check no genesis arrived in the meantime (prevent race)
                             if blockchain_init.has_genesis() {
-                                tracing::info!("✅ Genesis arrived just before fallback - using received genesis");
+                                tracing::info!("✅ Genesis arrived just before generation - using received genesis");
                                 break;
                             }
 
                             if let Err(e) = blockchain_init.generate_dynamic_genesis().await {
-                                tracing::error!("❌ Failed to generate fallback genesis: {}", e);
-                            } else if let Ok(genesis) = blockchain_init.get_block_by_height(0).await
-                            {
-                                tracing::info!("📤 Broadcasting fallback genesis block");
+                                tracing::error!("❌ Failed to generate genesis: {}", e);
+                                continue; // Try next round
+                            }
+
+                            // Broadcast genesis to all peers
+                            if let Ok(genesis) = blockchain_init.get_block_by_height(0).await {
+                                tracing::info!("📤 Broadcasting genesis block to all peers");
                                 let proposal =
+                                crate::network::message::NetworkMessage::TimeLockBlockProposal {
+                                    block: genesis,
+                                };
+                                peer_registry_for_sync.broadcast(proposal).await;
+                            }
+                            break;
+                        } else {
+                            // We are NOT the leader - wait for genesis from leader
+                            // Use longer timeout and re-request periodically
+                            tracing::info!(
+                                "⏳ Waiting for genesis from leader ({})",
+                                leader_address
+                            );
+
+                            const LEADER_WAIT_SECS: u64 = 45;
+                            const REQUEST_INTERVAL: u64 = 10;
+                            let mut waited = 0u64;
+
+                            while waited < LEADER_WAIT_SECS && !blockchain_init.has_genesis() {
+                                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                                waited += 1;
+
+                                // Re-request genesis periodically
+                                if waited % REQUEST_INTERVAL == 0 {
+                                    let connected =
+                                        peer_registry_for_sync.get_connected_peers().await;
+                                    for peer_ip in &connected {
+                                        let msg =
+                                            crate::network::message::NetworkMessage::GetBlocks(
+                                                0, 0,
+                                            );
+                                        let _ =
+                                            peer_registry_for_sync.send_to_peer(peer_ip, msg).await;
+                                    }
+                                }
+                            }
+
+                            if blockchain_init.has_genesis() {
+                                tracing::info!("✅ Received genesis block from leader");
+                                break;
+                            }
+
+                            // Only generate fallback on LAST round to prevent race conditions
+                            if round == DISCOVERY_ROUNDS {
+                                tracing::warn!(
+                                "⚠️  Leader timeout after {} rounds - generating fallback genesis",
+                                DISCOVERY_ROUNDS
+                            );
+
+                                // Final check before fallback generation
+                                if blockchain_init.has_genesis() {
+                                    tracing::info!("✅ Genesis arrived just before fallback - using received genesis");
+                                    break;
+                                }
+
+                                if let Err(e) = blockchain_init.generate_dynamic_genesis().await {
+                                    tracing::error!(
+                                        "❌ Failed to generate fallback genesis: {}",
+                                        e
+                                    );
+                                } else if let Ok(genesis) =
+                                    blockchain_init.get_block_by_height(0).await
+                                {
+                                    tracing::info!("📤 Broadcasting fallback genesis block");
+                                    let proposal =
                                     crate::network::message::NetworkMessage::TimeLockBlockProposal {
                                         block: genesis,
                                     };
-                                peer_registry_for_sync.broadcast(proposal).await;
+                                    peer_registry_for_sync.broadcast(proposal).await;
+                                }
                             }
                         }
                     }
-                }
                 } // end else (launch time reached, generate locally)
             }
         } else {
@@ -2426,8 +2440,8 @@ async fn main() {
         let mut last_sync_attempt_time = std::time::Instant::now();
 
         // Rate-limiter for the block-1 integrity check (runs every 60s).
-        let mut last_block1_integrity_check = std::time::Instant::now()
-            - std::time::Duration::from_secs(60); // fire immediately on first iteration
+        let mut last_block1_integrity_check =
+            std::time::Instant::now() - std::time::Duration::from_secs(60); // fire immediately on first iteration
 
         loop {
             tokio::select! {
@@ -4269,9 +4283,7 @@ async fn main() {
                 .await;
 
             // Share blacklist with blockchain so sync_from_peers can skip banned peers
-            blockchain
-                .set_blacklist(server.blacklist.clone())
-                .await;
+            blockchain.set_blacklist(server.blacklist.clone()).await;
 
             // CRITICAL: Wire up consensus broadcast callback for TimeVote requests
             // This enables the consensus engine to broadcast vote requests to the network
@@ -4717,7 +4729,10 @@ fn build_collateral_unlock_tx(
 
     let message = {
         use sha2::{Digest, Sha256};
-        let msg = format!("MN_UNLOCK:{}:{}", collateral_outpoint_str, masternode_address);
+        let msg = format!(
+            "MN_UNLOCK:{}:{}",
+            collateral_outpoint_str, masternode_address
+        );
         Sha256::digest(msg.as_bytes()).to_vec()
     };
     let signature = wallet_key.sign(&message);

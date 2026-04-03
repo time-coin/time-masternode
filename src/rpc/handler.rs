@@ -3884,10 +3884,7 @@ impl RpcHandler {
             let mut pending_balance: u64 = 0;
             let mut utxo_count: usize = 0;
 
-            for u in utxos
-                .iter()
-                .filter(|u| &u.address == spendable_addr)
-            {
+            for u in utxos.iter().filter(|u| &u.address == spendable_addr) {
                 utxo_count += 1;
 
                 if self.utxo_manager.is_collateral_locked(&u.outpoint) {
@@ -5588,8 +5585,12 @@ impl RpcHandler {
             .map(|p| {
                 let type_str = match &p.payload {
                     crate::governance::ProposalPayload::TreasurySpend { .. } => "treasury_spend",
-                    crate::governance::ProposalPayload::FeeScheduleChange { .. } => "fee_schedule_change",
-                    crate::governance::ProposalPayload::EmissionRateChange { .. } => "emission_rate_change",
+                    crate::governance::ProposalPayload::FeeScheduleChange { .. } => {
+                        "fee_schedule_change"
+                    }
+                    crate::governance::ProposalPayload::EmissionRateChange { .. } => {
+                        "emission_rate_change"
+                    }
                 };
                 let status_str = match &p.status {
                     crate::governance::ProposalStatus::Active => "active".to_string(),
@@ -5855,12 +5856,12 @@ impl RpcHandler {
             })?;
 
         let block = match response {
-            crate::network::message::NetworkMessage::BlocksResponse(mut blocks) => blocks
-                .pop()
-                .ok_or_else(|| RpcError {
+            crate::network::message::NetworkMessage::BlocksResponse(mut blocks) => {
+                blocks.pop().ok_or_else(|| RpcError {
                     code: -5,
                     message: format!("Peer {peer_ip} has no block at height {height}"),
-                })?,
+                })?
+            }
             crate::network::message::NetworkMessage::BlockResponse(block) => block,
             other => {
                 return Err(RpcError {

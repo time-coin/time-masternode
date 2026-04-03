@@ -417,14 +417,15 @@ impl Blockchain {
     /// Use this everywhere instead of the `BLOCK_REWARD_SATOSHIS` constant so that
     /// an `EmissionRateChange` governance proposal takes effect without a restart.
     pub fn get_current_block_reward(&self) -> u64 {
-        self.active_block_reward.load(std::sync::atomic::Ordering::Relaxed)
+        self.active_block_reward
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Apply an `EmissionRateChange` governance proposal.
     fn apply_emission_rate_change(&self, new_satoshis_per_block: u64) -> Result<(), String> {
-        const MIN_REWARD: u64 = 10 * 100_000_000;      // 10 TIME minimum
-        const MAX_REWARD: u64 = 10_000 * 100_000_000;  // 10,000 TIME maximum
-        if new_satoshis_per_block < MIN_REWARD || new_satoshis_per_block > MAX_REWARD {
+        const MIN_REWARD: u64 = 10 * 100_000_000; // 10 TIME minimum
+        const MAX_REWARD: u64 = 10_000 * 100_000_000; // 10,000 TIME maximum
+        if !(MIN_REWARD..=MAX_REWARD).contains(&new_satoshis_per_block) {
             return Err(format!(
                 "EmissionRateChange: {new_satoshis_per_block} satoshis/block is outside allowed range [{MIN_REWARD}, {MAX_REWARD}]"
             ));
@@ -581,9 +582,7 @@ impl Blockchain {
                                 );
                             }
                             // Rebuild treasury balance (5 TIME per block, including genesis)
-                            self.treasury_deposit(
-                                constants::blockchain::TREASURY_POOL_SATOSHIS,
-                            );
+                            self.treasury_deposit(constants::blockchain::TREASURY_POOL_SATOSHIS);
                         }
                         Err(e) => {
                             tracing::error!(
@@ -973,7 +972,10 @@ impl Blockchain {
         }
 
         // No local blockchain — store hardcoded genesis for both networks
-        tracing::info!("📋 No genesis found — creating from hardcoded {:?} genesis data", self.network_type);
+        tracing::info!(
+            "📋 No genesis found — creating from hardcoded {:?} genesis data",
+            self.network_type
+        );
         self.store_hardcoded_genesis()?;
         Ok(())
     }
@@ -1088,9 +1090,8 @@ impl Blockchain {
         //   All-Free mode: 100 TIME split equally among all registered nodes (up to MAX_FREE_TIER_RECIPIENTS)
         //   Tier-based mode: proportional by tier reward weight
         const TIME_UNIT: u64 = 100_000_000; // 1 TIME = 100M satoshis
-        // 95 TIME distributed to masternodes; 5 TIME goes to treasury via add_block (like normal blocks)
-        const GENESIS_REWARD: u64 =
-            100 * TIME_UNIT - constants::blockchain::TREASURY_POOL_SATOSHIS;
+                                            // 95 TIME distributed to masternodes; 5 TIME goes to treasury via add_block (like normal blocks)
+        const GENESIS_REWARD: u64 = 100 * TIME_UNIT - constants::blockchain::TREASURY_POOL_SATOSHIS;
 
         // Sort canonically for determinism
         let mut sorted_for_reward = registered.clone();
@@ -1184,17 +1185,18 @@ impl Blockchain {
             "   Genesis block reward: {} TIME split among {} masternodes ({} mode)",
             GENESIS_REWARD / 100_000_000,
             masternode_rewards.len(),
-            if has_paid_tiers { "tier-based" } else { "all-Free equal-split" }
+            if has_paid_tiers {
+                "tier-based"
+            } else {
+                "all-Free equal-split"
+            }
         );
         for (addr, amt) in &masternode_rewards {
             if *amt > 0 {
                 tracing::info!("     {} TIME -> {}", amt / 100_000_000, addr);
             }
         }
-        tracing::info!(
-            "   Leader (block producer): {}",
-            leader.masternode.address
-        );
+        tracing::info!("   Leader (block producer): {}", leader.masternode.address);
 
         // Create genesis header
         let header = BlockHeader {
@@ -1370,7 +1372,10 @@ impl Blockchain {
         let _ = self.storage.remove(our_hash.as_slice());
         // Clear UTXOs (old genesis rewards are now invalid)
         if let Err(e) = self.utxo_manager.clear_all().await {
-            tracing::warn!("⚠️ Failed to clear UTXOs during genesis replacement: {:?}", e);
+            tracing::warn!(
+                "⚠️ Failed to clear UTXOs during genesis replacement: {:?}",
+                e
+            );
         }
 
         // Store new genesis
@@ -1386,7 +1391,12 @@ impl Blockchain {
         let height_bytes = bincode::serialize(&0u64).map_err(|e| e.to_string())?;
         self.storage
             .insert("chain_height".as_bytes(), height_bytes)
-            .map_err(|e| format!("Failed to save chain_height after genesis replacement: {}", e))?;
+            .map_err(|e| {
+                format!(
+                    "Failed to save chain_height after genesis replacement: {}",
+                    e
+                )
+            })?;
         self.storage
             .flush()
             .map_err(|e| format!("Failed to flush genesis replacement: {}", e))?;
@@ -1580,7 +1590,8 @@ impl Blockchain {
         let _ = self.storage.remove("chain_height".as_bytes());
         self.current_height.store(0, Ordering::Release);
         // Reset finality lock — new chain must be built from scratch.
-        self.last_locally_confirmed_height.store(0, Ordering::Release);
+        self.last_locally_confirmed_height
+            .store(0, Ordering::Release);
 
         // Clear UTXOs — they will be rebuilt as new blocks are added
         if let Err(e) = self.utxo_manager.clear_all().await {
@@ -2066,7 +2077,9 @@ impl Blockchain {
                         } else {
                             tracing::debug!(
                                 "🔍 Skipping peer {} for sync (tip {} <= our height {})",
-                                peer, peer_tip, current
+                                peer,
+                                peer_tip,
+                                current
                             );
                         }
                     } else {
@@ -2094,10 +2107,7 @@ impl Blockchain {
                     let bare = peer.split(':').next().unwrap_or(peer.as_str());
                     if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
                         if bl.is_blacklisted(ip).is_some() {
-                            tracing::debug!(
-                                "🔍 Excluding blacklisted peer {} from sync",
-                                bare
-                            );
+                            tracing::debug!("🔍 Excluding blacklisted peer {} from sync", bare);
                             return false;
                         }
                     }
@@ -2353,9 +2363,7 @@ impl Blockchain {
                     let retry_peers: Vec<String> = {
                         let excluded: HashSet<String> = if has_gap {
                             let gap_chunks = first_buffered
-                                .map(|f| {
-                                    ((f - next_needed) as usize).div_ceil(batch_size as usize)
-                                })
+                                .map(|f| ((f - next_needed) as usize).div_ceil(batch_size as usize))
                                 .unwrap_or(1)
                                 .min(sync_peers.len());
                             sync_peers.iter().take(gap_chunks).cloned().collect()
@@ -2383,9 +2391,7 @@ impl Blockchain {
                                 continue;
                             }
                             // Skip peers known to be at or below the height we need
-                            if let Some((peer_tip, _)) =
-                                peer_registry.get_peer_chain_tip(p).await
-                            {
+                            if let Some((peer_tip, _)) = peer_registry.get_peer_chain_tip(p).await {
                                 if peer_tip < next_needed {
                                     continue;
                                 }
@@ -3169,9 +3175,7 @@ impl Blockchain {
                             Ok(true) => {
                                 info!(
                                     "📥 Starting sync: {} → {} ({} blocks behind)",
-                                    our_height,
-                                    consensus_height,
-                                    blocks_behind
+                                    our_height, consensus_height, blocks_behind
                                 );
                                 let blockchain_clone = Arc::clone(&self);
                                 tokio::spawn(async move {
@@ -4694,12 +4698,16 @@ impl Blockchain {
                 if paid.len() < MIN_PAID_RECIPIENTS {
                     tracing::warn!(
                         "🛡️ add_block: rejecting block {} — only {} paid recipient(s), need ≥{}",
-                        block.header.height, paid.len(), MIN_PAID_RECIPIENTS
+                        block.header.height,
+                        paid.len(),
+                        MIN_PAID_RECIPIENTS
                     );
                     return Err(format!(
                         "Block {} rejected: only {} unique reward recipient(s), need ≥{}. \
                          Zero-amount padding does not count.",
-                        block.header.height, paid.len(), MIN_PAID_RECIPIENTS
+                        block.header.height,
+                        paid.len(),
+                        MIN_PAID_RECIPIENTS
                     ));
                 }
             }
@@ -4818,8 +4826,7 @@ impl Blockchain {
                             new_satoshis_per_block,
                             ..
                         } => {
-                            if let Err(e) =
-                                self.apply_emission_rate_change(*new_satoshis_per_block)
+                            if let Err(e) = self.apply_emission_rate_change(*new_satoshis_per_block)
                             {
                                 tracing::error!("🏛️  EmissionRateChange execution failed: {e}");
                             } else {
@@ -6252,23 +6259,14 @@ impl Blockchain {
         //
         // IMPORTANT: If any reward recipients are no longer in the registry
         // (deregistered since the block was produced, or from old pool-sharing era),
-        // we cannot accurately reconstruct per-tier totals — fall back to a looser
-        // total-budget check instead of strict per-tier verification.
-        let total_tier_budget: u64 = [
-            MasternodeTier::Gold,
-            MasternodeTier::Silver,
-            MasternodeTier::Bronze,
-            MasternodeTier::Free,
-        ]
-        .iter()
-        .map(|t| t.pool_allocation())
-        .sum();
+        // we cannot accurately reconstruct per-tier totals — fall back to a loose
+        // block-reward-ceiling check instead of strict per-tier verification.
 
         let mut rolled_up_to_producer: u64 = 0;
         // When the fallback path fires (deregistered recipients present), we can't
         // determine exactly how much rolled up to the producer.  Use 0 as the minimum
-        // (producer must have received at least PRODUCER_REWARD) and total_tier_budget
-        // as the maximum (all pools could theoretically have rolled up).
+        // (producer must have received at least PRODUCER_REWARD) and the full block
+        // reward as the maximum (e.g. all-Free blocks distribute 95 TIME to non-producers).
         let mut rolled_up_to_producer_max_override: Option<u64> = None;
 
         // ── All-Free early check ──────────────────────────────────────────────
@@ -6287,10 +6285,7 @@ impl Blockchain {
             && paid_tier_total == 0
             && unknown_non_producer_paid == 0
         {
-            let free_paid = tier_paid
-                .get(&MasternodeTier::Free)
-                .copied()
-                .unwrap_or(0);
+            let free_paid = tier_paid.get(&MasternodeTier::Free).copied().unwrap_or(0);
             let total_distributed = producer_received + free_paid;
             // block.header.block_reward is already net of treasury (= base_reward - treasury_share),
             // so the all-Free block should distribute exactly block_reward satoshis — no further
@@ -6378,8 +6373,7 @@ impl Blockchain {
                             } else {
                                 &info.masternode.wallet_address
                             };
-                            wallet != producer_addr
-                                && wallet.as_str() != &producer_wallet
+                            wallet != producer_addr && wallet.as_str() != producer_wallet
                         })
                         .count();
                     if non_producer_tier_nodes > 0 {
@@ -6508,7 +6502,11 @@ impl Blockchain {
                 "Block {} bitmap reward check passed: {} active nodes, {} paid recipients",
                 block.header.height,
                 active_nodes.len(),
-                block.masternode_rewards.iter().filter(|(_, v)| *v > 0).count()
+                block
+                    .masternode_rewards
+                    .iter()
+                    .filter(|(_, v)| *v > 0)
+                    .count()
             );
         }
 
@@ -6671,7 +6669,9 @@ impl Blockchain {
                 return Err(format!(
                     "Proposal rejected: block {} has only {} paid recipient(s), need ≥{}. \
                      Not voting for reward-hijack proposal.",
-                    block.header.height, paid.len(), MIN_PAID_RECIPIENTS
+                    block.header.height,
+                    paid.len(),
+                    MIN_PAID_RECIPIENTS
                 ));
             }
         }
@@ -7434,14 +7434,10 @@ impl Blockchain {
             // A fresh node (no genesis stored yet) must reject any genesis from a peer
             // that doesn't match the canonical checkpoint — otherwise it could persist
             // an old-chain genesis and all subsequent blocks would silently fork.
-            if let Err(e) = crate::block::genesis::GenesisBlock::verify_checkpoint(
-                &block,
-                self.network_type,
-            ) {
-                tracing::error!(
-                    "🚫 Rejected genesis from peer: checkpoint mismatch — {}",
-                    e
-                );
+            if let Err(e) =
+                crate::block::genesis::GenesisBlock::verify_checkpoint(&block, self.network_type)
+            {
+                tracing::error!("🚫 Rejected genesis from peer: checkpoint mismatch — {}", e);
                 return Err(format!("Genesis checkpoint mismatch: {}", e));
             }
 

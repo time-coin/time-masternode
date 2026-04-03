@@ -1329,9 +1329,7 @@ fn print_human_readable(
             let prev = result
                 .get("previous_confirmed_height")
                 .and_then(|v| v.as_u64());
-            let new = result
-                .get("new_confirmed_height")
-                .and_then(|v| v.as_u64());
+            let new = result.get("new_confirmed_height").and_then(|v| v.as_u64());
 
             if status == "ok" {
                 if let (Some(p), Some(n)) = (prev, new) {
