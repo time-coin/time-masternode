@@ -4140,45 +4140,59 @@ impl RpcHandler {
     /// List all currently locked UTXOs with details
     async fn list_locked_utxos(&self) -> Result<Value, RpcError> {
         let now = chrono::Utc::now().timestamp();
-
-        // Get locked UTXOs directly from the state map
-        let locked_list = self.utxo_manager.get_locked_utxos();
-
         let mut locked: Vec<Value> = Vec::new();
 
-        for (outpoint, txid, locked_at) in locked_list {
-            // Try to get UTXO details from storage
+        // UTXOState::Locked — in-flight transaction locks
+        for (outpoint, txid, locked_at) in self.utxo_manager.get_locked_utxos() {
             if let Ok(utxo) = self.utxo_manager.get_utxo(&outpoint).await {
                 let age_seconds = now - locked_at;
-                let expired = age_seconds > 600; // 10 minutes
-
                 locked.push(json!({
                     "txid": hex::encode(outpoint.txid),
                     "vout": outpoint.vout,
                     "address": utxo.address,
                     "amount": utxo.value as f64 / 100_000_000.0,
+                    "lock_type": "transaction",
                     "locked_by_tx": hex::encode(txid),
                     "locked_at": locked_at,
                     "age_seconds": age_seconds,
-                    "expired": expired
+                    "expired": age_seconds > 600
                 }));
             } else {
-                // UTXO not in storage but has a lock state - orphaned state
                 let age_seconds = now - locked_at;
-                let expired = age_seconds > 600;
-
                 locked.push(json!({
                     "txid": hex::encode(outpoint.txid),
                     "vout": outpoint.vout,
                     "address": "Unknown (orphaned state)",
                     "amount": 0.0,
+                    "lock_type": "transaction",
                     "locked_by_tx": hex::encode(txid),
                     "locked_at": locked_at,
                     "age_seconds": age_seconds,
-                    "expired": expired,
+                    "expired": age_seconds > 600,
                     "orphaned": true
                 }));
             }
+        }
+
+        // Collateral locks — masternode staked UTXOs
+        for lc in self.utxo_manager.list_locked_collaterals() {
+            let amount = if let Ok(utxo) = self.utxo_manager.get_utxo(&lc.outpoint).await {
+                utxo.value as f64 / 100_000_000.0
+            } else {
+                lc.amount as f64 / 100_000_000.0
+            };
+            let age_seconds = now - lc.locked_at as i64;
+            locked.push(json!({
+                "txid": hex::encode(lc.outpoint.txid),
+                "vout": lc.outpoint.vout,
+                "amount": amount,
+                "lock_type": "collateral",
+                "masternode_address": lc.masternode_address,
+                "lock_height": lc.lock_height,
+                "locked_at": lc.locked_at,
+                "age_seconds": age_seconds,
+                "unlock_height": lc.unlock_height
+            }));
         }
 
         Ok(json!({
