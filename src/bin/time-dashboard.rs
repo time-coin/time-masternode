@@ -292,6 +292,7 @@ struct App {
     block_detail: Option<usize>,
     block_tx_scroll: usize,
     governance_scroll: usize,
+    masternode_scroll: usize,
     vote_status: Option<(bool, String)>, // (success, message)
 }
 
@@ -315,6 +316,7 @@ impl App {
             block_detail: None,
             block_tx_scroll: 0,
             governance_scroll: 0,
+            masternode_scroll: 0,
             vote_status: None,
         }
     }
@@ -1171,12 +1173,19 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
             ),
         )
         .block(Block::default().borders(Borders::ALL).title(format!(
-            "Network Masternodes ({}/{})",
+            "Network Masternodes ({}/{})  [↑↓ scroll]",
             list.total, list.total_in_registry
         )))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .style(Style::default().fg(Color::White));
 
-        f.render_widget(table, chunks[1]);
+        let total_mns = sorted.len();
+        let scroll = app.masternode_scroll.min(total_mns.saturating_sub(1));
+        let mut table_state = TableState::default();
+        if !sorted.is_empty() {
+            table_state.select(Some(scroll));
+        }
+        f.render_stateful_widget(table, chunks[1], &mut table_state);
     } else {
         let placeholder = Paragraph::new("Loading masternode list…")
             .block(
@@ -2080,6 +2089,8 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 app.mempool_scroll = app.mempool_scroll.saturating_sub(1);
                             } else if app.current_tab == 1 {
                                 app.peer_scroll = app.peer_scroll.saturating_sub(1);
+                            } else if app.current_tab == 2 {
+                                app.masternode_scroll = app.masternode_scroll.saturating_sub(1);
                             } else if app.current_tab == 4 {
                                 if app.block_detail.is_some() {
                                     app.block_tx_scroll = app.block_tx_scroll.saturating_sub(1);
@@ -2101,6 +2112,17 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 let max = app.data.peers.len().saturating_sub(1);
                                 if app.peer_scroll < max {
                                     app.peer_scroll += 1;
+                                }
+                            } else if app.current_tab == 2 {
+                                let max = app
+                                    .data
+                                    .masternode_list
+                                    .as_ref()
+                                    .map(|l| l.masternodes.len())
+                                    .unwrap_or(0)
+                                    .saturating_sub(1);
+                                if app.masternode_scroll < max {
+                                    app.masternode_scroll += 1;
                                 }
                             } else if app.current_tab == 4 {
                                 if let Some(detail_idx) = app.block_detail {
