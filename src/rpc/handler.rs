@@ -3937,20 +3937,13 @@ impl RpcHandler {
         }
     }
 
-    /// List the local node's locked collateral only
+    /// List all locked collaterals
+    /// Returns all currently locked collaterals with masternode details
     async fn list_locked_collaterals(&self) -> Result<Value, RpcError> {
-        let local_address = match self.registry.get_local_masternode().await {
-            Some(info) => info.masternode.address,
-            None => {
-                return Ok(json!({ "count": 0, "collaterals": [] }));
-            }
-        };
+        let locked_collaterals = self.utxo_manager.list_locked_collaterals();
 
-        let collaterals: Vec<_> = self
-            .utxo_manager
-            .list_locked_collaterals()
-            .into_iter()
-            .filter(|lc| lc.masternode_address == local_address)
+        let collaterals: Vec<_> = locked_collaterals
+            .iter()
             .map(|lc| {
                 json!({
                     "outpoint": format!("{}:{}", hex::encode(lc.outpoint.txid), lc.outpoint.vout),
