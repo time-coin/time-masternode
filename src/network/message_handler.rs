@@ -2146,16 +2146,12 @@ impl MessageHandler {
                         self.direction, block_height, self.peer_ip, e
                     );
                     if let Some(blacklist) = &context.blacklist {
-                        let bare_ip =
-                            self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
+                        let bare_ip = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
                         if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
                             let mut bl = blacklist.write().await;
                             bl.add_permanent_ban(
                                 ip,
-                                &format!(
-                                    "Reward-hijacking block {}: {}",
-                                    block_height, e
-                                ),
+                                &format!("Reward-hijacking block {}: {}", block_height, e),
                             );
                             error!(
                                 "🚫 [AI] Permanently banned {} — sent invalid reward-distribution block",
@@ -2265,7 +2261,9 @@ impl MessageHandler {
                     hex::encode(&our_genesis_hash[..8]),
                     hex::encode(&peer_genesis_hash[..8])
                 );
-                return Ok(Some(crate::network::message::NetworkMessage::RequestGenesis));
+                return Ok(Some(
+                    crate::network::message::NetworkMessage::RequestGenesis,
+                ));
             }
 
             // height > 0: we have blocks built on our genesis and are fully committed to it.
@@ -2377,7 +2375,11 @@ impl MessageHandler {
 
             // height == 0: still in genesis election window.
             // Try to converge: replace ours if their hash is lower.
-            match context.blockchain.replace_genesis_if_lower(block.clone()).await {
+            match context
+                .blockchain
+                .replace_genesis_if_lower(block.clone())
+                .await
+            {
                 Ok(true) => {
                     info!(
                         "🔀 [{}] Genesis replaced with lower-hash from {} — broadcasting",
@@ -2478,11 +2480,7 @@ impl MessageHandler {
                             );
                             context
                                 .peer_registry
-                                .mark_genesis_incompatible(
-                                    &self.peer_ip,
-                                    "none",
-                                    "wrong_timestamp",
-                                )
+                                .mark_genesis_incompatible(&self.peer_ip, "none", "wrong_timestamp")
                                 .await;
                         } else {
                             warn!("❌ [{}] Failed to add genesis block: {}", self.direction, e);
@@ -2869,52 +2867,54 @@ impl MessageHandler {
 
             // Verify collateral UTXO on-chain (skip during initial sync)
             if !still_syncing {
-            if let Some(utxo_manager) = &context.utxo_manager {
-                match utxo_manager.get_utxo(&outpoint).await {
-                    Ok(utxo) => {
-                        let required = tier.collateral();
-                        if utxo.value != required {
-                            warn!(
+                if let Some(utxo_manager) = &context.utxo_manager {
+                    match utxo_manager.get_utxo(&outpoint).await {
+                        Ok(utxo) => {
+                            let required = tier.collateral();
+                            if utxo.value != required {
+                                warn!(
                                 "❌ [{}] Rejecting {:?} masternode from {} — collateral {} != required {}",
                                 self.direction, tier, peer_ip, utxo.value, required
                             );
-                            return Ok(None);
-                        }
-                        if utxo_manager.is_collateral_locked(&outpoint) {
-                            let existing = utxo_manager.get_locked_collateral(&outpoint);
-                            if let Some(ref info) = existing {
-                                if info.masternode_address != peer_ip {
-                                    // Conflict: two different IPs claim the same collateral.
-                                    // Arbitrate by on-chain ownership: derive the TIME address
-                                    // from the incoming peer's public key and compare it to
-                                    // the UTXO's recorded address. The one that matches the
-                                    // UTXO is the legitimate owner; the other is the attacker.
-                                    let network = context.blockchain.network_type();
-                                    let peer_time_addr = Address::from_public_key(
-                                        public_key.as_bytes(),
-                                        network,
-                                    )
-                                    .as_string();
+                                return Ok(None);
+                            }
+                            if utxo_manager.is_collateral_locked(&outpoint) {
+                                let existing = utxo_manager.get_locked_collateral(&outpoint);
+                                if let Some(ref info) = existing {
+                                    if info.masternode_address != peer_ip {
+                                        // Conflict: two different IPs claim the same collateral.
+                                        // Arbitrate by on-chain ownership: derive the TIME address
+                                        // from the incoming peer's public key and compare it to
+                                        // the UTXO's recorded address. The one that matches the
+                                        // UTXO is the legitimate owner; the other is the attacker.
+                                        let network = context.blockchain.network_type();
+                                        let peer_time_addr = Address::from_public_key(
+                                            public_key.as_bytes(),
+                                            network,
+                                        )
+                                        .as_string();
 
-                                    if peer_time_addr == utxo.address {
-                                        // Incoming peer owns the UTXO on-chain — the current
-                                        // lock holder is a squatter.  Evict them and allow
-                                        // the legitimate owner through.
-                                        let squatter_ip = info.masternode_address.clone();
-                                        warn!(
+                                        if peer_time_addr == utxo.address {
+                                            // Incoming peer owns the UTXO on-chain — the current
+                                            // lock holder is a squatter.  Evict them and allow
+                                            // the legitimate owner through.
+                                            let squatter_ip = info.masternode_address.clone();
+                                            warn!(
                                             "🔁 [{}] Evicting squatter {} — legitimate owner {} \
                                              reclaiming collateral {} (on-chain address: {})",
                                             self.direction, squatter_ip, peer_ip,
                                             outpoint, utxo.address
                                         );
-                                        if let Some(blacklist) = &context.blacklist {
-                                            let squatter_bare = squatter_ip
-                                                .split(':')
-                                                .next()
-                                                .unwrap_or(&squatter_ip);
-                                            if let Ok(ip) = squatter_bare.parse::<std::net::IpAddr>() {
-                                                let mut bl = blacklist.write().await;
-                                                bl.add_temp_ban(
+                                            if let Some(blacklist) = &context.blacklist {
+                                                let squatter_bare = squatter_ip
+                                                    .split(':')
+                                                    .next()
+                                                    .unwrap_or(&squatter_ip);
+                                                if let Ok(ip) =
+                                                    squatter_bare.parse::<std::net::IpAddr>()
+                                                {
+                                                    let mut bl = blacklist.write().await;
+                                                    bl.add_temp_ban(
                                                     ip,
                                                     std::time::Duration::from_secs(86400),
                                                     &format!(
@@ -2922,34 +2922,39 @@ impl MessageHandler {
                                                         outpoint, peer_ip
                                                     ),
                                                 );
+                                                }
                                             }
-                                        }
-                                        // Unlock so the legitimate owner can re-lock below
-                                        let _ = utxo_manager.unlock_collateral(&outpoint);
-                                    } else {
-                                        // Incoming peer does NOT own the UTXO — they are
-                                        // the attacker.
-                                        static THEFT_WARN_TIMES: std::sync::OnceLock<
-                                            dashmap::DashMap<String, std::time::Instant>,
-                                        > = std::sync::OnceLock::new();
-                                        let warn_map = THEFT_WARN_TIMES.get_or_init(dashmap::DashMap::new);
-                                        let should_warn = warn_map
-                                            .get(&peer_ip)
-                                            .map(|t| t.elapsed().as_secs() >= 600)
-                                            .unwrap_or(true);
-                                        if should_warn {
-                                            warn_map.insert(peer_ip.clone(), std::time::Instant::now());
-                                            warn!(
+                                            // Unlock so the legitimate owner can re-lock below
+                                            let _ = utxo_manager.unlock_collateral(&outpoint);
+                                        } else {
+                                            // Incoming peer does NOT own the UTXO — they are
+                                            // the attacker.
+                                            static THEFT_WARN_TIMES: std::sync::OnceLock<
+                                                dashmap::DashMap<String, std::time::Instant>,
+                                            > = std::sync::OnceLock::new();
+                                            let warn_map =
+                                                THEFT_WARN_TIMES.get_or_init(dashmap::DashMap::new);
+                                            let should_warn = warn_map
+                                                .get(&peer_ip)
+                                                .map(|t| t.elapsed().as_secs() >= 600)
+                                                .unwrap_or(true);
+                                            if should_warn {
+                                                warn_map.insert(
+                                                    peer_ip.clone(),
+                                                    std::time::Instant::now(),
+                                                );
+                                                warn!(
                                                 "🚨 [{}] COLLATERAL THEFT ATTEMPT: {} tried to claim \
                                                  collateral {} owned by {} (on-chain: {})",
                                                 self.direction, peer_ip, outpoint,
                                                 info.masternode_address, utxo.address
                                             );
-                                        }
-                                        if let Some(blacklist) = &context.blacklist {
-                                            if let Ok(ip) = peer_ip.parse::<std::net::IpAddr>() {
-                                                let mut bl = blacklist.write().await;
-                                                bl.add_temp_ban(
+                                            }
+                                            if let Some(blacklist) = &context.blacklist {
+                                                if let Ok(ip) = peer_ip.parse::<std::net::IpAddr>()
+                                                {
+                                                    let mut bl = blacklist.write().await;
+                                                    bl.add_temp_ban(
                                                     ip,
                                                     std::time::Duration::from_secs(86400),
                                                     &format!(
@@ -2957,60 +2962,60 @@ impl MessageHandler {
                                                         outpoint, info.masternode_address
                                                     ),
                                                 );
+                                                }
                                             }
+                                            return Ok(None);
                                         }
-                                        return Ok(None);
                                     }
                                 }
                             }
+                            debug!(
+                                "✅ [{}] Collateral verified for {:?} masternode {} ({} TIME)",
+                                self.direction,
+                                tier,
+                                peer_ip,
+                                utxo.value as f64 / 100_000_000.0
+                            );
                         }
-                        debug!(
-                            "✅ [{}] Collateral verified for {:?} masternode {} ({} TIME)",
-                            self.direction,
-                            tier,
-                            peer_ip,
-                            utxo.value as f64 / 100_000_000.0
-                        );
-                    }
-                    Err(_) => {
-                        warn!(
+                        Err(_) => {
+                            warn!(
                             "❌ [{}] Rejecting {:?} masternode from {} — collateral UTXO not found on-chain",
                             self.direction, tier, peer_ip
                         );
-                        return Ok(None);
+                            return Ok(None);
+                        }
                     }
-                }
 
-                // Lock the collateral
-                let lock_height = context.blockchain.get_height();
-                if let Err(e) = utxo_manager.lock_collateral(
-                    outpoint.clone(),
-                    peer_ip.clone(),
-                    lock_height,
-                    tier.collateral(),
-                ) {
-                    if matches!(e, crate::utxo_manager::UtxoError::LockedAsCollateral) {
-                        // Already locked (e.g., rebuilt on startup or peer reconnected) — this is fine
-                        tracing::debug!(
-                            "🔒 [{}] Collateral for {} already locked — proceeding",
-                            self.direction,
-                            peer_ip
-                        );
-                    } else {
-                        warn!(
+                    // Lock the collateral
+                    let lock_height = context.blockchain.get_height();
+                    if let Err(e) = utxo_manager.lock_collateral(
+                        outpoint.clone(),
+                        peer_ip.clone(),
+                        lock_height,
+                        tier.collateral(),
+                    ) {
+                        if matches!(e, crate::utxo_manager::UtxoError::LockedAsCollateral) {
+                            // Already locked (e.g., rebuilt on startup or peer reconnected) — this is fine
+                            tracing::debug!(
+                                "🔒 [{}] Collateral for {} already locked — proceeding",
+                                self.direction,
+                                peer_ip
+                            );
+                        } else {
+                            warn!(
                             "❌ [{}] Rejecting {:?} masternode from {} — failed to lock collateral: {:?}",
                             self.direction, tier, peer_ip, e
                         );
-                        return Ok(None);
+                            return Ok(None);
+                        }
                     }
+                } else {
+                    warn!(
+                        "⚠️ [{}] Cannot verify collateral for {} — no UTXO manager available",
+                        self.direction, peer_ip
+                    );
+                    return Ok(None);
                 }
-            } else {
-                warn!(
-                    "⚠️ [{}] Cannot verify collateral for {} — no UTXO manager available",
-                    self.direction, peer_ip
-                );
-                return Ok(None);
-            }
             } else {
                 info!(
                     "⏳ [{}] Accepting {:?} masternode {} provisionally (height {} — syncing, collateral check deferred)",
@@ -3901,7 +3906,10 @@ impl MessageHandler {
         //   • peers already permanently incompatible (genesis mismatch known — log once, done)
         //   • peers in the 5-minute cooldown after a timeout (old-code nodes that never respond)
         //   • peers with a concurrent check already in-flight (claim_genesis_check is atomic)
-        if !context.peer_registry.is_genesis_confirmed(&self.peer_ip).await
+        if !context
+            .peer_registry
+            .is_genesis_confirmed(&self.peer_ip)
+            .await
             && !context.peer_registry.is_incompatible(&self.peer_ip).await
             && context.peer_registry.claim_genesis_check(&self.peer_ip)
         {
@@ -4217,15 +4225,26 @@ impl MessageHandler {
                     tokio::spawn(async move {
                         if let Err(e) = blockchain.handle_fork(blocks, peer_ip.clone()).await {
                             warn!("Fork resolution with new blocks failed: {}", e);
-                            if e.contains("unique reward recipient") || e.contains("reward-hijacking") {
+                            if e.contains("unique reward recipient")
+                                || e.contains("reward-hijacking")
+                            {
                                 error!("🚨 Reorg revealed REWARD-HIJACKING chain from {} — PERMANENTLY BANNING: {}", peer_ip, e);
                                 if let Some(bl) = &blacklist_bg {
                                     let bare = peer_ip.split(':').next().unwrap_or(&peer_ip);
                                     if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-                                        bl.write().await.add_permanent_ban(ip, &format!("Reward-hijacking reorg chain: {}", e));
+                                        bl.write().await.add_permanent_ban(
+                                            ip,
+                                            &format!("Reward-hijacking reorg chain: {}", e),
+                                        );
                                     }
                                 }
-                                peer_registry_bg.mark_incompatible(&peer_ip, &format!("Reward-hijacking reorg chain: {}", e), true).await;
+                                peer_registry_bg
+                                    .mark_incompatible(
+                                        &peer_ip,
+                                        &format!("Reward-hijacking reorg chain: {}", e),
+                                        true,
+                                    )
+                                    .await;
                             }
                         }
                     });
@@ -4339,7 +4358,8 @@ impl MessageHandler {
                     //    and are excluded from compare_chain_with_peers().
                     //  - new-chain nodes (correct timestamp, different hash) are handled
                     //    by replace_genesis_if_lower() convergence.
-                    if block.header.height == 1 && context.blockchain.get_height() == 0
+                    if block.header.height == 1
+                        && context.blockchain.get_height() == 0
                         && e.contains("prev_hash")
                     {
                         info!(
@@ -4347,7 +4367,9 @@ impl MessageHandler {
                              to determine compatibility",
                             self.direction, self.peer_ip
                         );
-                        return Ok(Some(crate::network::message::NetworkMessage::RequestGenesis));
+                        return Ok(Some(
+                            crate::network::message::NetworkMessage::RequestGenesis,
+                        ));
                     }
 
                     // Track fork errors (for metrics/debugging)
@@ -4359,6 +4381,21 @@ impl MessageHandler {
                         "🔀 [{}] Fork detected with peer {} at height {}: {}",
                         self.direction, self.peer_ip, block.header.height, e
                     );
+
+                    // Only engage fork resolution with genesis-confirmed peers.
+                    // Old-code nodes that do not respond to GetBlockHash(0) are never
+                    // genesis-confirmed, so they cannot trigger endless reorg loops.
+                    if !context
+                        .peer_registry
+                        .is_genesis_confirmed(&self.peer_ip)
+                        .await
+                    {
+                        warn!(
+                            "🚫 [{}] Skipping fork resolution with {} — peer not genesis-confirmed (likely old code)",
+                            self.direction, self.peer_ip
+                        );
+                        break;
+                    }
 
                     // Trigger immediate fork resolution check
                     info!(
@@ -4377,15 +4414,26 @@ impl MessageHandler {
                     tokio::spawn(async move {
                         if let Err(e) = blockchain.handle_fork(fork_blocks, peer_ip.clone()).await {
                             warn!("Fork resolution failed: {}", e);
-                            if e.contains("unique reward recipient") || e.contains("reward-hijacking") {
+                            if e.contains("unique reward recipient")
+                                || e.contains("reward-hijacking")
+                            {
                                 error!("🚨 Reorg revealed REWARD-HIJACKING chain from {} — PERMANENTLY BANNING: {}", peer_ip, e);
                                 if let Some(bl) = &blacklist_bg {
                                     let bare = peer_ip.split(':').next().unwrap_or(&peer_ip);
                                     if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-                                        bl.write().await.add_permanent_ban(ip, &format!("Reward-hijacking reorg chain: {}", e));
+                                        bl.write().await.add_permanent_ban(
+                                            ip,
+                                            &format!("Reward-hijacking reorg chain: {}", e),
+                                        );
                                     }
                                 }
-                                peer_registry_bg.mark_incompatible(&peer_ip, &format!("Reward-hijacking reorg chain: {}", e), true).await;
+                                peer_registry_bg
+                                    .mark_incompatible(
+                                        &peer_ip,
+                                        &format!("Reward-hijacking reorg chain: {}", e),
+                                        true,
+                                    )
+                                    .await;
                             }
                         }
                     });
@@ -4417,7 +4465,10 @@ impl MessageHandler {
                             .peer_registry
                             .mark_incompatible(
                                 &self.peer_ip,
-                                &format!("Bad block {} reward (bootstrap race): {}", block_height, e),
+                                &format!(
+                                    "Bad block {} reward (bootstrap race): {}",
+                                    block_height, e
+                                ),
                                 false, // NOT permanent — peer can reconnect after resetting
                             )
                             .await;
@@ -4428,8 +4479,7 @@ impl MessageHandler {
                             self.direction, block_height, self.peer_ip, e
                         );
                         if let Some(blacklist) = &context.blacklist {
-                            let bare_ip =
-                                self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
+                            let bare_ip = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
                             if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
                                 let mut bl = blacklist.write().await;
                                 bl.add_permanent_ban(

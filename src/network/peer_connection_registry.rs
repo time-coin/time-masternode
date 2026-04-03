@@ -397,7 +397,13 @@ impl PeerConnectionRegistry {
                     "🚫 Peer {} has no genesis block - treating as incompatible",
                     ip_only
                 );
-                // Peer has no genesis — cannot be on our chain; exclude from fork resolution
+                // Peer has no genesis — cannot be on our chain; exclude from sync/fork decisions
+                self.mark_incompatible(
+                    peer_ip,
+                    "No genesis block (old code or empty node)",
+                    false,
+                )
+                .await;
                 false
             }
             Ok(other) => {
@@ -406,7 +412,16 @@ impl PeerConnectionRegistry {
                     ip_only,
                     other.message_type()
                 );
-                // Unexpected response — cannot confirm compatibility; exclude from fork resolution
+                // Unexpected response — likely old code; exclude from sync/fork decisions
+                self.mark_incompatible(
+                    peer_ip,
+                    &format!(
+                        "Unexpected genesis response: {}",
+                        other.message_type()
+                    ),
+                    false,
+                )
+                .await;
                 false
             }
             Err(e) => {
@@ -415,9 +430,13 @@ impl PeerConnectionRegistry {
                     ip_only,
                     e
                 );
-                // Timeout or channel error — cannot confirm compatibility; exclude from fork resolution
-                // Do NOT assume compatible: an unresponsive peer on a different chain causes
-                // endless reorg loops (genesis mismatch detected only after downloading all blocks).
+                // Timeout or channel error — likely running old code that does not handle
+                // GetBlockHash(0).  Mark temporarily incompatible so they are excluded from
+                // get_compatible_peers(), which drives both sync-coordinator height consensus
+                // and finality-lock peer-support counts.  They will be re-checked after the
+                // INCOMPATIBLE_RECHECK_SECS cooldown.
+                self.mark_incompatible(peer_ip, "Genesis check timeout (likely old code)", false)
+                    .await;
                 false
             }
         }
