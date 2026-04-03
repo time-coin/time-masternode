@@ -771,6 +771,7 @@ async fn main() {
             .filter(|mn| mn.tier != types::MasternodeTier::Free)
             .and_then(|mn| mn.collateral_outpoint.clone());
 
+        // Primary path: compare saved outpoint vs current config.
         if let Some(prev) = utxo_mgr.load_local_collateral_outpoint() {
             let should_release = match &current_local_outpoint {
                 Some(cur) => cur != &prev, // collateral changed
@@ -778,6 +779,22 @@ async fn main() {
             };
             if should_release {
                 utxo_mgr.release_stale_local_collateral(&prev);
+            }
+        }
+
+        // Fallback: if __local_collateral_outpoint__ was never saved (first run,
+        // sled was wiped, or daemon was killed before the save), the branch above
+        // is a no-op and any lock that was persisted by a previous run will linger.
+        // Walk every loaded collateral lock and release any that don't match the
+        // current config so they don't show as "locked" in the dashboard.
+        let all_locked = utxo_mgr.list_locked_collaterals();
+        for lc in all_locked {
+            let matches_current = current_local_outpoint
+                .as_ref()
+                .map(|cur| cur == &lc.outpoint)
+                .unwrap_or(false);
+            if !matches_current {
+                utxo_mgr.release_stale_local_collateral(&lc.outpoint);
             }
         }
 
