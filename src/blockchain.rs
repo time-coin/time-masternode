@@ -9481,9 +9481,16 @@ impl Blockchain {
                     // by BFT voting during degraded connectivity).
                     // Auto-lower the finality lock to the common ancestor.
                     //
-                    // Peer counting: only peers with tip_h > our_height are counted.
-                    // Peers at our height cannot tell us which chain is canonical —
-                    // they may also be stuck on the same minority fork.
+                    // Peer counting:
+                    //  • total_ahead: peers with tip_h > our_height (they've moved
+                    //    past us). Peers at our height may be on the same minority
+                    //    fork and cannot vote either way — excluded from denominator.
+                    //  • supporting: peers whose tip exactly matches the alternative
+                    //    chain (tip_h == peer_tip_height && hash matches) OR who are
+                    //    strictly beyond it (tip_h > peer_tip_height), implying they
+                    //    validated and extended that chain. Peers above our height but
+                    //    below peer_tip_height are NOT counted — they could be on a
+                    //    third chain that diverges before the alternative tip.
                     //
                     // Two override paths:
                     //  A) Normal supermajority: ≥ MIN_PEERS_FINALITY_OVERRIDE ahead
@@ -9511,11 +9518,24 @@ impl Blockchain {
                                 let mut supporting = 0usize;
                                 let mut total_ahead = 0usize;
                                 for pip in &compatible_peers {
-                                    if let Some((tip_h, _)) =
+                                    if let Some((tip_h, tip_hash)) =
                                         registry.get_peer_chain_tip(pip).await
                                     {
+                                        // total_ahead: peers strictly above our height.
+                                        // Excludes peers at our height who may be on the
+                                        // same minority fork and cannot vote either way.
                                         if tip_h > our_height {
                                             total_ahead += 1;
+                                        }
+                                        // supporting: peers specifically on the alternative
+                                        // chain — exact tip match, or further ahead of it
+                                        // (implies they built valid blocks on top of it).
+                                        // Peers above our height but below the alternative
+                                        // tip are NOT counted; their chain may diverge.
+                                        if (tip_h == peer_tip_height
+                                            && tip_hash == peer_tip_hash)
+                                            || tip_h > peer_tip_height
+                                        {
                                             supporting += 1;
                                         }
                                     }
