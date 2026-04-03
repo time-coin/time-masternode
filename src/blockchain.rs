@@ -6326,19 +6326,28 @@ impl Blockchain {
 
         if unknown_non_producer_paid > 0 {
             // Some recipients have deregistered — we can only verify the total
-            // non-producer payout is within the overall tier-pool budget.
+            // non-producer payout is within the block reward.
+            //
+            // NOTE: We intentionally use block.header.block_reward (already validated
+            // to equal BLOCK_REWARD - treasury + fees) as the ceiling here rather than
+            // total_tier_budget (65 TIME).  The old 65 TIME cap was wrong for blocks
+            // produced in "all-Free" conditions (network degradation, few paid-tier nodes
+            // online): in those blocks the full 95 TIME is distributed among Free-tier
+            // nodes, so the non-producer total legitimately exceeds the tier budget.
+            // The per-recipient GOLD_POOL_SATOSHIS cap (line above) still limits any
+            // single unknown payout to 25 TIME, preserving the key sybil bound.
             let total_non_producer_paid: u64 =
                 tier_paid.values().sum::<u64>() + unknown_non_producer_paid;
-            if total_non_producer_paid > total_tier_budget {
+            if total_non_producer_paid > block.header.block_reward {
                 return Err(format!(
-                    "Block {} total non-producer payout {} exceeds total tier budget {}",
-                    block.header.height, total_non_producer_paid, total_tier_budget
+                    "Block {} total non-producer payout {} exceeds block reward {}",
+                    block.header.height, total_non_producer_paid, block.header.block_reward
                 ));
             }
             // Keep rolled_up_to_producer=0 for the MIN check (we don't know actual rollup,
             // so only require producer received base PRODUCER_REWARD).
-            // Override MAX check to allow up to full tier budget rolled up.
-            rolled_up_to_producer_max_override = Some(total_tier_budget);
+            // Override MAX check to allow up to full block reward rolled up.
+            rolled_up_to_producer_max_override = Some(block.header.block_reward);
             tracing::debug!(
                 "Block {} has {} satoshis paid to unknown (deregistered) recipients — \
                  skipping strict per-tier pool verification, using loose producer max",
