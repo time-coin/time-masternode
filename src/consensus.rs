@@ -2547,6 +2547,15 @@ impl ConsensusEngine {
             ));
         }
 
+        // 1b. Special no-value transactions (MasternodeReg, CollateralUnlock) carry no
+        // inputs or outputs — they are control messages, not value transfers.  Skip all
+        // economic checks (input/output balance, dust, minimum send, fee) for these.
+        // Structural / signature validity is enforced in blockchain.rs when the containing
+        // block is applied, so we just accept them here without further checks.
+        if tx.is_masternode_reg() || tx.is_collateral_unlock() {
+            return Ok(0);
+        }
+
         // 2. Check inputs exist and are unspent (or locked/finalized by this tx)
         for input in &tx.inputs {
             // Check if UTXO is locked as masternode collateral (separate from UTXO state)
