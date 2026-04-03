@@ -60,6 +60,7 @@ Commands:
   UTXO / Collateral
     listlockedutxos        List all locked UTXOs
     unlockutxo             Unlock a specific UTXO (txid vout)
+    unlockcollateral       Unlock a stuck masternode collateral UTXO (txid vout)
     unlockorphanedutxos    Unlock UTXOs locked by non-existent transactions
     forceunlockall         Force-unlock ALL UTXOs (recovery only)
     clearstuktransactions  Clear stuck/pending transactions
@@ -505,6 +506,16 @@ enum Commands {
         vout: u32,
     },
 
+    /// Force-unlock a masternode collateral UTXO stuck in the collateral lock map.
+    /// Use when a UTXO shows as "locked" in the dashboard but `listlockedutxos` shows nothing.
+    #[command(next_help_heading = "Utility")]
+    UnlockCollateral {
+        /// Transaction ID of the collateral UTXO
+        txid: String,
+        /// Output index of the collateral UTXO
+        vout: u32,
+    },
+
     /// Scan and unlock orphaned UTXOs (locked by non-existent transactions)
     #[command(next_help_heading = "Utility")]
     UnlockOrphanedUTXOs,
@@ -698,6 +709,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::CleanupLockedUTXOs => ("cleanuplockedutxos", json!([])),
         Commands::ListLockedUTXOs => ("listlockedutxos", json!([])),
         Commands::UnlockUTXO { txid, vout } => ("unlockutxo", json!([txid, vout])),
+        Commands::UnlockCollateral { txid, vout } => ("unlockcollateral", json!([txid, vout])),
         Commands::UnlockOrphanedUTXOs => ("unlockorphanedutxos", json!([])),
         Commands::ForceUnlockAll => ("forceunlockall", json!([])),
         Commands::ClearStuckTransactions => ("clearstucktransactions", json!([])),
@@ -1281,6 +1293,22 @@ fn print_human_readable(
                 }
             } else {
                 println!("❌ Failed to unlock: {}", message);
+            }
+        }
+        Commands::UnlockCollateral { .. } => {
+            let unlocked = result
+                .get("unlocked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let message = result
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Done");
+
+            if unlocked {
+                println!("✓ {}", message);
+            } else {
+                println!("❌ Failed to unlock collateral: {}", message);
             }
         }
         Commands::UnlockOrphanedUTXOs => {

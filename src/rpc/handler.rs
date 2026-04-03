@@ -190,6 +190,7 @@ impl RpcHandler {
             "masternodelist" => self.masternode_list(&params_array).await,
             "masternodestatus" => self.masternode_status().await,
             "listlockedcollaterals" => self.list_locked_collaterals().await,
+            "unlockcollateral" => self.unlock_collateral_rpc(&params_array).await,
             "getconsensusinfo" => self.get_consensus_info().await,
             "gettimevotestatus" => self.get_timevote_status().await,
             "validateaddress" => self.validate_address(&params_array).await,
@@ -3960,6 +3961,62 @@ impl RpcHandler {
             "count": collaterals.len(),
             "collaterals": collaterals
         }))
+    }
+
+    /// Force-unlock a masternode collateral UTXO that is stuck in the locked_collaterals map.
+    /// Use this when a UTXO shows as "locked" in the dashboard but `listlockedutxos` shows nothing
+    /// (the two mechanisms are separate: UTXOState::Locked vs collateral locks).
+    /// Parameters: [txid, vout]
+    async fn unlock_collateral_rpc(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let txid_str = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected txid".to_string(),
+            })?;
+
+        let vout = params
+            .get(1)
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected vout".to_string(),
+            })? as u32;
+
+        let txid_bytes = hex::decode(txid_str).map_err(|_| RpcError {
+            code: -8,
+            message: "Invalid txid format".to_string(),
+        })?;
+
+        if txid_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -8,
+                message: "Invalid txid length".to_string(),
+            });
+        }
+
+        let mut txid = [0u8; 32];
+        txid.copy_from_slice(&txid_bytes);
+
+        let outpoint = crate::types::OutPoint { txid, vout };
+
+        match self.utxo_manager.unlock_collateral(&outpoint) {
+            Ok(()) => Ok(json!({
+                "unlocked": true,
+                "txid": txid_str,
+                "vout": vout,
+                "message": "Collateral UTXO unlocked successfully"
+            })),
+            Err(crate::utxo_manager::UtxoError::NotFound) => Err(RpcError {
+                code: -8,
+                message: "UTXO is not collateral-locked (not found in collateral lock map). Use listlockedcollaterals to see what is locked.".to_string(),
+            }),
+            Err(e) => Err(RpcError {
+                code: -8,
+                message: format!("Failed to unlock collateral: {:?}", e),
+            }),
+        }
     }
 
     /// Full reindex: clear UTXOs and rebuild from block 0, plus rebuild tx index.
