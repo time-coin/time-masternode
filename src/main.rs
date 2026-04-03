@@ -765,11 +765,16 @@ async fn main() {
     // Release stale local collateral if the config changed (e.g., user commented
     // out their collateral line and restarted).  Compare the previously saved
     // outpoint with the current config so the UTXO becomes spendable again.
-    {
+    //
+    // stale_local_outpoints is kept alive so rebuild_collateral_locks (below) can
+    // exclude these outpoints — otherwise the old registry entry re-locks them.
+    let stale_local_outpoints: std::collections::HashSet<crate::types::OutPoint> = {
         let current_local_outpoint = masternode_info
             .as_ref()
             .filter(|mn| mn.tier != types::MasternodeTier::Free)
             .and_then(|mn| mn.collateral_outpoint.clone());
+
+        let mut stale = std::collections::HashSet::new();
 
         // Primary path: compare saved outpoint vs current config.
         if let Some(prev) = utxo_mgr.load_local_collateral_outpoint() {
@@ -779,6 +784,7 @@ async fn main() {
             };
             if should_release {
                 utxo_mgr.release_stale_local_collateral(&prev);
+                stale.insert(prev);
             }
         }
 
@@ -795,12 +801,15 @@ async fn main() {
                 .unwrap_or(false);
             if !matches_current {
                 utxo_mgr.release_stale_local_collateral(&lc.outpoint);
+                stale.insert(lc.outpoint);
             }
         }
 
         // Persist the current config for next restart
         utxo_mgr.save_local_collateral_outpoint(current_local_outpoint.as_ref());
-    }
+
+        stale
+    };
 
     // Auto-detect masternode tier from collateral UTXO value
     if let Some(ref mut mn) = masternode_info {
@@ -1257,6 +1266,13 @@ async fn main() {
                     let entries: Vec<_> = all_masternodes
                         .iter()
                         .filter(|info| info.masternode.address != mn.address) // Skip local (already locked above)
+                        .filter(|info| {
+                            // Don't re-lock outpoints we just released as stale —
+                            // old registry entries can otherwise undo the stale-release.
+                            !info.masternode.collateral_outpoint.as_ref()
+                                .map(|op| stale_local_outpoints.contains(op))
+                                .unwrap_or(false)
+                        })
                         .filter_map(|info| {
                             info.masternode.collateral_outpoint.as_ref().map(|op| {
                                 (
@@ -1595,6 +1611,11 @@ async fn main() {
         let lock_height = blockchain.get_height();
         let entries: Vec<_> = all_masternodes
             .iter()
+            .filter(|info| {
+                !info.masternode.collateral_outpoint.as_ref()
+                    .map(|op| stale_local_outpoints.contains(op))
+                    .unwrap_or(false)
+            })
             .filter_map(|info| {
                 info.masternode.collateral_outpoint.as_ref().map(|op| {
                     (
