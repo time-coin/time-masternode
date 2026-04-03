@@ -2880,45 +2880,6 @@ impl MessageHandler {
                             );
                             return Ok(None);
                         }
-
-                        // Verify the announcing peer owns the collateral UTXO.
-                        // Derive a TIME address from the peer's public key and compare
-                        // it to the on-chain UTXO address.  This must pass for every
-                        // announcement, not just conflict resolution, so that a node
-                        // cannot claim a UTXO it doesn't hold the key for.
-                        let network = context.blockchain.network_type();
-                        let peer_time_addr = crate::address::Address::from_public_key(
-                            public_key.as_bytes(),
-                            network,
-                        )
-                        .as_string();
-                        if peer_time_addr != utxo.address {
-                            warn!(
-                                "🚨 [{}] COLLATERAL OWNERSHIP VIOLATION: {} claimed collateral {} \
-                                 but UTXO belongs to {} (peer key maps to {})",
-                                self.direction, peer_ip, outpoint, utxo.address, peer_time_addr
-                            );
-                            if let Some(blacklist) = &context.blacklist {
-                                if let Ok(ip) = peer_ip
-                                    .split(':')
-                                    .next()
-                                    .unwrap_or(&peer_ip)
-                                    .parse::<std::net::IpAddr>()
-                                {
-                                    let mut bl = blacklist.write().await;
-                                    bl.add_temp_ban(
-                                        ip,
-                                        std::time::Duration::from_secs(86400),
-                                        &format!(
-                                            "Collateral ownership violation: claimed {} owned by {}",
-                                            outpoint, utxo.address
-                                        ),
-                                    );
-                                }
-                            }
-                            return Ok(None);
-                        }
-
                         if utxo_manager.is_collateral_locked(&outpoint) {
                             let existing = utxo_manager.get_locked_collateral(&outpoint);
                             if let Some(ref info) = existing {
