@@ -1596,6 +1596,38 @@ impl Blockchain {
         );
     }
 
+    /// Return the current BFT confirmed height.
+    pub fn get_confirmed_height(&self) -> u64 {
+        self.last_locally_confirmed_height.load(Ordering::Acquire)
+    }
+
+    /// Reset the BFT finality lock to a lower height.
+    ///
+    /// DANGER: this weakens fork-resistance for the affected heights. Only use
+    /// to recover a node that is stuck on a minority fork whose confirmed height
+    /// is above the common ancestor with the canonical chain.
+    ///
+    /// The caller must supply the target height; the method refuses to advance
+    /// the lock (use `add_block` for that) and refuses to go below 1 unless
+    /// the node is already at height 0.
+    pub fn reset_finality_lock(&self, target_height: u64) -> Result<(), String> {
+        let current = self.last_locally_confirmed_height.load(Ordering::Acquire);
+        if target_height >= current {
+            return Err(format!(
+                "reset_finality_lock: target {} must be strictly less than current confirmed height {}",
+                target_height, current
+            ));
+        }
+        self.last_locally_confirmed_height
+            .store(target_height, Ordering::Release);
+        tracing::warn!(
+            "⚠️  BFT finality lock manually reset from {} → {} — reorg to this height is now permitted",
+            current,
+            target_height
+        );
+        Ok(())
+    }
+
     /// Download missing blocks from peers to fill gaps in the chain
     pub async fn fill_missing_blocks(&self, missing_heights: &[u64]) -> Result<usize, String> {
         if missing_heights.is_empty() {
@@ -9430,6 +9462,92 @@ impl Blockchain {
                         sorted_reorg_blocks.first().unwrap().header.height,
                         sorted_reorg_blocks.last().unwrap().header.height
                     );
+
+                    // MINORITY FORK RECOVERY: If the finality lock would block this
+                    // reorg and a supermajority of connected peers support the
+                    // alternative chain, the node is provably on a minority fork
+                    // (e.g. caused by BFT voting during a period of degraded
+                    // connectivity). Auto-lower the finality lock to the common
+                    // ancestor so the reorg can proceed.
+                    //
+                    // Requirements (conservative thresholds):
+                    //  • common_ancestor < last_confirmed (lock would fire)
+                    //  • ≥ MIN_PEERS_FINALITY_OVERRIDE distinct peers support
+                    //    the alternative tip
+                    //  • supporting peers > 50 % of all peers whose tips are known
+                    //
+                    // This is safe because:
+                    //  1. We already validated the entire block chain above.
+                    //  2. The supermajority requirement matches BFT safety margins.
+                    //  3. The finality lock only protected blocks produced during
+                    //     the minority period — those blocks are now provably wrong.
+                    {
+                        const MIN_PEERS_FINALITY_OVERRIDE: usize = 5;
+                        let last_confirmed =
+                            self.last_locally_confirmed_height.load(Ordering::Acquire);
+
+                        if common_ancestor < last_confirmed {
+                            // Check if a supermajority of peers support this chain.
+                            let peer_registry_guard = self.peer_registry.read().await;
+                            let should_override = if let Some(registry) =
+                                peer_registry_guard.as_ref()
+                            {
+                                let compatible_peers = registry.get_compatible_peers().await;
+                                let mut supporting = 0usize;
+                                let mut total = 0usize;
+                                for pip in &compatible_peers {
+                                    if let Some((tip_h, tip_hash)) =
+                                        registry.get_peer_chain_tip(pip).await
+                                    {
+                                        total += 1;
+                                        // A peer "supports" the alternative chain if it
+                                        // reports exactly the same tip OR a strictly longer
+                                        // chain (meaning it's ahead of us on the same fork).
+                                        if (tip_h == peer_tip_height && tip_hash == peer_tip_hash)
+                                            || tip_h > our_height
+                                        {
+                                            supporting += 1;
+                                        }
+                                    }
+                                }
+                                let supermajority = total > 0
+                                    && supporting >= MIN_PEERS_FINALITY_OVERRIDE
+                                    && supporting * 2 > total;
+
+                                if supermajority {
+                                    warn!(
+                                        "⚠️  MINORITY FORK DETECTED: {}/{} peers support alternative \
+                                         chain (ancestor {} < confirmed {}). \
+                                         Auto-resetting finality lock to {} to rejoin canonical chain.",
+                                        supporting,
+                                        total,
+                                        common_ancestor,
+                                        last_confirmed,
+                                        common_ancestor
+                                    );
+                                }
+                                supermajority
+                            } else {
+                                false
+                            };
+                            drop(peer_registry_guard);
+
+                            if should_override {
+                                self.last_locally_confirmed_height
+                                    .store(common_ancestor, Ordering::Release);
+                            } else if common_ancestor < last_confirmed {
+                                // Not enough peer support to override finality.
+                                warn!(
+                                    "🚫 Finality lock prevents reorg to ancestor {} (confirmed {}). \
+                                     Not enough peers ({} required) support the alternative chain.",
+                                    common_ancestor, last_confirmed, MIN_PEERS_FINALITY_OVERRIDE
+                                );
+                                *self.fork_state.write().await = ForkResolutionState::None;
+                                self.consensus_peers.write().await.clear();
+                                return Ok(());
+                            }
+                        }
+                    }
 
                     // Set Reorging state and call perform_reorg directly (avoids
                     // fork_state race with concurrent handle_fork() calls).

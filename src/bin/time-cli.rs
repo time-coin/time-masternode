@@ -80,6 +80,7 @@ Commands:
     getinfo                Get general node information
     reindextransactions    Rebuild transaction index
     reindex                Full reindex: rebuild UTXOs + tx index from block 0
+    resetfinalitylock      [DANGER] Reset BFT finality lock to recover a node stuck on a minority fork
 
     help                   Print this message or the help of the given subcommand(s)
 
@@ -489,6 +490,13 @@ enum Commands {
     #[command(next_help_heading = "Utility")]
     Reindex,
 
+    /// Reset the BFT finality lock to a lower height (DANGER: only use to recover a stuck fork node)
+    #[command(next_help_heading = "Utility")]
+    ResetFinalityLock {
+        /// Target height to reset the finality lock to (must be below current confirmed height)
+        height: u64,
+    },
+
     /// Cleanup expired UTXO locks (older than 10 minutes)
     #[command(next_help_heading = "Utility")]
     CleanupLockedUTXOs,
@@ -706,6 +714,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::GetInfo => ("getinfo", json!([])),
         Commands::ReindexTransactions => ("reindextransactions", json!([])),
         Commands::Reindex => ("reindex", json!([])),
+        Commands::ResetFinalityLock { height } => ("resetfinalitylock", json!([height])),
         Commands::CleanupLockedUTXOs => ("cleanuplockedutxos", json!([])),
         Commands::ListLockedUTXOs => ("listlockedutxos", json!([])),
         Commands::UnlockUTXO { txid, vout } => ("unlockutxo", json!([txid, vout])),
@@ -1309,6 +1318,30 @@ fn print_human_readable(
                 println!("✓ {}", message);
             } else {
                 println!("❌ Failed to unlock collateral: {}", message);
+            }
+        }
+        Commands::ResetFinalityLock { .. } => {
+            let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            let message = result
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Done");
+            let prev = result
+                .get("previous_confirmed_height")
+                .and_then(|v| v.as_u64());
+            let new = result
+                .get("new_confirmed_height")
+                .and_then(|v| v.as_u64());
+
+            if status == "ok" {
+                if let (Some(p), Some(n)) = (prev, new) {
+                    println!("✓ Finality lock reset: {} → {}", p, n);
+                } else {
+                    println!("✓ {}", message);
+                }
+                println!("  {}", message);
+            } else {
+                println!("❌ Failed to reset finality lock: {}", message);
             }
         }
         Commands::UnlockOrphanedUTXOs => {

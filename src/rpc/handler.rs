@@ -216,6 +216,7 @@ impl RpcHandler {
             "listtransactionsmulti" => self.list_transactions_multi(&params_array).await,
             "reindextransactions" => self.reindex_transactions().await,
             "reindex" => self.reindex_full().await,
+            "resetfinalitylock" => self.reset_finality_lock_rpc(&params_array).await,
             "gettxindexstatus" => self.get_tx_index_status().await,
             "cleanuplockedutxos" => self.cleanup_locked_utxos().await,
             "listlockedutxos" => self.list_locked_utxos().await,
@@ -4095,6 +4096,44 @@ impl RpcHandler {
             "utxo_count": utxos,
             "tx_index_rebuilt": tx_indexed
         }))
+    }
+
+    /// Reset the BFT finality lock to a lower height so a stuck node can reorg
+    /// back to the canonical chain.
+    ///
+    /// Usage: `resetfinalitylock <height>`
+    ///
+    /// The target height must be strictly below the current confirmed height.
+    /// After the reset the node's fork-resolution loop will automatically
+    /// detect the longer canonical chain from peers and reorg to it.
+    async fn reset_finality_lock_rpc(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let target_height = params
+            .first()
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| RpcError {
+                code: -1,
+                message: "Usage: resetfinalitylock <height>".to_string(),
+            })?;
+
+        let current_confirmed = self.blockchain.get_confirmed_height();
+
+        match self.blockchain.reset_finality_lock(target_height) {
+            Ok(()) => Ok(json!({
+                "status": "ok",
+                "previous_confirmed_height": current_confirmed,
+                "new_confirmed_height": target_height,
+                "message": format!(
+                    "Finality lock reset from {} to {}. \
+                     The node will now accept reorgs back to height {}. \
+                     Fork resolution will rerun automatically.",
+                    current_confirmed, target_height, target_height
+                )
+            })),
+            Err(e) => Err(RpcError {
+                code: -8,
+                message: e,
+            }),
+        }
     }
 
     async fn reindex_transactions(&self) -> Result<Value, RpcError> {
