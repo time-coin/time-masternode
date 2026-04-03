@@ -4001,6 +4001,26 @@ impl RpcHandler {
 
         let outpoint = crate::types::OutPoint { txid, vout };
 
+        // Verify the collateral belongs to this node before unlocking
+        let local_mn_address = self
+            .registry
+            .get_local_masternode()
+            .await
+            .map(|mn| mn.masternode.address);
+        if let Some(lc) = self.utxo_manager.get_locked_collateral(&outpoint) {
+            if let Some(ref local_addr) = local_mn_address {
+                if lc.masternode_address != *local_addr {
+                    return Err(RpcError {
+                        code: -8,
+                        message: format!(
+                            "Cannot unlock collateral owned by a different masternode ({})",
+                            lc.masternode_address
+                        ),
+                    });
+                }
+            }
+        }
+
         match self.utxo_manager.unlock_collateral(&outpoint) {
             Ok(()) => Ok(json!({
                 "unlocked": true,
@@ -4236,6 +4256,23 @@ impl RpcHandler {
         txid.copy_from_slice(&txid_bytes);
 
         let outpoint = crate::types::OutPoint { txid, vout };
+
+        // Verify the UTXO belongs to this wallet before unlocking
+        let local_wallet_address = match self.registry.get_local_masternode().await {
+            Some(mn) => Some(mn.masternode.wallet_address),
+            None => self.registry.get_local_wallet_address().await,
+        };
+        if let Ok(utxo) = self.utxo_manager.get_utxo(&outpoint).await {
+            if let Some(ref local_addr) = local_wallet_address {
+                if utxo.address != *local_addr {
+                    return Err(RpcError {
+                        code: -8,
+                        message: "Cannot unlock a UTXO that does not belong to this wallet"
+                            .to_string(),
+                    });
+                }
+            }
+        }
 
         // Check current state
         match self.utxo_manager.get_state(&outpoint) {
