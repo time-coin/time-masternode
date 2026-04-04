@@ -467,10 +467,6 @@ enum Commands {
         /// TIME address that will receive block rewards (your GUI wallet address)
         #[arg(long)]
         payout_address: String,
-        /// Hex-encoded Ed25519 public key of the masternode node (operator key).
-        /// Get this from `time-cli masternodestatus` → pubkey field, or `masternode genkey`.
-        #[arg(long)]
-        operator_pubkey: String,
         /// Path to the wallet file that owns the collateral UTXO.
         /// Defaults to the standard data-dir wallet.dat
         #[arg(long)]
@@ -718,7 +714,6 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         masternode_ip,
         port,
         payout_address,
-        operator_pubkey,
         wallet_path,
         wallet_password,
     } = &args.command
@@ -787,7 +782,6 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 payout_address: payout_address.clone(),
                 owner_pubkey: owner_pubkey_hex.clone(),
                 signature: signature_hex,
-                operator_pubkey: Some(operator_pubkey.clone()),
             }),
             encrypted_memo: None,
         };
@@ -823,7 +817,6 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             println!("   masternode:      {}:{}", masternode_ip, p2p_port);
             println!("   payout_address:  {}", payout_address);
             println!("   owner_pubkey:    {}", owner_pubkey_hex);
-            println!("   operator_pubkey: {}", operator_pubkey);
             println!("\nThe masternode will be recognized as the registered operator once");
             println!("the transaction is confirmed in the next block.");
         }

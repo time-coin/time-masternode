@@ -5766,7 +5766,6 @@ impl Blockchain {
                     payout_address,
                     owner_pubkey,
                     signature,
-                    operator_pubkey,
                 } => {
                     // Validate the registration
                     match self
@@ -5778,7 +5777,7 @@ impl Blockchain {
                             payout_address,
                             owner_pubkey,
                             signature,
-                            operator_pubkey.as_deref(),
+                            None,
                             &self.utxo_manager,
                         )
                         .await

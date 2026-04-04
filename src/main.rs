@@ -4762,7 +4762,7 @@ async fn main() {
 fn build_masternode_reg_tx(
     mn: &types::Masternode,
     wallet_key: &ed25519_dalek::SigningKey,
-    operator_key: Option<&ed25519_dalek::SigningKey>,
+    _operator_key: Option<&ed25519_dalek::SigningKey>,
     p2p_port: u16,
 ) -> Option<types::Transaction> {
     use ed25519_dalek::Signer;
@@ -4771,11 +4771,6 @@ fn build_masternode_reg_tx(
     let outpoint_str = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
     let owner_pubkey = wallet_key.verifying_key();
     let owner_pubkey_hex = hex::encode(owner_pubkey.as_bytes());
-
-    // Operator pubkey: use the dedicated operator key if provided, otherwise the owner key.
-    let operator_pubkey_hex: Option<String> = operator_key.map(|k| {
-        hex::encode(k.verifying_key().as_bytes())
-    });
 
     let message = {
         use sha2::{Digest, Sha256};
@@ -4801,7 +4796,6 @@ fn build_masternode_reg_tx(
             payout_address: mn.wallet_address.clone(),
             owner_pubkey: owner_pubkey_hex,
             signature: signature_hex,
-            operator_pubkey: operator_pubkey_hex,
         }),
         encrypted_memo: None,
     })
