@@ -2905,25 +2905,12 @@ impl MessageHandler {
                                             self.direction, squatter_ip, peer_ip,
                                             outpoint, utxo.address
                                         );
-                                            if let Some(blacklist) = &context.blacklist {
-                                                let squatter_bare = squatter_ip
-                                                    .split(':')
-                                                    .next()
-                                                    .unwrap_or(&squatter_ip);
-                                                if let Ok(ip) =
-                                                    squatter_bare.parse::<std::net::IpAddr>()
-                                                {
-                                                    let mut bl = blacklist.write().await;
-                                                    bl.add_temp_ban(
-                                                    ip,
-                                                    std::time::Duration::from_secs(86400),
-                                                    &format!(
-                                                        "Collateral squatting: falsely claimed {} owned by {}",
-                                                        outpoint, peer_ip
-                                                    ),
-                                                );
-                                                }
-                                            }
+                                            // Note: we do NOT ban the evicted party here.
+                                            // Handshake key ≠ wallet ownership key, so the P2P
+                                            // key → address comparison is not reliable enough to
+                                            // justify a ban. The on-chain MasternodeReg path
+                                            // (apply_masternode_reg) is the authoritative source
+                                            // for permanent bans.
                                             // Unlock so the legitimate owner can re-lock below
                                             let _ = utxo_manager.unlock_collateral(&outpoint);
                                         } else {
@@ -2950,20 +2937,14 @@ impl MessageHandler {
                                                 info.masternode_address, utxo.address
                                             );
                                             }
-                                            if let Some(blacklist) = &context.blacklist {
-                                                if let Ok(ip) = peer_ip.parse::<std::net::IpAddr>()
-                                                {
-                                                    let mut bl = blacklist.write().await;
-                                                    bl.add_temp_ban(
-                                                    ip,
-                                                    std::time::Duration::from_secs(86400),
-                                                    &format!(
-                                                        "Collateral theft attempt: tried to claim {} owned by {}",
-                                                        outpoint, info.masternode_address
-                                                    ),
-                                                );
-                                                }
-                                            }
+                                            // Note: we do NOT ban based on handshake key comparison.
+                                            // The P2P key presented in handshake is the node's
+                                            // network identity key, which is different from the
+                                            // wallet key that owns the collateral UTXO. A mismatch
+                                            // here is not reliable evidence of bad intent — it
+                                            // causes false positives for legitimate owners.
+                                            // Permanent bans are only issued via the on-chain
+                                            // MasternodeReg path which requires a real signature.
                                             return Ok(None);
                                         }
                                     }

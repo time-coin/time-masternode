@@ -949,6 +949,10 @@ impl PeerConnection {
                 Ok(())
             }
             Err(e) => {
+                if e.contains("is blacklisted") {
+                    // Blacklisted peer — signal the message loop to disconnect
+                    return Err(e);
+                }
                 debug!(
                     "⚠️ [{:?}] MessageHandler error for {} (may be normal): {}",
                     self.direction, self.peer_ip, e
@@ -1067,6 +1071,10 @@ impl PeerConnection {
                             let handle_result = self.handle_message_unified(message, &config, &handler).await;
 
                             if let Err(e) = handle_result {
+                                if e.contains("is blacklisted") {
+                                    warn!("🚫 [{:?}] Disconnecting blacklisted peer {}", self.direction, self.peer_ip);
+                                    break;
+                                }
                                 warn!("⚠️ [{:?}] Error handling message from {}: {}",
                                       self.direction, self.peer_ip, e);
                             }
