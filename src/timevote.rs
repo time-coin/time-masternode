@@ -195,6 +195,7 @@ impl TimeVoteHandler {
                                 script_pubkey: output.script_pubkey.clone(),
                                 address: String::from_utf8(output.script_pubkey.clone())
                                     .unwrap_or_default(),
+                            masternode_key: None,
                             };
 
                             let _ = self.utxo_manager.add_utxo(utxo).await;

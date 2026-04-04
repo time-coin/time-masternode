@@ -405,6 +405,7 @@ impl Blockchain {
             value: amount,
             script_pubkey: recipient.as_bytes().to_vec(),
             address: recipient.to_string(),
+            masternode_key: None,
         };
         self.utxo_manager
             .add_utxo(utxo)
@@ -1290,6 +1291,7 @@ impl Blockchain {
                 value: *amount,
                 script_pubkey: address.as_bytes().to_vec(),
                 address: address.clone(),
+                masternode_key: None,
             };
             match self.utxo_manager.add_utxo(utxo).await {
                 Ok(()) => tracing::info!(
@@ -1421,6 +1423,7 @@ impl Blockchain {
                 value: *amount,
                 script_pubkey: address.as_bytes().to_vec(),
                 address: address.clone(),
+                masternode_key: None,
             };
             let _ = self.utxo_manager.add_utxo(utxo).await;
         }
@@ -3862,6 +3865,7 @@ impl Blockchain {
             outputs: vec![TxOutput {
                 value: total_reward,
                 script_pubkey: script, // Unique per block due to height
+                masternode_key: None,
             }],
             lock_time: 0,
             timestamp: aligned_timestamp,
@@ -3886,6 +3890,7 @@ impl Blockchain {
                 .map(|(address, amount)| TxOutput {
                     value: *amount,
                     script_pubkey: address.as_bytes().to_vec(),
+                masternode_key: None,
                 })
                 .collect(),
             lock_time: 0,
@@ -5638,6 +5643,7 @@ impl Blockchain {
                     value: *amount,
                     script_pubkey: address.as_bytes().to_vec(),
                     address: address.clone(),
+                    masternode_key: None,
                 };
                 if let Err(e) = self.utxo_manager.add_utxo(utxo).await {
                     tracing::warn!(
@@ -5710,6 +5716,10 @@ impl Blockchain {
                     value: output.value,
                     script_pubkey: output.script_pubkey.clone(),
                     address: address.clone(),
+                    // Propagate the embedded masternode key if the output carries one.
+                    // This is the collateral authorization: "wallet owner designates this
+                    // specific masternode key to operate this collateral output."
+                    masternode_key: output.masternode_key.clone(),
                 };
 
                 if let Err(e) = self.utxo_manager.add_utxo(utxo).await {

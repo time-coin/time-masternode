@@ -379,8 +379,8 @@ impl GovernanceState {
                 new_satoshis_per_block,
                 description,
             } => {
-                const MIN_REWARD: u64 = 10 * 100_000_000;      // 10 TIME
-                const MAX_REWARD: u64 = 10_000 * 100_000_000;  // 10,000 TIME
+                const MIN_REWARD: u64 = 10 * 100_000_000; // 10 TIME
+                const MAX_REWARD: u64 = 10_000 * 100_000_000; // 10,000 TIME
                 if *new_satoshis_per_block < MIN_REWARD || *new_satoshis_per_block > MAX_REWARD {
                     return Err(format!(
                         "new_satoshis_per_block {new_satoshis_per_block} outside allowed range [{MIN_REWARD}, {MAX_REWARD}]"

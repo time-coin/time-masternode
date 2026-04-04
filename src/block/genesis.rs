@@ -358,7 +358,10 @@ mod tests {
         assert!(GenesisBlock::verify_structure(&genesis).is_ok());
         assert!(GenesisBlock::verify_rewards(&genesis).is_ok());
         assert_eq!(genesis.header.timestamp, 1775001600);
-        assert!(genesis.masternode_rewards.is_empty(), "Mainnet genesis must have no masternode rewards");
+        assert!(
+            genesis.masternode_rewards.is_empty(),
+            "Mainnet genesis must have no masternode rewards"
+        );
         assert!(GenesisBlock::verify_checkpoint(&genesis, crate::NetworkType::Mainnet).is_ok());
     }
 }

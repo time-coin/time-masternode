@@ -84,6 +84,12 @@ pub struct UTXO {
     pub value: u64,
     pub script_pubkey: Vec<u8>,
     pub address: String,
+    /// Hex-encoded Ed25519 public key of the authorized masternode operator.
+    /// Set when the collateral output was created with `masternode_key` embedded.
+    /// If present, any gossip announcement claiming this collateral must present
+    /// this exact key — cryptographic proof without a separate ProTx registration.
+    #[serde(default)]
+    pub masternode_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -97,6 +103,12 @@ pub struct TxInput {
 pub struct TxOutput {
     pub value: u64,
     pub script_pubkey: Vec<u8>,
+    /// Optional masternode operator key embedded at output creation time.
+    /// When this output becomes a collateral UTXO, this key authorizes the
+    /// specific masternode node permitted to use it.  Set in the GUI wallet
+    /// when the user creates the collateral transaction.
+    #[serde(default)]
+    pub masternode_key: Option<String>,
 }
 
 /// On-chain masternode registration or update payload.

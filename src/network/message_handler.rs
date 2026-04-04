@@ -2877,16 +2877,55 @@ impl MessageHandler {
                             );
                                 return Ok(None);
                             }
-                            // Operator key check (two-key model): if there is an on-chain
-                            // MasternodeReg for this collateral that recorded an operator_pubkey,
-                            // the announcing node's P2P key must match it. This is cryptographically
-                            // solid — squatters cannot forge the registered operator key.
+                            // ── Collateral authorization hierarchy ──────────────────────────
+                            //
+                            // 1. utxo.masternode_key (strongest): the GUI wallet embedded the
+                            //    authorized operator key when it created the collateral output.
+                            //    No separate registration needed — the collateral tx IS the proof.
+                            //
+                            // 2. On-chain MasternodeReg operator_pubkey: explicit registration
+                            //    tx for key rotation without spending the collateral again.
+                            //
+                            // 3. reward_address == utxo.address (fallback): for legacy UTXOs
+                            //    with no embedded key and no ProTx. Squatters always fail this
+                            //    because they'd be directing rewards to the victim's wallet.
+                            // ────────────────────────────────────────────────────────────────
+                            let announcing_key_hex = hex::encode(public_key.as_bytes());
+
+                            // Level 1: embedded masternode key in the collateral UTXO
+                            if let Some(ref embedded_key_hex) = utxo.masternode_key {
+                                if &announcing_key_hex != embedded_key_hex {
+                                    static EMBED_WARN: std::sync::OnceLock<
+                                        dashmap::DashMap<String, std::time::Instant>,
+                                    > = std::sync::OnceLock::new();
+                                    let wm = EMBED_WARN.get_or_init(dashmap::DashMap::new);
+                                    let should_warn = wm
+                                        .get(&peer_ip)
+                                        .map(|t| t.elapsed().as_secs() >= 600)
+                                        .unwrap_or(true);
+                                    if should_warn {
+                                        wm.insert(peer_ip.clone(), std::time::Instant::now());
+                                        warn!(
+                                            "🚨 [{}] COLLATERAL KEY MISMATCH: {} claimed \
+                                             collateral {} but node key {}…  != embedded key {}…",
+                                            self.direction, peer_ip, outpoint,
+                                            &announcing_key_hex[..16], &embedded_key_hex[..16]
+                                        );
+                                    }
+                                    return Ok(None);
+                                }
+                                // Embedded key matches — skip further checks, allow through.
+                                debug!(
+                                    "✅ [{}] Collateral embedded key verified for {} {}",
+                                    self.direction, peer_ip, outpoint
+                                );
+                            } else
+                            // Level 2: on-chain MasternodeReg operator_pubkey
                             if let Some(registered_op_hex) = context
                                 .masternode_registry
                                 .get_operator_pubkey_for_collateral(&outpoint)
                                 .await
                             {
-                                let announcing_key_hex = hex::encode(public_key.as_bytes());
                                 if announcing_key_hex != registered_op_hex {
                                     static OP_WARN: std::sync::OnceLock<
                                         dashmap::DashMap<String, std::time::Instant>,
@@ -5585,6 +5624,7 @@ impl MessageHandler {
                                     script_pubkey: output.script_pubkey.clone(),
                                     address: String::from_utf8(output.script_pubkey.clone())
                                         .unwrap_or_default(),
+                                masternode_key: None,
                                 };
                                 if let Err(e) = consensus.utxo_manager.add_utxo(utxo).await {
                                     tracing::warn!("Failed to add output UTXO vout={}: {}", idx, e);

@@ -1077,6 +1077,7 @@ async fn handle_peer(
                                                 script_pubkey: output.script_pubkey.clone(),
                                                 address: String::from_utf8(output.script_pubkey.clone())
                                                     .unwrap_or_default(),
+                                            masternode_key: None,
                                             };
                                             if let Err(e) = consensus.utxo_manager.add_utxo(utxo).await {
                                                 tracing::warn!(
@@ -1152,6 +1153,7 @@ async fn handle_peer(
                                                     script_pubkey: output.script_pubkey.clone(),
                                                     address: String::from_utf8(output.script_pubkey.clone())
                                                         .unwrap_or_default(),
+                                                masternode_key: None,
                                                 };
                                                 if let Err(e) = consensus.utxo_manager.add_utxo(utxo).await {
                                                     tracing::warn!("Failed to add output UTXO vout={}: {}", idx, e);
@@ -1942,6 +1944,7 @@ async fn handle_peer(
                                                                     script_pubkey: output.script_pubkey.clone(),
                                                                     address: String::from_utf8(output.script_pubkey.clone())
                                                                         .unwrap_or_default(),
+                                                                masternode_key: None,
                                                                 };
                                                                 if let Err(e) = consensus_clone.utxo_manager.add_utxo(utxo).await {
                                                                     tracing::warn!("Failed to add output UTXO vout={}: {}", idx, e);
@@ -2396,6 +2399,7 @@ mod tests {
             outputs: vec![TxOutput {
                 value: 100_000_000,
                 script_pubkey: vec![0u8; 25],
+            masternode_key: None,
             }],
             lock_time: 0,
             timestamp: chrono::Utc::now().timestamp(),

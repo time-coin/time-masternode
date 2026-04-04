@@ -176,9 +176,7 @@ fn try_legacy_deserialize(payload: &[u8]) -> Option<NetworkMessage> {
         VARIANT_BLOCKS_RESPONSE => {
             let blocks: Vec<LegacyBlock> = bincode::deserialize(data).ok()?;
             let count = blocks.len();
-            let msg = NetworkMessage::BlocksResponse(
-                blocks.into_iter().map(Into::into).collect(),
-            );
+            let msg = NetworkMessage::BlocksResponse(blocks.into_iter().map(Into::into).collect());
             tracing::info!(
                 "🔄 Migrated pre-v1.3 BlocksResponse ({} blocks) from legacy wire format",
                 count
@@ -203,9 +201,8 @@ fn try_legacy_deserialize(payload: &[u8]) -> Option<NetworkMessage> {
         VARIANT_BLOCK_RANGE_RESPONSE => {
             let blocks: Vec<LegacyBlock> = bincode::deserialize(data).ok()?;
             let count = blocks.len();
-            let msg = NetworkMessage::BlockRangeResponse(
-                blocks.into_iter().map(Into::into).collect(),
-            );
+            let msg =
+                NetworkMessage::BlockRangeResponse(blocks.into_iter().map(Into::into).collect());
             tracing::info!(
                 "🔄 Migrated pre-v1.3 BlockRangeResponse ({} blocks) from legacy wire format",
                 count
@@ -214,9 +211,7 @@ fn try_legacy_deserialize(payload: &[u8]) -> Option<NetworkMessage> {
         }
         VARIANT_TIMELOCK_BLOCK_PROPOSAL => {
             let block: LegacyBlock = bincode::deserialize(data).ok()?;
-            tracing::info!(
-                "🔄 Migrated pre-v1.3 TimeLockBlockProposal from legacy wire format"
-            );
+            tracing::info!("🔄 Migrated pre-v1.3 TimeLockBlockProposal from legacy wire format");
             Some(NetworkMessage::TimeLockBlockProposal {
                 block: block.into(),
             })

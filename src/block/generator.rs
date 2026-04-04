@@ -30,7 +30,7 @@ impl DeterministicBlockGenerator {
         final_transactions: Vec<Transaction>,
         transaction_fees: Vec<u64>, // Actual fees paid for each transaction
         masternodes: Vec<(Masternode, String)>, // (masternode, reward_address)
-        _base_reward: u64, // Ignored, use logarithmic calculation instead
+        _base_reward: u64,          // Ignored, use logarithmic calculation instead
     ) -> Block {
         // Align to 10-minute clock intervals: 0, 10, 20, 30, 40, 50 minutes
         let now = chrono::Utc::now();

@@ -166,9 +166,9 @@ impl BlockCache {
             .iter()
             .find(|(_, cached)| {
                 cached.block.header.height == height
-                    && self
-                        .max_age
-                        .map_or(true, |max_age| now.duration_since(cached.cached_at) <= max_age)
+                    && self.max_age.map_or(true, |max_age| {
+                        now.duration_since(cached.cached_at) <= max_age
+                    })
             })
             .map(|(_, cached)| cached.block.clone())
     }

@@ -1111,6 +1111,7 @@ impl RpcHandler {
             tx_outputs.push(TxOutput {
                 value: amount as u64,
                 script_pubkey: address.as_bytes().to_vec(),
+            masternode_key: None,
             });
         }
 
@@ -3109,6 +3110,7 @@ impl RpcHandler {
                 let cons_outputs = vec![TxOutput {
                     value: consolidate_total - consolidate_fee,
                     script_pubkey: from_address.as_bytes().to_vec(),
+                masternode_key: None,
                 }];
 
                 // Encrypt consolidation memo
@@ -3228,6 +3230,7 @@ impl RpcHandler {
             let mut outputs = vec![TxOutput {
                 value: send_amount,
                 script_pubkey: to_address.as_bytes().to_vec(),
+            masternode_key: None,
             }];
 
             let change = total_input - send_amount - fee;
@@ -3235,6 +3238,7 @@ impl RpcHandler {
                 outputs.push(TxOutput {
                     value: change,
                     script_pubkey: from_address.as_bytes().to_vec(),
+                masternode_key: None,
                 });
             }
 
@@ -3510,6 +3514,7 @@ impl RpcHandler {
         let outputs = vec![TxOutput {
             value: total_value - fee,
             script_pubkey: output_address.as_bytes().to_vec(),
+        masternode_key: None,
         }];
 
         // Encrypt consolidation memo
