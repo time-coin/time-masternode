@@ -3362,19 +3362,33 @@ async fn main() {
             // and reject their block 1. At height 0 there is no local chain to protect,
             // so blocking production here would trap the node forever.
             if current_height > 0 && max_peer_height_final > current_height {
-                tracing::debug!(
-                    "🛡️ Fork prevention: peers have height {} > our height {} - syncing instead of producing",
-                    max_peer_height_final,
-                    current_height
-                );
-                for peer_ip in &connected_peers {
-                    let msg = NetworkMessage::GetBlocks(
-                        current_height + 1,
-                        max_peer_height_final.min(current_height + 50),
+                // Override after repeated failed attempts: if peers have been reporting
+                // a higher height for many consecutive timeouts (≥5 attempts = ~50s) but
+                // every block they send is rejected as invalid (bad pool distribution,
+                // reward injection, etc.), stop waiting for them and produce our own block.
+                // This prevents permanent stall when old-code nodes report fake heights.
+                if leader_attempt >= 5 {
+                    tracing::warn!(
+                        "⚠️ Fork-prevention override (attempt {}): peers report height {} but \
+                         all their blocks have been invalid — producing our own block",
+                        leader_attempt, max_peer_height_final
                     );
-                    let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
+                    // Fall through to block production below
+                } else {
+                    tracing::debug!(
+                        "🛡️ Fork prevention: peers have height {} > our height {} - syncing instead of producing",
+                        max_peer_height_final,
+                        current_height
+                    );
+                    for peer_ip in &connected_peers {
+                        let msg = NetworkMessage::GetBlocks(
+                            current_height + 1,
+                            max_peer_height_final.min(current_height + 50),
+                        );
+                        let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
+                    }
+                    continue;
                 }
-                continue;
             }
 
             // CRITICAL: Check if block already exists in chain
