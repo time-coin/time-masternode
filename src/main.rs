@@ -1297,6 +1297,18 @@ async fn main() {
                 // Broadcast masternode announcement will happen after initial sync completes
                 // (see announcement task below)
             }
+            Err(crate::masternode_registry::RegistryError::CollateralAlreadyLocked) => {
+                // Another IP holds this collateral in the gossip registry.
+                // Do NOT crash — the on-chain collateral auto-sync task (below) will
+                // submit a signed MasternodeReg transaction that proves ownership via
+                // the wallet private key and evicts any gossip-only squatter.
+                tracing::warn!(
+                    "⚠️ Collateral already held by another node in local registry — \
+                     will file on-chain MasternodeReg to claim ownership after sync"
+                );
+                // Still mark ourselves as the local masternode so the auto-sync runs
+                registry.set_local_masternode(mn.address.clone()).await;
+            }
             Err(e) => {
                 tracing::error!("❌ Failed to register masternode: {}", e);
                 std::process::exit(1);

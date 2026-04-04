@@ -422,17 +422,27 @@ impl MasternodeRegistry {
 
             if let Some(ref canonical) = anchor_addr {
                 let canonical_ip = canonical.split(':').next().unwrap_or(canonical);
-                let incoming_ip = masternode.address.split(':').next().unwrap_or(&masternode.address);
+                let incoming_ip = masternode
+                    .address
+                    .split(':')
+                    .next()
+                    .unwrap_or(&masternode.address);
                 if canonical_ip != incoming_ip {
                     // Rate-limit the WARN to once per 5 minutes per (outpoint, claimant) pair
                     // to avoid spam when a rejected node keeps gossiping.
                     let spam_key = format!("hijack_warn:{}:{}", outpoint_key, incoming_ip);
-                    let last_warned = self.collateral_migration_times.get(&spam_key).map(|v| *v).unwrap_or(0);
+                    let last_warned = self
+                        .collateral_migration_times
+                        .get(&spam_key)
+                        .map(|v| *v)
+                        .unwrap_or(0);
                     if now.saturating_sub(last_warned) >= 300 {
                         self.collateral_migration_times.insert(spam_key, now);
                         let existing_is_onchain = nodes
                             .get(canonical_ip)
-                            .map(|i| matches!(i.registration_source, RegistrationSource::OnChain(_)))
+                            .map(|i| {
+                                matches!(i.registration_source, RegistrationSource::OnChain(_))
+                            })
                             .unwrap_or(false);
                         if existing_is_onchain {
                             tracing::warn!(
@@ -515,7 +525,8 @@ impl MasternodeRegistry {
                         return Err(RegistryError::InvalidCollateral);
                     }
                 }
-                self.collateral_migration_times.insert(outpoint_key.clone(), now);
+                self.collateral_migration_times
+                    .insert(outpoint_key.clone(), now);
 
                 tracing::info!(
                     "🔄 Free-tier IP migration: {} moving from {} to {}",
@@ -526,13 +537,13 @@ impl MasternodeRegistry {
                 nodes.remove(&old_addr);
                 let key = format!("masternode:{}", old_addr);
                 let _ = self.db.remove(key.as_bytes());
-            } else if anchor_addr.is_none() && masternode.tier != crate::types::MasternodeTier::Free {
+            } else if anchor_addr.is_none() && masternode.tier != crate::types::MasternodeTier::Free
+            {
                 // First time this collateral outpoint appears — write the canonical anchor.
                 // Only anchor paid tiers (Bronze+); Free nodes have no collateral to protect.
-                let _ = self.db.insert(
-                    anchor_db_key.as_bytes(),
-                    masternode.address.as_bytes(),
-                );
+                let _ = self
+                    .db
+                    .insert(anchor_db_key.as_bytes(), masternode.address.as_bytes());
                 tracing::debug!(
                     "📌 Collateral anchor set: {} → {} (first registration)",
                     outpoint,
@@ -1017,7 +1028,8 @@ impl MasternodeRegistry {
         if pass2.len() >= MIN_VIABLE_POOL {
             tracing::debug!(
                 "Eligible pool fallback (pass 2 — no reachability): {} nodes (pass 1 had {})",
-                pass2.len(), pass1.len()
+                pass2.len(),
+                pass1.len()
             );
             return pass2;
         }
@@ -1033,7 +1045,8 @@ impl MasternodeRegistry {
         if pass3.len() > pass1.len() {
             tracing::debug!(
                 "Eligible pool fallback (pass 3 — active only): {} nodes (pass 1 had {})",
-                pass3.len(), pass1.len()
+                pass3.len(),
+                pass1.len()
             );
         }
         pass3
@@ -2164,7 +2177,10 @@ impl MasternodeRegistry {
                     let _ = self.db.remove(anchor_key.as_bytes());
                 }
 
-                info!("🗑️  Removed masternode {} from registry (auto-removed after inactivity)", address);
+                info!(
+                    "🗑️  Removed masternode {} from registry (auto-removed after inactivity)",
+                    address
+                );
             }
         }
 
@@ -2502,14 +2518,31 @@ impl MasternodeRegistry {
         );
         Self::verify_signature(&owner_pubkey, &message, signature_hex)?;
 
-        // 5. Check collateral not already used by another active masternode
+        // 5. Check collateral not already used by another active masternode.
+        //    Exception: gossip-only entries (Handshake source) may be evicted by a
+        //    valid on-chain registration — the on-chain tx carries a cryptographic
+        //    signature over the collateral that proves ownership.  A gossip squatter
+        //    can never produce this signature, so a valid MasternodeReg is definitive
+        //    proof of ownership and wins over any gossip claim.
         let nodes = self.masternodes.read().await;
         for info in nodes.values() {
             if let Some(ref existing_outpoint) = info.masternode.collateral_outpoint {
                 if existing_outpoint.txid == outpoint.txid
                     && existing_outpoint.vout == outpoint.vout
                 {
-                    return Err(RegistryError::DuplicateCollateral);
+                    // Allow on-chain registration to evict gossip-only squatters.
+                    if matches!(info.registration_source, RegistrationSource::Handshake) {
+                        tracing::warn!(
+                            "🛡️ On-chain MasternodeReg overrides gossip entry for collateral \
+                             {}:{} (was held by gossip-only node {})",
+                            hex::encode(outpoint.txid),
+                            outpoint.vout,
+                            info.masternode.address
+                        );
+                        // Eviction happens in apply_masternode_reg after validation passes.
+                    } else {
+                        return Err(RegistryError::DuplicateCollateral);
+                    }
                 }
             }
         }
@@ -2580,7 +2613,60 @@ impl MasternodeRegistry {
         let height = self
             .current_height
             .load(std::sync::atomic::Ordering::Relaxed);
-        let _ = utxo_manager.lock_collateral(outpoint.clone(), address.clone(), height, tier.collateral());
+        let _ = utxo_manager.lock_collateral(
+            outpoint.clone(),
+            address.clone(),
+            height,
+            tier.collateral(),
+        );
+
+        // Evict any gossip-only squatter holding this collateral before registering.
+        // validate_masternode_reg already verified the signature proves ownership, so
+        // any gossip-only entry for this collateral is illegitimate.  The on-chain
+        // MasternodeReg is definitive proof — evict the squatter and record their IP
+        // in the incompatible-peers map so they are excluded from sync decisions.
+        {
+            let mut nodes = self.masternodes.write().await;
+            let squatter_addr = nodes
+                .iter()
+                .filter(|(addr, info)| {
+                    *addr != &address
+                        && matches!(info.registration_source, RegistrationSource::Handshake)
+                        && info
+                            .masternode
+                            .collateral_outpoint
+                            .as_ref()
+                            .map(|op| op.txid == outpoint.txid && op.vout == outpoint.vout)
+                            .unwrap_or(false)
+                })
+                .map(|(addr, _)| addr.clone())
+                .next();
+
+            if let Some(squatter) = squatter_addr {
+                tracing::error!(
+                    "🚨 ════════════════════════════════════════════════════════════"
+                );
+                tracing::error!("🚨 COLLATERAL SQUATTER EVICTED");
+                tracing::error!("🚨 IP: {}", squatter);
+                tracing::error!(
+                    "🚨 Collateral: {}:{}",
+                    hex::encode(outpoint.txid),
+                    outpoint.vout
+                );
+                tracing::error!(
+                    "🚨 {} held this collateral via gossip without ownership proof.",
+                    squatter
+                );
+                tracing::error!(
+                    "🚨 Legitimate owner {} proved ownership via signed on-chain tx.",
+                    address
+                );
+                tracing::error!(
+                    "🚨 ════════════════════════════════════════════════════════════"
+                );
+                nodes.remove(&squatter);
+            }
+        }
 
         // Register in the registry (insert or update existing entry)
         self.register(masternode, payout_address.to_string())
@@ -2598,11 +2684,7 @@ impl MasternodeRegistry {
         // On-chain registrations are authoritative: they include a signature proving
         // the registrant controls the collateral private key.  This anchor ensures
         // that future gossip claims from a different IP are rejected.
-        let outpoint_key = format!(
-            "{}:{}",
-            hex::encode(outpoint.txid),
-            outpoint.vout
-        );
+        let outpoint_key = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
         let anchor_db_key = format!("collateral_anchor:{}", outpoint_key);
         if let Err(e) = self.db.insert(anchor_db_key.as_bytes(), address.as_bytes()) {
             tracing::warn!(
@@ -2693,14 +2775,10 @@ impl MasternodeRegistry {
         Self::verify_signature(&owner_pubkey, &message, signature_hex)?;
 
         // 4. Check the on-chain anchor: the outpoint must be registered to this IP
-        let anchor_key = format!(
-            "collateral_anchor:{}",
-            collateral_outpoint_str
-        );
+        let anchor_key = format!("collateral_anchor:{}", collateral_outpoint_str);
         match self.db.get(anchor_key.as_bytes()) {
             Ok(Some(bytes)) => {
-                let anchored_ip =
-                    String::from_utf8(bytes.to_vec()).unwrap_or_default();
+                let anchored_ip = String::from_utf8(bytes.to_vec()).unwrap_or_default();
                 if anchored_ip != masternode_address {
                     return Err(RegistryError::OwnerMismatch);
                 }
@@ -2728,7 +2806,10 @@ impl MasternodeRegistry {
 
         // Remove the on-chain anchor so gossip can no longer reference this collateral
         if let Err(e) = self.db.remove(anchor_key.as_bytes()) {
-            warn!("⚠️ Failed to remove collateral anchor {}: {}", outpoint_str, e);
+            warn!(
+                "⚠️ Failed to remove collateral anchor {}: {}",
+                outpoint_str, e
+            );
         }
 
         // Unlock the collateral (removes from locked_collaterals map)
@@ -3121,9 +3202,17 @@ mod tests {
 
         // Run cleanup — miss threshold is 3 consecutive misses before deregistration
         registry.cleanup_invalid_collaterals(&utxo_manager).await;
-        assert_eq!(registry.count().await, 1, "Should still be registered after 1 miss");
+        assert_eq!(
+            registry.count().await,
+            1,
+            "Should still be registered after 1 miss"
+        );
         registry.cleanup_invalid_collaterals(&utxo_manager).await;
-        assert_eq!(registry.count().await, 1, "Should still be registered after 2 misses");
+        assert_eq!(
+            registry.count().await,
+            1,
+            "Should still be registered after 2 misses"
+        );
         let cleanup_count = registry.cleanup_invalid_collaterals(&utxo_manager).await;
 
         // Masternode should be removed after 3 consecutive misses
