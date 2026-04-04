@@ -99,13 +99,26 @@ criterion = "0.5"
 name = "validation_bench"
 harness = false
 
+[profile.dev]
+opt-level = 1          # Minimal optimization: faster incremental builds, tolerable perf
+codegen-units = 256    # Maximum parallelism during development
+debug = true
+incremental = true
+
 [profile.release]
-lto = "fat"           # Changed from "thin" to "fat" for more aggressive optimization
+lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
-opt-level = 3         # Maximum optimization
-overflow-checks = false  # Disable overflow checks in release
+opt-level = 3
+overflow-checks = false
+
+# Faster release for CI / local testing: thin LTO, more codegen units, ~3x faster than release
+[profile.release-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 8
+strip = true
 
 [profile.release-with-debug]
 inherits = "release"

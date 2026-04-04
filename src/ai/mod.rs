@@ -2,7 +2,7 @@ pub mod adaptive_reconnection;
 pub mod anomaly_detector;
 pub mod attack_detector;
 pub mod consensus_health;
-pub mod fork_resolver;
+pub mod fork_resolver; // ForkResolutionState enum used throughout blockchain/network
 pub mod metrics_dashboard;
 pub mod network_optimizer;
 pub mod peer_selector;
