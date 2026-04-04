@@ -1501,6 +1501,7 @@ async fn main() {
             let collateral_sync_consensus = consensus_engine.clone();
             let collateral_sync_registry = registry.clone();
             let collateral_sync_shutdown = shutdown_token.clone();
+            let collateral_sync_utxo = utxo_mgr.clone();
             let mn_for_sync = mn.clone();
             let wallet_key_for_sync = wallet.signing_key().clone();
             let p2p_port_for_sync = network_type.default_p2p_port();
@@ -1581,23 +1582,75 @@ async fn main() {
                     if on_chain_outpoint.as_deref() != Some(new_outpoint_str.as_str())
                         && mn_for_sync.tier != types::MasternodeTier::Free
                     {
-                        tracing::info!(
-                            "📤 Submitting MasternodeReg for collateral {}",
-                            new_outpoint_str
-                        );
-                        if let Some(reg_tx) = build_masternode_reg_tx(
-                            &mn_for_sync,
-                            &wallet_key_for_sync,
-                            p2p_port_for_sync,
-                        ) {
-                            match collateral_sync_consensus.submit_transaction(reg_tx).await {
-                                Ok(txid) => tracing::info!(
-                                    "✅ MasternodeReg submitted: {} (tx {})",
-                                    new_outpoint_str,
-                                    hex::encode(txid)
-                                ),
-                                Err(e) => {
-                                    tracing::warn!("⚠️ MasternodeReg submission failed: {}", e)
+                        // Before attempting submission, verify that the node's hot wallet key
+                        // actually owns the collateral UTXO. The on-chain MasternodeReg
+                        // requires a signature from the key whose address matches utxo.address.
+                        // If the collateral belongs to a separate cold/GUI wallet, the node
+                        // cannot sign on its behalf — the user must submit from that wallet.
+                        let can_self_register = if let Some(outpoint) = mn_for_sync.collateral_outpoint.as_ref() {
+                            match collateral_sync_utxo.get_utxo(outpoint).await {
+                                Ok(utxo) => {
+                                    let node_pubkey = wallet_key_for_sync.verifying_key();
+                                    let network = collateral_sync_blockchain.network_type();
+                                    let node_addr = crate::address::Address::from_public_key(
+                                        node_pubkey.as_bytes(),
+                                        network,
+                                    ).as_string();
+                                    if node_addr == utxo.address {
+                                        true
+                                    } else {
+                                        tracing::warn!(
+                                            "⚠️  Cannot auto-submit MasternodeReg: collateral {} \
+                                             belongs to address {} but this node's wallet address \
+                                             is {}.",
+                                            new_outpoint_str, utxo.address, node_addr
+                                        );
+                                        tracing::warn!(
+                                            "📋 ACTION REQUIRED: Submit MasternodeReg from the \
+                                             wallet that owns the collateral ({}).",
+                                            utxo.address
+                                        );
+                                        tracing::warn!(
+                                            "   In your GUI wallet, use: \
+                                             Tools → Masternode → Register (or `time-cli masternodereg`)"
+                                        );
+                                        false
+                                    }
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        "⚠️  Cannot look up collateral UTXO {} to verify \
+                                         ownership — skipping auto-registration",
+                                        new_outpoint_str
+                                    );
+                                    false
+                                }
+                            }
+                        } else {
+                            false
+                        };
+
+                        if can_self_register {
+                            tracing::info!(
+                                "📤 Submitting MasternodeReg for collateral {}",
+                                new_outpoint_str
+                            );
+                            if let Some(reg_tx) = build_masternode_reg_tx(
+                                &mn_for_sync,
+                                &wallet_key_for_sync,
+                                p2p_port_for_sync,
+                            ) {
+                                match collateral_sync_consensus.submit_transaction(reg_tx).await {
+                                    Ok(txid) => tracing::info!(
+                                        "✅ MasternodeReg submitted: {} (tx {})",
+                                        new_outpoint_str,
+                                        hex::encode(txid)
+                                    ),
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "⚠️ MasternodeReg submission failed: {}", e
+                                        )
+                                    }
                                 }
                             }
                         }
