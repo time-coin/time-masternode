@@ -2399,7 +2399,6 @@ mod tests {
             outputs: vec![TxOutput {
                 value: 100_000_000,
                 script_pubkey: vec![0u8; 25],
-            masternode_key: None,
             }],
             lock_time: 0,
             timestamp: chrono::Utc::now().timestamp(),

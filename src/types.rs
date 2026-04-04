@@ -103,12 +103,6 @@ pub struct TxInput {
 pub struct TxOutput {
     pub value: u64,
     pub script_pubkey: Vec<u8>,
-    /// Optional masternode operator key embedded at output creation time.
-    /// When this output becomes a collateral UTXO, this key authorizes the
-    /// specific masternode node permitted to use it.  Set in the GUI wallet
-    /// when the user creates the collateral transaction.
-    #[serde(default)]
-    pub masternode_key: Option<String>,
 }
 
 /// On-chain masternode registration or update payload.
