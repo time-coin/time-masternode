@@ -61,6 +61,7 @@ Commands:
     masternode list        List masternodes (alias)
     masternode status      Get masternode status (alias)
     masternodereg          Register/re-register masternode on-chain (cold wallet signs, operator key embedded)
+    releaseallcollaterals  Release ALL collateral locks (safe recovery — does not touch tx locks)
     listlockedcollaterals  List all locked collateral UTXOs
   UTXO / Collateral
     listlockedutxos        List all locked UTXOs
@@ -427,6 +428,12 @@ enum Commands {
     /// Get masternode status [alias for: masternode status]
     #[command(next_help_heading = "Masternode")]
     MasternodeStatus,
+
+    /// Release ALL collateral locks without touching transaction UTXO locks.
+    /// Use when squatters have locked your collateral UTXOs and you need to reclaim them.
+    /// After running this, restart the node so legitimate masternodes re-register.
+    #[command(next_help_heading = "Masternode")]
+    ReleaseAllCollaterals,
 
     /// List all locked collaterals
     #[command(next_help_heading = "Masternode")]
@@ -870,6 +877,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             MasternodeCommands::List { all } => ("masternodelist", json!([all])),
             MasternodeCommands::Status => ("masternodestatus", json!([])),
         },
+        Commands::ReleaseAllCollaterals => ("releaseallcollaterals", json!([])),
         Commands::ListLockedCollaterals => ("listlockedcollaterals", json!([])),
         Commands::MasternodeReg { .. } => unreachable!("handled above"),
         Commands::GetConsensusInfo => ("getconsensusinfo", json!([])),

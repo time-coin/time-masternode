@@ -223,6 +223,7 @@ impl RpcHandler {
             "unlockutxo" => self.unlock_utxo(&params_array).await,
             "unlockorphanedutxos" => self.unlock_orphaned_utxos().await,
             "forceunlockall" => self.force_unlock_all().await,
+            "releaseallcollaterals" => self.release_all_collaterals().await,
             "gettransactions" => self.get_transactions_batch(&params_array).await,
             "gettreasurybalance" => self.get_treasury_balance().await,
             "getbalances" => self.get_balances(&params_array).await,
@@ -4385,6 +4386,21 @@ impl RpcHandler {
             "unlocked": unlocked_count,
             "orphaned_utxos": orphaned,
             "message": format!("Unlocked {} orphaned UTXOs", unlocked_count)
+        }))
+    }
+
+    /// Release all collateral locks without touching transaction UTXO locks.
+    /// Use this when squatters have locked collateral UTXOs and you need to reclaim them.
+    /// Safer than forceunlockall which also resets pending/finalized transaction states.
+    async fn release_all_collaterals(&self) -> Result<Value, RpcError> {
+        let count = self.utxo_manager.unlock_all_collaterals();
+        tracing::warn!("🔓 Released {} collateral lock(s) via RPC", count);
+        Ok(json!({
+            "released": count,
+            "message": format!(
+                "Released {} collateral lock(s). Masternodes will re-register on next announcement.",
+                count
+            )
         }))
     }
 

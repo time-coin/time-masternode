@@ -822,6 +822,24 @@ impl UTXOStateManager {
         }
     }
 
+    /// Release ALL collateral locks (does not touch regular UTXO/transaction locks).
+    ///
+    /// Safer than `force_unlock_all` for recovery: only affects the collateral lock map,
+    /// leaving pending/finalized transaction UTXO states intact.
+    /// Returns the number of locks released.
+    pub fn unlock_all_collaterals(&self) -> usize {
+        let outpoints: Vec<OutPoint> = self
+            .locked_collaterals
+            .iter()
+            .map(|r| r.key().clone())
+            .collect();
+        let count = outpoints.len();
+        for op in &outpoints {
+            let _ = self.unlock_collateral(op);
+        }
+        count
+    }
+
     /// Check if a UTXO is locked as collateral
     pub fn is_collateral_locked(&self, outpoint: &OutPoint) -> bool {
         self.locked_collaterals.contains_key(outpoint)
