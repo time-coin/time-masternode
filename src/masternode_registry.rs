@@ -122,6 +122,13 @@ pub struct MasternodeInfo {
     #[serde(skip)]
     pub peer_reports: Arc<DashMap<String, u64>>,
 
+    /// Hex-encoded Ed25519 public key of the masternode operator (node hot key).
+    /// Set when a MasternodeReg tx includes a separate operator_pubkey (two-key model).
+    /// None for legacy single-key registrations where owner == operator.
+    /// During gossip/handshake, the announcing node's P2P key is verified against this.
+    #[serde(default)]
+    pub operator_pubkey: Option<String>,
+
     /// Whether this masternode's P2P port is publicly reachable from the outside.
     /// Set to true when an outbound connection succeeds (we dialed them), or after a
     /// successful reverse-probe for inbound-only connections.  Nodes that are only
@@ -673,6 +680,7 @@ impl MasternodeRegistry {
             blocks_without_reward: 0,
             registration_height: current_h, // Anti-sybil: track when node first appeared
             registration_source: RegistrationSource::Handshake,
+            operator_pubkey: None, // Set only for on-chain registrations (two-key model)
             peer_reports: Arc::new(DashMap::new()),
             is_publicly_reachable: false, // Must pass reachability probe before earning rewards
             reachability_checked_at: 0,
@@ -2485,8 +2493,9 @@ impl MasternodeRegistry {
         payout_address: &str,
         owner_pubkey_hex: &str,
         signature_hex: &str,
+        operator_pubkey_hex: Option<&str>,
         utxo_manager: &crate::utxo_manager::UTXOStateManager,
-    ) -> Result<(OutPoint, MasternodeTier), RegistryError> {
+    ) -> Result<(OutPoint, MasternodeTier, Option<String>), RegistryError> {
         // Parse collateral outpoint "txid_hex:vout"
         let outpoint = Self::parse_outpoint(collateral_outpoint_str)?;
 
@@ -2547,7 +2556,18 @@ impl MasternodeRegistry {
             }
         }
 
-        Ok((outpoint, tier))
+        // 6. Parse and validate operator_pubkey (if provided).
+        //    This is the masternode node's hot key — separate from the owner/wallet key.
+        //    We only check it is a valid Ed25519 public key; it does not need to match
+        //    the UTXO address (that is the owner key's job).
+        let validated_operator_pubkey: Option<String> = if let Some(op_hex) = operator_pubkey_hex {
+            Self::parse_pubkey(op_hex).map_err(|_| RegistryError::InvalidSignature)?;
+            Some(op_hex.to_string())
+        } else {
+            None
+        };
+
+        Ok((outpoint, tier, validated_operator_pubkey))
     }
 
     /// Validate a MasternodePayoutUpdate special transaction.
@@ -2589,6 +2609,7 @@ impl MasternodeRegistry {
         _masternode_port: u16,
         payout_address: &str,
         owner_pubkey_hex: &str,
+        operator_pubkey_hex: Option<&str>,
         tier: MasternodeTier,
         utxo_manager: &crate::utxo_manager::UTXOStateManager,
     ) -> Result<(), RegistryError> {
@@ -2672,10 +2693,15 @@ impl MasternodeRegistry {
         self.register(masternode, payout_address.to_string())
             .await?;
 
-        // Mark as on-chain registration so the node persists across disconnects
+        // Mark as on-chain registration and store the operator pubkey (two-key model).
         let mut nodes = self.masternodes.write().await;
         if let Some(info) = nodes.get_mut(&address) {
             info.registration_source = RegistrationSource::OnChain(height);
+            // Store the operator key if one was provided (Dash-style owner/operator split).
+            // Fall back to the owner key for legacy single-key registrations.
+            info.operator_pubkey = operator_pubkey_hex
+                .map(|s| s.to_string())
+                .or_else(|| Some(owner_pubkey_hex.to_string()));
             self.store_masternode(&address, info)?;
         }
         drop(nodes);
@@ -2748,6 +2774,23 @@ impl MasternodeRegistry {
             }
         }
         None
+    }
+
+    /// Look up the registered operator pubkey (hex) for a given collateral outpoint.
+    ///
+    /// Returns `Some(hex)` if the collateral has an on-chain registration with an operator key.
+    /// Used by gossip/handshake handlers to verify the announcing node is the registered operator.
+    pub async fn get_operator_pubkey_for_collateral(&self, outpoint: &OutPoint) -> Option<String> {
+        let nodes = self.masternodes.read().await;
+        nodes.values().find(|info| {
+            matches!(info.registration_source, RegistrationSource::OnChain(_))
+                && info
+                    .masternode
+                    .collateral_outpoint
+                    .as_ref()
+                    .map(|op| op.txid == outpoint.txid && op.vout == outpoint.vout)
+                    .unwrap_or(false)
+        }).and_then(|info| info.operator_pubkey.clone())
     }
 
     /// Validate a CollateralUnlock special transaction.

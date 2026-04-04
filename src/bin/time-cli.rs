@@ -2,6 +2,10 @@ use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use timed::http_client::HttpClient;
+use dirs;
+use hex;
+use bincode;
+use chrono;
 
 #[derive(Parser, Debug)]
 #[command(name = "time-cli")]
@@ -56,6 +60,7 @@ Commands:
     masternode genkey      Generate a new masternode key
     masternode list        List masternodes (alias)
     masternode status      Get masternode status (alias)
+    masternodereg          Register/re-register masternode on-chain (cold wallet signs, operator key embedded)
     listlockedcollaterals  List all locked collateral UTXOs
   UTXO / Collateral
     listlockedutxos        List all locked UTXOs
@@ -427,6 +432,47 @@ enum Commands {
     #[command(next_help_heading = "Masternode")]
     ListLockedCollaterals,
 
+    /// Register or re-register a masternode on-chain (two-key model).
+    ///
+    /// Signs the MasternodeReg transaction with the wallet that owns the collateral UTXO,
+    /// embedding the masternode node's operator public key so the running node can be
+    /// verified without the cold wallet ever going online again.
+    ///
+    /// Example:
+    ///   time-cli masternodereg \
+    ///     --collateral abc123...:0 \
+    ///     --masternode-ip 50.28.104.50 \
+    ///     --payout-address T... \
+    ///     --operator-pubkey <hex from `masternode genkey` or `masternodestatus`> \
+    ///     --wallet-path /path/to/wallet.dat \
+    ///     --wallet-password mypassword
+    #[command(next_help_heading = "Masternode")]
+    MasternodeReg {
+        /// Collateral outpoint in txid:vout format (e.g. abc123...:0)
+        #[arg(long)]
+        collateral: String,
+        /// Masternode public IP address
+        #[arg(long)]
+        masternode_ip: String,
+        /// P2P port (default: 24000 mainnet / 24100 testnet)
+        #[arg(long)]
+        port: Option<u16>,
+        /// TIME address that will receive block rewards (your GUI wallet address)
+        #[arg(long)]
+        payout_address: String,
+        /// Hex-encoded Ed25519 public key of the masternode node (operator key).
+        /// Get this from `time-cli masternodestatus` → pubkey field, or `masternode genkey`.
+        #[arg(long)]
+        operator_pubkey: String,
+        /// Path to the wallet file that owns the collateral UTXO.
+        /// Defaults to the standard data-dir wallet.dat
+        #[arg(long)]
+        wallet_path: Option<String>,
+        /// Wallet decryption password (leave empty for unencrypted wallets)
+        #[arg(long, default_value = "")]
+        wallet_password: String,
+    },
+
     // ============================================================
     // MEMPOOL COMMANDS
     // ============================================================
@@ -659,6 +705,125 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .with_timeout(std::time::Duration::from_secs(30))
         .with_accept_invalid_certs(true);
 
+    // ── MasternodeReg: local signing then sendrawtransaction ─────────────────
+    if let Commands::MasternodeReg {
+        collateral,
+        masternode_ip,
+        port,
+        payout_address,
+        operator_pubkey,
+        wallet_path,
+        wallet_password,
+    } = &args.command
+    {
+        use ed25519_dalek::Signer;
+        use sha2::{Digest, Sha256};
+        use timed::wallet::Wallet;
+
+        // Resolve wallet path
+        let wpath = if let Some(p) = wallet_path {
+            std::path::PathBuf::from(p)
+        } else {
+            let data_dir = if is_testnet {
+                dirs::home_dir()
+                    .unwrap_or_default()
+                    .join(".timecoin")
+                    .join("testnet")
+            } else {
+                dirs::home_dir().unwrap_or_default().join(".timecoin")
+            };
+            data_dir.join("wallet.dat")
+        };
+
+        let wallet = Wallet::load(&wpath, wallet_password).map_err(|e| {
+            format!(
+                "Failed to load wallet from {}: {}. Use --wallet-path and --wallet-password.",
+                wpath.display(),
+                e
+            )
+        })?;
+
+        let p2p_port = port.unwrap_or(if is_testnet { 24100 } else { 24000 });
+
+        // Parse collateral outpoint "txid_hex:vout"
+        let parts: Vec<&str> = collateral.rsplitn(2, ':').collect();
+        if parts.len() != 2 {
+            return Err("--collateral must be in txid_hex:vout format".into());
+        }
+        let vout: u32 = parts[0].parse().map_err(|_| "Invalid vout in --collateral")?;
+        let txid_hex = parts[1];
+        let outpoint_str = format!("{}:{}", txid_hex, vout);
+
+        // Build signing message
+        let msg = format!(
+            "MN_REG:{}:{}:{}:{}",
+            outpoint_str, masternode_ip, p2p_port, payout_address
+        );
+        let message = Sha256::digest(msg.as_bytes()).to_vec();
+
+        let signing_key = wallet.signing_key();
+        let signature = signing_key.sign(&message);
+        let owner_pubkey_hex = hex::encode(signing_key.verifying_key().as_bytes());
+        let signature_hex = hex::encode(signature.to_bytes());
+
+        // Build the transaction
+        let tx = timed::types::Transaction {
+            version: 1,
+            inputs: vec![],
+            outputs: vec![],
+            lock_time: 0,
+            timestamp: chrono::Utc::now().timestamp(),
+            special_data: Some(timed::types::SpecialTransactionData::MasternodeReg {
+                collateral_outpoint: outpoint_str.clone(),
+                masternode_ip: masternode_ip.clone(),
+                masternode_port: p2p_port,
+                payout_address: payout_address.clone(),
+                owner_pubkey: owner_pubkey_hex.clone(),
+                signature: signature_hex,
+                operator_pubkey: Some(operator_pubkey.clone()),
+            }),
+            encrypted_memo: None,
+        };
+
+        let tx_hex = hex::encode(bincode::serialize(&tx)?);
+
+        // Submit via sendrawtransaction RPC
+        let auth = if !rpc_user.is_empty() && !rpc_pass.is_empty() {
+            Some((rpc_user.as_str(), rpc_pass.as_str()))
+        } else {
+            None
+        };
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "masternodereg".to_string(),
+            method: "sendrawtransaction".to_string(),
+            params: json!([tx_hex]),
+        };
+        let response = client.post_json(&rpc_url, &request, auth).await?;
+        let rpc_response: RpcResponse = response.json()?;
+        if let Some(error) = rpc_response.error {
+            return Err(format!(
+                "MasternodeReg rejected: {} (code {})\n\
+                 Check: collateral UTXO exists, owner_pubkey matches utxo.address, \
+                 and collateral is not already on-chain registered.",
+                error.message, error.code
+            ).into());
+        }
+        if let Some(txid) = rpc_response.result {
+            println!("✅ MasternodeReg submitted!");
+            println!("   txid:            {}", txid);
+            println!("   collateral:      {}", outpoint_str);
+            println!("   masternode:      {}:{}", masternode_ip, p2p_port);
+            println!("   payout_address:  {}", payout_address);
+            println!("   owner_pubkey:    {}", owner_pubkey_hex);
+            println!("   operator_pubkey: {}", operator_pubkey);
+            println!("\nThe masternode will be recognized as the registered operator once");
+            println!("the transaction is confirmed in the next block.");
+        }
+        return Ok(());
+    }
+    // ── End MasternodeReg ────────────────────────────────────────────────────
+
     let (method, params) = match &args.command {
         Commands::GetBlockchainInfo => ("getblockchaininfo", json!([])),
         Commands::GetBlock { height } => ("getblock", json!([height])),
@@ -706,6 +871,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             MasternodeCommands::Status => ("masternodestatus", json!([])),
         },
         Commands::ListLockedCollaterals => ("listlockedcollaterals", json!([])),
+        Commands::MasternodeReg { .. } => unreachable!("handled above"),
         Commands::GetConsensusInfo => ("getconsensusinfo", json!([])),
         Commands::GetTreasuryBalance => ("gettreasurybalance", json!([])),
         Commands::ValidateAddress { address } => ("validateaddress", json!([address])),

@@ -112,10 +112,18 @@ pub enum SpecialTransactionData {
         masternode_port: u16,
         /// Wallet address to receive block rewards
         payout_address: String,
-        /// Hex-encoded Ed25519 public key of the collateral owner
+        /// Hex-encoded Ed25519 public key of the collateral owner (cold wallet).
+        /// Address::from_public_key(owner_pubkey) must equal utxo.address.
         owner_pubkey: String,
-        /// Ed25519 signature over the registration fields, proving collateral ownership
+        /// Ed25519 signature over the registration fields, proving collateral ownership.
+        /// Signed by owner_pubkey's private key.
         signature: String,
+        /// Hex-encoded Ed25519 public key of the masternode operator (node hot key).
+        /// This is the key the masternode uses for P2P identity and consensus signing.
+        /// Allows cold-wallet collateral ownership to be separated from the running node.
+        /// None for legacy single-key registrations (operator == owner).
+        #[serde(default)]
+        operator_pubkey: Option<String>,
     },
     /// Update the payout address of an existing masternode.
     MasternodePayoutUpdate {

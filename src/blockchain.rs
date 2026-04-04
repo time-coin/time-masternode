@@ -5761,6 +5761,7 @@ impl Blockchain {
                     payout_address,
                     owner_pubkey,
                     signature,
+                    operator_pubkey,
                 } => {
                     // Validate the registration
                     match self
@@ -5772,11 +5773,12 @@ impl Blockchain {
                             payout_address,
                             owner_pubkey,
                             signature,
+                            operator_pubkey.as_deref(),
                             &self.utxo_manager,
                         )
                         .await
                     {
-                        Ok((outpoint, tier)) => {
+                        Ok((outpoint, tier, validated_op_key)) => {
                             // Apply the registration
                             if let Err(e) = self
                                 .masternode_registry
@@ -5786,6 +5788,7 @@ impl Blockchain {
                                     *masternode_port,
                                     payout_address,
                                     owner_pubkey,
+                                    validated_op_key.as_deref(),
                                     tier,
                                     &self.utxo_manager,
                                 )
@@ -10324,7 +10327,6 @@ impl Clone for Blockchain {
             connection_manager: self.connection_manager.clone(),
             peer_scoring: self.peer_scoring.clone(),
             fork_resolver: self.fork_resolver.clone(),
-
             sync_coordinator: self.sync_coordinator.clone(),
             cumulative_work: self.cumulative_work.clone(),
             reorg_history: self.reorg_history.clone(),

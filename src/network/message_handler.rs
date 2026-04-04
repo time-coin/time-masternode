@@ -2877,6 +2877,44 @@ impl MessageHandler {
                             );
                                 return Ok(None);
                             }
+                            // Operator key check (two-key model): if there is an on-chain
+                            // MasternodeReg for this collateral that recorded an operator_pubkey,
+                            // the announcing node's P2P key must match it. This is cryptographically
+                            // solid — squatters cannot forge the registered operator key.
+                            if let Some(registered_op_hex) = context
+                                .masternode_registry
+                                .get_operator_pubkey_for_collateral(&outpoint)
+                                .await
+                            {
+                                let announcing_key_hex = hex::encode(public_key.as_bytes());
+                                if announcing_key_hex != registered_op_hex {
+                                    static OP_WARN: std::sync::OnceLock<
+                                        dashmap::DashMap<String, std::time::Instant>,
+                                    > = std::sync::OnceLock::new();
+                                    let wm = OP_WARN.get_or_init(dashmap::DashMap::new);
+                                    let should_warn = wm
+                                        .get(&peer_ip)
+                                        .map(|t| t.elapsed().as_secs() >= 600)
+                                        .unwrap_or(true);
+                                    if should_warn {
+                                        wm.insert(peer_ip.clone(), std::time::Instant::now());
+                                        warn!(
+                                            "🚨 [{}] OPERATOR KEY MISMATCH: {} claimed collateral \
+                                             {} but node key {} != registered operator {}",
+                                            self.direction, peer_ip, outpoint,
+                                            &announcing_key_hex[..16], &registered_op_hex[..16]
+                                        );
+                                    }
+                                    return Ok(None);
+                                }
+                                // Keys match — this is the registered operator. Allow through
+                                // without going through the reward_address collision check.
+                                debug!(
+                                    "✅ [{}] Operator key verified for {} collateral {}",
+                                    self.direction, peer_ip, outpoint
+                                );
+                            }
+
                             if utxo_manager.is_collateral_locked(&outpoint) {
                                 let existing = utxo_manager.get_locked_collateral(&outpoint);
                                 if let Some(ref info) = existing {
