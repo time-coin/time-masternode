@@ -6470,51 +6470,76 @@ impl Blockchain {
         //   b) no registered masternode outside the bitmap received a positive payment
         // Skip if bitmap is empty (genesis block or very early bootstrap blocks).
         if !block.header.active_masternodes_bitmap.is_empty() {
+            // Count how many nodes the block producer marked as active.
+            // This is the number of set bits in the bitmap.
+            let bitmap_active_count: usize = block
+                .header
+                .active_masternodes_bitmap
+                .iter()
+                .map(|b| b.count_ones() as usize)
+                .sum();
+
             let active_nodes = self
                 .masternode_registry
                 .get_active_from_bitmap(&block.header.active_masternodes_bitmap)
                 .await;
 
-            // Build set of wallet addresses that are bitmap-active
-            let active_wallets: std::collections::HashSet<String> = active_nodes
-                .iter()
-                .map(|info| {
-                    if !info.reward_address.is_empty() {
-                        info.reward_address.clone()
-                    } else {
-                        info.masternode.wallet_address.clone()
-                    }
-                })
-                .collect();
-
-            // Also include the producer's wallet — producer is always eligible
-            // (they produced the block, so they were clearly active)
-            let mut eligible = active_wallets.clone();
-            eligible.insert(producer_wallet.clone());
-
-            for (wallet, amount) in &block.masternode_rewards {
-                if *amount == 0 {
-                    continue; // zero-amount entries are metadata padding
-                }
-                if !eligible.contains(wallet.as_str()) {
-                    return Err(format!(
-                        "Block {} reward of {} satoshis paid to {} who is NOT in the \
-                         active-masternodes bitmap — possible reward injection",
-                        block.header.height, amount, wallet
-                    ));
-                }
-            }
-
-            tracing::debug!(
-                "Block {} bitmap reward check passed: {} active nodes, {} paid recipients",
-                block.header.height,
-                active_nodes.len(),
-                block
-                    .masternode_rewards
+            // If our local registry resolved fewer active nodes than the bitmap encodes,
+            // our registry is stale — we are missing masternodes that registered after
+            // our current chain tip.  In that case the positional bitmap decoding is
+            // unreliable (bit positions shift when an unknown node sorts into the middle),
+            // so we skip the address-level check.  Block structural integrity (VRF proof,
+            // producer signature, consensus votes) is still fully verified above.
+            if active_nodes.len() < bitmap_active_count {
+                tracing::warn!(
+                    "Block {} bitmap has {} active nodes but local registry resolved only {} \
+                     — registry is stale (catching up), skipping reward injection address check",
+                    block.header.height,
+                    bitmap_active_count,
+                    active_nodes.len()
+                );
+            } else {
+                // Build set of wallet addresses that are bitmap-active
+                let active_wallets: std::collections::HashSet<String> = active_nodes
                     .iter()
-                    .filter(|(_, v)| *v > 0)
-                    .count()
-            );
+                    .map(|info| {
+                        if !info.reward_address.is_empty() {
+                            info.reward_address.clone()
+                        } else {
+                            info.masternode.wallet_address.clone()
+                        }
+                    })
+                    .collect();
+
+                // Also include the producer's wallet — producer is always eligible
+                // (they produced the block, so they were clearly active)
+                let mut eligible = active_wallets.clone();
+                eligible.insert(producer_wallet.clone());
+
+                for (wallet, amount) in &block.masternode_rewards {
+                    if *amount == 0 {
+                        continue; // zero-amount entries are metadata padding
+                    }
+                    if !eligible.contains(wallet.as_str()) {
+                        return Err(format!(
+                            "Block {} reward of {} satoshis paid to {} who is NOT in the \
+                             active-masternodes bitmap — possible reward injection",
+                            block.header.height, amount, wallet
+                        ));
+                    }
+                }
+
+                tracing::debug!(
+                    "Block {} bitmap reward check passed: {} active nodes, {} paid recipients",
+                    block.header.height,
+                    active_nodes.len(),
+                    block
+                        .masternode_rewards
+                        .iter()
+                        .filter(|(_, v)| *v > 0)
+                        .count()
+                );
+            }
         }
 
         Ok(())
