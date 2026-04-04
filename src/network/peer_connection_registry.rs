@@ -183,31 +183,27 @@ impl PeerConnectionRegistry {
 
         // Check if already marked
         if !incompatible.contains_key(&ip_only) {
-            tracing::error!(
-                "🚫 ═══════════════════════════════════════════════════════════════════"
-            );
-            tracing::error!("🚫 INCOMPATIBLE PEER DETECTED: {}", ip_only);
-            tracing::error!("🚫 Reason: {}", reason);
-            tracing::error!("🚫 ");
-            tracing::error!("🚫 This peer is computing different block hashes, likely due to");
-            tracing::error!("🚫 running an older version of the software.");
-            tracing::error!("🚫 ");
-            tracing::error!("🚫 RECOMMENDATION: The peer should update to the latest version");
-            tracing::error!("🚫 and clear their blockchain to resync.");
-            tracing::error!("🚫 ");
             if permanent {
+                // Genesis mismatch — genuinely wrong chain, log prominently
                 tracing::error!(
-                    "🚫 This is a GENESIS MISMATCH - peer will be PERMANENTLY ignored."
+                    "🚫 ═══════════════════════════════════════════════════════════════════"
+                );
+                tracing::error!("🚫 INCOMPATIBLE PEER DETECTED: {}", ip_only);
+                tracing::error!("🚫 Reason: {}", reason);
+                tracing::error!("🚫 This is a GENESIS MISMATCH — peer will be PERMANENTLY ignored.");
+                tracing::error!("🚫 Peer should update software and resync from genesis.");
+                tracing::error!(
+                    "🚫 ═══════════════════════════════════════════════════════════════════"
                 );
             } else {
-                tracing::error!(
-                    "🚫 This peer will be temporarily ignored for {} minutes, then re-checked.",
+                // Timeout / old-code — expected after our genesis-check-on-connect policy
+                tracing::warn!(
+                    "🚫 [{}] Marked temporarily incompatible: {} (re-check in {} min)",
+                    ip_only,
+                    reason,
                     Self::INCOMPATIBLE_RECHECK_SECS / 60
                 );
             }
-            tracing::error!(
-                "🚫 ═══════════════════════════════════════════════════════════════════"
-            );
         }
 
         incompatible.insert(
