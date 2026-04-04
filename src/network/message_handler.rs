@@ -4,7 +4,6 @@
 //! that works regardless of connection direction. Previously, message handling
 //! was duplicated between server.rs (inbound) and peer_connection.rs (outbound).
 
-use crate::address::Address;
 use crate::block::types::calculate_merkle_root;
 use crate::block::types::Block;
 use crate::blockchain::Blockchain;
@@ -2883,39 +2882,42 @@ impl MessageHandler {
                                 if let Some(ref info) = existing {
                                     if info.masternode_address != peer_ip {
                                         // Conflict: two different IPs claim the same collateral.
-                                        // Arbitrate by on-chain ownership: derive the TIME address
-                                        // from the incoming peer's public key and compare it to
-                                        // the UTXO's recorded address. The one that matches the
-                                        // UTXO is the legitimate owner; the other is the attacker.
-                                        let network = context.blockchain.network_type();
-                                        let peer_time_addr = Address::from_public_key(
-                                            public_key.as_bytes(),
-                                            network,
-                                        )
-                                        .as_string();
+                                        //
+                                        // Arbitrate using the reward_address the peer declared in
+                                        // their announcement — this is the TIME wallet address
+                                        // configured in time.conf, and it must equal utxo.address
+                                        // (the address the collateral was actually sent to).
+                                        //
+                                        // A legitimate owner always configures their own wallet
+                                        // address as the reward destination, so reward_address ==
+                                        // utxo.address proves ownership. A squatter using someone
+                                        // else's collateral UTXO would configure their OWN wallet
+                                        // address (different from utxo.address) so rewards flow to
+                                        // them — that mismatch exposes them.
+                                        //
+                                        // Note: this is NOT used for banning (reward_address is
+                                        // self-reported). It is used only to decide which entry to
+                                        // keep. The on-chain MasternodeReg path issues bans.
 
-                                        if peer_time_addr == utxo.address {
-                                            // Incoming peer owns the UTXO on-chain — the current
-                                            // lock holder is a squatter.  Evict them and allow
-                                            // the legitimate owner through.
+                                        if reward_address == utxo.address {
+                                            // Incoming peer's reward_address matches the UTXO —
+                                            // they are the legitimate owner. Evict the squatter
+                                            // (first-seen entry) and let this peer through.
                                             let squatter_ip = info.masternode_address.clone();
                                             warn!(
-                                            "🔁 [{}] Evicting squatter {} — legitimate owner {} \
-                                             reclaiming collateral {} (on-chain address: {})",
-                                            self.direction, squatter_ip, peer_ip,
-                                            outpoint, utxo.address
-                                        );
-                                            // Note: we do NOT ban the evicted party here.
-                                            // Handshake key ≠ wallet ownership key, so the P2P
-                                            // key → address comparison is not reliable enough to
-                                            // justify a ban. The on-chain MasternodeReg path
-                                            // (apply_masternode_reg) is the authoritative source
-                                            // for permanent bans.
+                                                "🔁 [{}] Evicting squatter {} — legitimate owner {} \
+                                                 reclaiming collateral {} (reward_address matches \
+                                                 utxo.address: {})",
+                                                self.direction, squatter_ip, peer_ip,
+                                                outpoint, utxo.address
+                                            );
                                             // Unlock so the legitimate owner can re-lock below
                                             let _ = utxo_manager.unlock_collateral(&outpoint);
                                         } else {
-                                            // Incoming peer does NOT own the UTXO — they are
-                                            // the attacker.
+                                            // Incoming peer's reward_address does NOT match the
+                                            // UTXO's address — they are claiming collateral they
+                                            // don't own. Reject silently; no ban because this
+                                            // signal is self-reported (bans come from on-chain).
                                             static THEFT_WARN_TIMES: std::sync::OnceLock<
                                                 dashmap::DashMap<String, std::time::Instant>,
                                             > = std::sync::OnceLock::new();
@@ -2931,20 +2933,14 @@ impl MessageHandler {
                                                     std::time::Instant::now(),
                                                 );
                                                 warn!(
-                                                "🚨 [{}] COLLATERAL THEFT ATTEMPT: {} tried to claim \
-                                                 collateral {} owned by {} (on-chain: {})",
-                                                self.direction, peer_ip, outpoint,
-                                                info.masternode_address, utxo.address
-                                            );
+                                                    "🚨 [{}] COLLATERAL SQUATTER REJECTED: {} \
+                                                     claimed {} but reward_address {} != \
+                                                     utxo.address {} (held by {})",
+                                                    self.direction, peer_ip, outpoint,
+                                                    reward_address, utxo.address,
+                                                    info.masternode_address
+                                                );
                                             }
-                                            // Note: we do NOT ban based on handshake key comparison.
-                                            // The P2P key presented in handshake is the node's
-                                            // network identity key, which is different from the
-                                            // wallet key that owns the collateral UTXO. A mismatch
-                                            // here is not reliable evidence of bad intent — it
-                                            // causes false positives for legitimate owners.
-                                            // Permanent bans are only issued via the on-chain
-                                            // MasternodeReg path which requires a real signature.
                                             return Ok(None);
                                         }
                                     }
