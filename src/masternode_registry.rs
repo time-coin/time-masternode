@@ -939,12 +939,19 @@ impl MasternodeRegistry {
         &self,
         wallet_address: &str,
     ) -> Option<crate::types::MasternodeTier> {
+        // When a wallet is registered at multiple IPs and/or multiple tiers (e.g. an
+        // operator that runs both a Silver node and a Free node with the same wallet),
+        // return the HIGHEST tier found.  This makes block validation deterministic
+        // regardless of HashMap iteration order, preventing per-tier pool mismatches
+        // caused by non-deterministic tier classification across different nodes.
+        // Discriminant values: Gold=100000 > Silver=10000 > Bronze=1000 > Free=0
         self.masternodes
             .read()
             .await
             .values()
-            .find(|info| info.masternode.wallet_address == wallet_address)
+            .filter(|info| info.masternode.wallet_address == wallet_address)
             .map(|info| info.masternode.tier)
+            .max_by_key(|tier| *tier as u64)
     }
 
     pub async fn get_active_masternodes(&self) -> Vec<MasternodeInfo> {

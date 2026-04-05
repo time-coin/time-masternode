@@ -3747,6 +3747,23 @@ impl Blockchain {
             let mut total_pool_distributed = 0u64;
             let mut rounding_dust = 0u64;
 
+            // Collect the payment addresses of all paid-tier nodes.  Used below to
+            // exclude Free-tier nodes whose wallet is also registered at a paid tier.
+            // Without this, a wallet shared between a Silver node and a Free node would
+            // receive both the Silver pool (1800 TIME) and a Free-tier share (e.g. 160M),
+            // producing a merged entry that validators always reject as a Silver mismatch.
+            let paid_tier_wallet_set: std::collections::HashSet<String> = eligible_pool
+                .iter()
+                .filter(|mn| mn.masternode.tier != MasternodeTier::Free)
+                .map(|mn| {
+                    if !mn.reward_address.is_empty() {
+                        mn.reward_address.clone()
+                    } else {
+                        mn.masternode.wallet_address.clone()
+                    }
+                })
+                .collect();
+
             for tier in &tiers {
                 let tier_pool = tier.pool_allocation();
 
@@ -3762,6 +3779,29 @@ impl Blockchain {
                         (mn, fairness_bonus)
                     })
                     .collect();
+
+                // For Free tier: remove nodes whose payment address is also registered
+                // at a paid tier.  Such a node would receive a Free-tier share whose
+                // amount is then misclassified as Silver/Bronze/Gold by validators
+                // (tier_for_wallet returns the highest tier for that wallet).
+                if matches!(tier, MasternodeTier::Free) && !paid_tier_wallet_set.is_empty() {
+                    let before = tier_nodes.len();
+                    tier_nodes.retain(|(mn, _)| {
+                        let dest = if !mn.reward_address.is_empty() {
+                            mn.reward_address.as_str()
+                        } else {
+                            mn.masternode.wallet_address.as_str()
+                        };
+                        !paid_tier_wallet_set.contains(dest)
+                    });
+                    let filtered = before - tier_nodes.len();
+                    if filtered > 0 {
+                        tracing::info!(
+                            "💰 Block {}: excluded {} Free node(s) with paid-tier wallet overlap from Free distribution",
+                            next_height, filtered
+                        );
+                    }
+                }
 
                 // Empty tiers: full pool goes to block producer
                 if tier_nodes.is_empty() {
@@ -6375,22 +6415,57 @@ impl Blockchain {
                 let paid = tier_paid.get(tier).copied().unwrap_or(0);
 
                 if paid == 0 {
-                    // A tier pool may only roll up to the producer if there are NO
-                    // registered masternodes of that tier (other than the producer).
-                    // If masternodes of this tier ARE registered but received 0, the
-                    // producer stole their pool allocation.
-                    let tier_nodes = self.masternode_registry.list_by_tier(*tier).await;
-                    let non_producer_tier_nodes = tier_nodes
-                        .iter()
-                        .filter(|info| {
-                            let wallet = if !info.reward_address.is_empty() {
-                                &info.reward_address
-                            } else {
-                                &info.masternode.wallet_address
-                            };
-                            wallet != producer_addr && wallet.as_str() != producer_wallet
-                        })
-                        .count();
+                    // A tier pool may only roll up to the producer if the block producer
+                    // did not have any active masternodes of that tier in its view.
+                    //
+                    // IMPORTANT: Use the block's committed bitmap — NOT live gossip state —
+                    // to determine which masternodes were active.  Gossip-based `is_active`
+                    // flags differ between nodes (especially after nodes come back online
+                    // but haven't participated in consensus yet), causing the same valid
+                    // block to be rejected by validators whose gossip state differs from
+                    // the producer's.  The bitmap is the canonical, tamper-evident record
+                    // of which masternodes the producer observed as consensus participants.
+                    //
+                    // If the bitmap is absent (old block), fall back to gossip `list_by_tier`.
+                    let non_producer_tier_nodes: usize =
+                        if !block.header.active_masternodes_bitmap.is_empty() {
+                            let bitmap_nodes = self
+                                .masternode_registry
+                                .get_active_from_bitmap(
+                                    &block.header.active_masternodes_bitmap,
+                                )
+                                .await;
+                            bitmap_nodes
+                                .iter()
+                                .filter(|info| {
+                                    info.masternode.tier == *tier && {
+                                        let wallet = if !info.reward_address.is_empty() {
+                                            &info.reward_address
+                                        } else {
+                                            &info.masternode.wallet_address
+                                        };
+                                        wallet != producer_addr
+                                            && wallet.as_str() != producer_wallet
+                                    }
+                                })
+                                .count()
+                        } else {
+                            // Old block without bitmap — fall back to gossip state.
+                            let tier_nodes =
+                                self.masternode_registry.list_by_tier(*tier).await;
+                            tier_nodes
+                                .iter()
+                                .filter(|info| {
+                                    let wallet = if !info.reward_address.is_empty() {
+                                        &info.reward_address
+                                    } else {
+                                        &info.masternode.wallet_address
+                                    };
+                                    wallet != producer_addr
+                                        && wallet.as_str() != producer_wallet
+                                })
+                                .count()
+                        };
                     if non_producer_tier_nodes > 0 {
                         return Err(format!(
                             "Block {} {:?}-tier pool not distributed: {} registered \
@@ -6398,7 +6473,7 @@ impl Blockchain {
                             block.header.height, tier, non_producer_tier_nodes
                         ));
                     }
-                    // Genuinely empty tier — pool rolls up.
+                    // Genuinely empty tier from the producer's perspective — pool rolls up.
                     rolled_up_to_producer += pool;
                     continue;
                 }
