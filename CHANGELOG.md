@@ -5,6 +5,30 @@ All notable changes to TimeCoin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.34] - 2026-04-04
+
+### Security — Masternode Registration & Collateral
+
+- **Forged `CollateralUnlock` blocked**: `validate_collateral_unlock` now verifies the `owner_pubkey` against the collateral UTXO's actual on-chain address (`utxo.address`) rather than the registry entry's stored key. An attacker who gossip-squatted a masternode slot could previously have their own key stored in the registry, blocking the real owner from submitting a legitimate unlock. Ground truth is always the UTXO, not the registry.
+
+- **Gossip anchoring removed for paid tiers**: Bronze/Silver/Gold collateral outpoints can no longer be anchored via peer gossip. Only a confirmed on-chain `MasternodeReg` transaction (signed by the collateral owner's private key) may anchor a paid-tier collateral. Prevents an attacker from gossip-squatting a collateral UTXO before the real owner registers.
+
+- **Payout address locked to collateral owner**: `MasternodeReg` transactions where `payout_address` does not equal `utxo.address` are now rejected at the mempool/relay level. Rewards must flow to the collateral owner — no redirection is possible even with a valid registration signature. (Mempool rule only; existing blocks are not affected.)
+
+- **`CollateralUnlock` signature verification tightened**: Verifies `owner_pubkey` against the on-chain UTXO address rather than the registry's stored public key, which may have been gossip-filled by an attacker.
+
+### Fixed — Collateral Lock Persisting After On-Chain Spend
+
+- **Spent collateral UTXOs stuck in lock map**: When a collateral-locked UTXO was spent on-chain (e.g. via a consolidation transaction), `spend_utxo` returned `LockedAsCollateral` and silently aborted without removing the UTXO from storage. The UTXO remained in `Unspent` state locally, so `check_collateral_validity` kept returning `true` and `cleanup_invalid_collaterals` never deregistered the masternode. Fixed: `spend_utxo` now releases any collateral lock before spending — a confirmed block is authoritative and overrides application-layer locks. The masternode auto-deregisters on the next cleanup sweep.
+
+### Added — CLI Tooling
+
+- **`dumpprivkey` command**: Exports the Ed25519 private key from a `wallet.dat` file offline (no running daemon required). Prints address, pubkey, and privkey hex.
+
+- **`masternodereg --privkey <hex>`**: Sign a `MasternodeReg` transaction using a raw hex private key instead of a wallet file. Enables registering from a GUI wallet machine while submitting to a remote node's RPC via `--rpc-url`.
+
+- **`scripts/register-masternode.sh`**: End-to-end registration script for the cold-wallet-on-separate-machine workflow.
+
 ## [Unreleased]
 
 ### Added — Windows Tooling

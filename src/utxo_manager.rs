@@ -313,11 +313,20 @@ impl UTXOStateManager {
             .ok_or(UtxoError::NotFound)
     }
 
-    /// Mark a UTXO as spent (used when processing blocks)
+    /// Mark a UTXO as spent (used when processing blocks).
+    /// If the UTXO is collateral-locked, the lock is forcibly released before spending —
+    /// a confirmed block is ground truth and overrides any application-layer lock.
+    /// The collateral lock check belongs in wallet/mempool validation, not here.
     pub async fn spend_utxo(&self, outpoint: &OutPoint) -> Result<(), UtxoError> {
-        // Check if UTXO is locked as collateral
+        // If this UTXO is collateral-locked, release the lock first.
+        // A confirmed on-chain spend is authoritative: the masternode that held this
+        // collateral will be deregistered by cleanup_invalid_collaterals on the next sweep.
         if self.is_collateral_locked(outpoint) {
-            return Err(UtxoError::LockedAsCollateral);
+            tracing::warn!(
+                "⚠️ Spending collateral-locked UTXO {:?} — releasing lock (on-chain spend is authoritative)",
+                outpoint
+            );
+            self.unlock_collateral(outpoint);
         }
 
         // Remove from address index before removing from storage
@@ -1324,13 +1333,12 @@ mod tests {
             .lock_collateral(outpoint.clone(), "masternode1".to_string(), 1000, 1000)
             .unwrap();
 
-        // Attempt to spend should fail
+        // Block-processing spend must succeed even on collateral-locked UTXOs —
+        // an on-chain spend is authoritative and the lock is released automatically.
         let result = manager.spend_utxo(&outpoint).await;
-        assert!(result.is_err());
-        match result {
-            Err(UtxoError::LockedAsCollateral) => {} // Expected
-            _ => panic!("Expected LockedAsCollateral error"),
-        }
+        assert!(result.is_ok(), "spend_utxo should release collateral lock and succeed");
+        // Collateral lock should now be gone
+        assert!(!manager.is_collateral_locked(&outpoint));
     }
 
     /// Phase 1.2 Test 3: Cannot lock collateral for transaction
