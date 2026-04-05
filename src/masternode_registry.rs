@@ -2833,6 +2833,18 @@ impl MasternodeRegistry {
             Err(e) => return Err(RegistryError::Storage(e.to_string())),
         }
 
+        // 5. Verify owner_pubkey matches the registered public key.
+        // Without this check, anyone who knows the collateral outpoint and masternode IP
+        // can forge an unlock by supplying their own key pair with a self-consistent signature.
+        let nodes = self.masternodes.read().await;
+        if let Some(info) = nodes.get(masternode_address) {
+            if info.masternode.public_key != owner_pubkey {
+                return Err(RegistryError::OwnerMismatch);
+            }
+        }
+        // If the masternode isn't in the registry the anchor is already gone or never existed;
+        // the idempotent path above already handled that case.
+
         Ok(outpoint)
     }
 
