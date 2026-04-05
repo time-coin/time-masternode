@@ -726,14 +726,16 @@ impl UTXOStateManager {
         let mut skipped_collateral = 0;
 
         for outpoint in to_remove {
-            // Never remove collateral-locked UTXOs during reconciliation
+            // If the majority of peers say this UTXO is spent, release any collateral
+            // lock and remove it — peer consensus is authoritative, same as a confirmed block.
             if self.is_collateral_locked(&outpoint) {
                 tracing::warn!(
-                    "🚫 Skipping collateral UTXO {} during reconciliation",
+                    "⚠️ Releasing collateral lock on {} during UTXO reconciliation \
+                     (majority peers agree it is spent)",
                     outpoint
                 );
-                skipped_collateral += 1;
-                continue;
+                let _ = self.unlock_collateral(&outpoint);
+                skipped_collateral += 1; // keep the counter for logging continuity
             }
             // Fetch address before removing so we can clean up address_index
             if let Some(utxo) = self.storage.get_utxo(&outpoint).await {
