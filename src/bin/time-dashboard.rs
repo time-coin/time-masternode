@@ -284,6 +284,7 @@ struct App {
     client: HttpClient,
     current_tab: usize,
     should_quit: bool,
+    rpc_connected: bool,
     error_message: Option<String>,
     mempool_scroll: usize,
     mempool_detail: Option<usize>,
@@ -308,6 +309,7 @@ impl App {
                 .with_accept_invalid_certs(true),
             current_tab: 0,
             should_quit: false,
+            rpc_connected: false,
             error_message: None,
             mempool_scroll: 0,
             mempool_detail: None,
@@ -324,13 +326,17 @@ impl App {
     async fn update_data(&mut self) {
         self.error_message = None;
 
-        // Fetch blockchain info
+        // Fetch blockchain info — first call determines RPC reachability
         match self
             .rpc_call::<BlockchainInfo>("getblockchaininfo", vec![])
             .await
         {
-            Ok(info) => self.data.blockchain = Some(info),
+            Ok(info) => {
+                self.rpc_connected = true;
+                self.data.blockchain = Some(info);
+            }
             Err(e) => {
+                self.rpc_connected = false;
                 self.error_message = Some(format!("getblockchaininfo: {}", e));
                 return;
             }
@@ -605,19 +611,49 @@ fn ui(f: &mut Frame, app: &App) {
 }
 
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
-    let block_height = app.data.blockchain.as_ref().map(|b| b.blocks).unwrap_or(0);
-    let connections = app
-        .data
-        .network
-        .as_ref()
-        .map(|n| n.connections)
-        .unwrap_or(0);
-    let mn_status = app
-        .data
-        .masternode
-        .as_ref()
-        .map(|m| m.status.as_str())
-        .unwrap_or("Unknown");
+    let offline = !app.rpc_connected;
+
+    // When offline, show stale-data markers so the header clearly reflects
+    // the disconnected state rather than silently showing old values.
+    let height_text = if offline {
+        "---".to_string()
+    } else {
+        app.data
+            .blockchain
+            .as_ref()
+            .map(|b| b.blocks.to_string())
+            .unwrap_or_else(|| "---".to_string())
+    };
+
+    let peers_text = if offline {
+        "---".to_string()
+    } else {
+        app.data
+            .network
+            .as_ref()
+            .map(|n| n.connections.to_string())
+            .unwrap_or_else(|| "---".to_string())
+    };
+
+    let (status_text, status_color) = if offline {
+        ("Status: Node Offline".to_string(), Color::Red)
+    } else {
+        match app.data.masternode.as_ref() {
+            Some(mn) if mn.is_active => ("Status: Active".to_string(), Color::Green),
+            Some(mn) => (
+                format!(
+                    "Status: {}",
+                    if mn.status.is_empty() {
+                        "Inactive"
+                    } else {
+                        &mn.status
+                    }
+                ),
+                Color::Yellow,
+            ),
+            None => ("Status: Unknown".to_string(), Color::Yellow),
+        }
+    };
 
     let header = Paragraph::new(vec![Line::from(vec![
         Span::styled(
@@ -629,24 +665,30 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
         Span::raw("  |  "),
         Span::raw("Height: "),
         Span::styled(
-            format!("{}", block_height),
+            height_text,
             Style::default()
-                .fg(Color::White)
+                .fg(if offline {
+                    Color::DarkGray
+                } else {
+                    Color::White
+                })
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  |  "),
         Span::styled(
-            format!("Peers: {}", connections),
-            Style::default().fg(Color::Yellow),
+            format!("Peers: {}", peers_text),
+            Style::default().fg(if offline {
+                Color::DarkGray
+            } else {
+                Color::Yellow
+            }),
         ),
         Span::raw("  |  "),
         Span::styled(
-            format!("Status: {}", mn_status),
-            Style::default().fg(if mn_status == "Active" {
-                Color::Green
-            } else {
-                Color::Red
-            }),
+            status_text,
+            Style::default()
+                .fg(status_color)
+                .add_modifier(Modifier::BOLD),
         ),
     ])])
     .block(Block::default().borders(Borders::ALL))
