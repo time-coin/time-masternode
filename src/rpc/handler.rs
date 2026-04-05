@@ -4000,23 +4000,24 @@ impl RpcHandler {
 
         let outpoint = crate::types::OutPoint { txid, vout };
 
-        // Verify the collateral belongs to this node before unlocking
-        let local_mn_address = self
+        // Safety check: refuse to silently unlock the local node's OWN active collateral
+        // (that would deactivate this masternode). However, if the lock was placed by a
+        // *different* masternode (e.g., an attacker squatting this outpoint), allow the
+        // operator to forcibly remove it as a recovery operation.
+        let local_collateral_outpoint = self
             .registry
             .get_local_masternode()
             .await
-            .map(|mn| mn.masternode.address);
-        if let Some(lc) = self.utxo_manager.get_locked_collateral(&outpoint) {
-            if let Some(ref local_addr) = local_mn_address {
-                if lc.masternode_address != *local_addr {
-                    return Err(RpcError {
-                        code: -8,
-                        message: format!(
-                            "Cannot unlock collateral owned by a different masternode ({})",
-                            lc.masternode_address
-                        ),
-                    });
-                }
+            .and_then(|mn| mn.masternode.collateral_outpoint);
+        if let Some(ref local_op) = local_collateral_outpoint {
+            if *local_op == outpoint {
+                // This IS the local masternode's collateral — block accidental removal.
+                return Err(RpcError {
+                    code: -8,
+                    message: "Cannot unlock the local masternode's own active collateral. \
+                              Stop the masternode first or use releaseallcollaterals."
+                        .to_string(),
+                });
             }
         }
 
