@@ -6247,10 +6247,19 @@ impl Blockchain {
         calculated_fees: u64,
     ) -> Result<(), String> {
         use crate::constants::blockchain::{
-            GOLD_POOL_SATOSHIS, MAX_FREE_TIER_RECIPIENTS, PRODUCER_REWARD_SATOSHIS,
-            SATOSHIS_PER_TIME,
+            GOLD_POOL_SATOSHIS, MAX_FREE_TIER_RECIPIENTS, POOL_VALIDATION_MIN_HEIGHT,
+            PRODUCER_REWARD_SATOSHIS, SATOSHIS_PER_TIME,
         };
         use crate::types::MasternodeTier;
+
+        // Skip pool validation for historical blocks produced before the
+        // deterministic-tier fix (commit 8d2086a, 2026-04-05). Blocks in the
+        // range 676-681 may legitimately over-distribute a tier pool due to
+        // wallet overlap between Silver and Free registrations; re-validating
+        // them with the corrected logic would permanently fork minority nodes.
+        if block.header.height < POOL_VALIDATION_MIN_HEIGHT {
+            return Ok(());
+        }
 
         let producer_addr = &block.header.leader;
         if producer_addr.is_empty() || block.masternode_rewards.is_empty() {

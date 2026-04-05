@@ -79,6 +79,20 @@ pub mod blockchain {
 
     /// Number of recent blocks to cache in memory
     pub const BLOCK_CACHE_SIZE: usize = 100;
+
+    /// Pool distribution validation is skipped for blocks at or below this height.
+    ///
+    /// Blocks 676–681 were produced during a consensus split on 2026-04-05 caused
+    /// by non-deterministic `tier_for_wallet` when an operator shared the same
+    /// wallet address across Silver and Free tier registrations. The split was
+    /// resolved by deploying deterministic tier logic (commit 8d2086a). Some of
+    /// those historical blocks may pay a Silver-classified wallet from both the
+    /// Silver and Free pools, making them appear to over-distribute Silver by the
+    /// amount of the Free pool payment. Skipping pool validation for this range
+    /// allows minority-fork nodes (stuck at 678) to accept the majority chain
+    /// (at 681) without re-validating blocks they cannot currently pass. All
+    /// blocks above this height are fully validated with the corrected logic.
+    pub const POOL_VALIDATION_MIN_HEIGHT: u64 = 682;
 }
 
 /// Network protocol constants
