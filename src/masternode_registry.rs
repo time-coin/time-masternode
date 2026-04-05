@@ -546,13 +546,14 @@ impl MasternodeRegistry {
                 let _ = self.db.remove(key.as_bytes());
             } else if anchor_addr.is_none() && masternode.tier != crate::types::MasternodeTier::Free
             {
-                // First time this collateral outpoint appears — write the canonical anchor.
-                // Only anchor paid tiers (Bronze+); Free nodes have no collateral to protect.
-                let _ = self
-                    .db
-                    .insert(anchor_db_key.as_bytes(), masternode.address.as_bytes());
+                // Gossip does NOT set collateral anchors for paid tiers.
+                // Only a confirmed on-chain MasternodeReg tx (which requires a signature
+                // from the collateral owner's private key) may anchor a paid-tier outpoint.
+                // This prevents an attacker from gossip-squatting a collateral UTXO before
+                // the real owner submits their registration transaction.
                 tracing::debug!(
-                    "📌 Collateral anchor set: {} → {} (first registration)",
+                    "⚠️ Gossip claim for un-anchored paid-tier collateral {} from {} — \
+                     ignoring (on-chain MasternodeReg required to anchor)",
                     outpoint,
                     masternode.address
                 );
@@ -2515,6 +2516,16 @@ impl MasternodeRegistry {
             crate::address::Address::from_public_key(owner_pubkey.as_bytes(), self.network)
                 .as_string();
         if utxo.address != expected_address {
+            return Err(RegistryError::OwnerMismatch);
+        }
+
+        // 3b. Enforce payout_address == utxo.address.
+        // Rewards must go to the collateral owner — no redirection allowed.
+        // This is a mempool/relay rule (not a block-validity rule) so it does not
+        // break consensus with existing nodes: blocks produced before this rule are
+        // still accepted, but new registrations that try to redirect rewards will not
+        // propagate through upgraded nodes and will not be mined.
+        if payout_address != expected_address {
             return Err(RegistryError::OwnerMismatch);
         }
 
