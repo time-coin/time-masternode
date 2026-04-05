@@ -5836,6 +5836,7 @@ impl Blockchain {
                             masternode_address,
                             owner_pubkey,
                             signature,
+                            &self.utxo_manager,
                         )
                         .await
                     {

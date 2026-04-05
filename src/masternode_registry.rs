@@ -2817,6 +2817,7 @@ impl MasternodeRegistry {
         masternode_address: &str,
         owner_pubkey_hex: &str,
         signature_hex: &str,
+        utxo_manager: &crate::utxo_manager::UTXOStateManager,
     ) -> Result<OutPoint, RegistryError> {
         // 1. Parse outpoint
         let outpoint = Self::parse_outpoint(collateral_outpoint_str)?;
@@ -2838,23 +2839,26 @@ impl MasternodeRegistry {
                 }
             }
             Ok(None) => {
-                // No anchor: this outpoint was never registered on-chain (or already unlocked)
-                // Accept anyway — idempotent unlock is fine
+                // No anchor: not registered on-chain or already unlocked — idempotent, accept.
             }
             Err(e) => return Err(RegistryError::Storage(e.to_string())),
         }
 
-        // 5. Verify owner_pubkey matches the registered public key.
-        // Without this check, anyone who knows the collateral outpoint and masternode IP
-        // can forge an unlock by supplying their own key pair with a self-consistent signature.
-        let nodes = self.masternodes.read().await;
-        if let Some(info) = nodes.get(masternode_address) {
-            if info.masternode.public_key != owner_pubkey {
-                return Err(RegistryError::OwnerMismatch);
-            }
+        // 5. Verify owner_pubkey actually owns the collateral UTXO.
+        // Ground truth is the UTXO's address on-chain — not the registry entry, which may have
+        // been gossip-filled by an attacker with their own key. This check ensures only the real
+        // collateral owner can unlock, even when a squatter has gossip-registered against the same
+        // outpoint.
+        let utxo = utxo_manager
+            .get_utxo(&outpoint)
+            .await
+            .map_err(|_| RegistryError::CollateralNotFound)?;
+        let expected_address =
+            crate::address::Address::from_public_key(owner_pubkey.as_bytes(), self.network)
+                .as_string();
+        if utxo.address != expected_address {
+            return Err(RegistryError::OwnerMismatch);
         }
-        // If the masternode isn't in the registry the anchor is already gone or never existed;
-        // the idempotent path above already handled that case.
 
         Ok(outpoint)
     }
