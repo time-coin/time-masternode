@@ -61,6 +61,7 @@ Commands:
     masternode list        List masternodes (alias)
     masternode status      Get masternode status (alias)
     masternodereg          Register/re-register masternode on-chain (cold wallet signs, operator key embedded)
+    dumpprivkey            Export the Ed25519 private key for a wallet.dat (offline, no RPC needed)
     releaseallcollaterals  Release ALL collateral locks (safe recovery — does not touch tx locks)
     listlockedcollaterals  List all locked collateral UTXOs
   UTXO / Collateral
@@ -474,6 +475,25 @@ enum Commands {
         /// Wallet decryption password (leave empty for unencrypted wallets)
         #[arg(long, default_value = "")]
         wallet_password: String,
+        /// Raw Ed25519 private key in hex (32 bytes = 64 hex chars).
+        /// Use instead of --wallet-path when the cold wallet is on a separate machine.
+        /// Obtain via: time-cli dumpprivkey --wallet-path /path/to/wallet.dat
+        #[arg(long)]
+        privkey: Option<String>,
+    },
+
+    /// Export the Ed25519 private key from a wallet.dat file.
+    /// Works offline — no running daemon or RPC needed.
+    /// Use this to obtain the --privkey value for masternodereg when your
+    /// cold wallet is on a machine that does not run an RPC server.
+    #[command(next_help_heading = "Masternode")]
+    DumpPrivKey {
+        /// Path to the wallet.dat file to export from
+        #[arg(long)]
+        wallet_path: Option<String>,
+        /// Wallet decryption password (leave empty for unencrypted wallets)
+        #[arg(long, default_value = "")]
+        wallet_password: String,
     },
 
     // ============================================================
@@ -708,6 +728,34 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .with_timeout(std::time::Duration::from_secs(30))
         .with_accept_invalid_certs(true);
 
+    // ── DumpPrivKey: offline wallet key export (no RPC) ──────────────────────
+    if let Commands::DumpPrivKey { wallet_path, wallet_password } = &args.command {
+        use timed::wallet::Wallet;
+
+        let wpath = if let Some(p) = wallet_path {
+            std::path::PathBuf::from(p)
+        } else {
+            let data_dir = if is_testnet {
+                dirs::home_dir().unwrap_or_default().join(".timecoin").join("testnet")
+            } else {
+                dirs::home_dir().unwrap_or_default().join(".timecoin")
+            };
+            data_dir.join("wallet.dat")
+        };
+
+        let wallet = Wallet::load(&wpath, wallet_password).map_err(|e| {
+            format!("Failed to load wallet from {}: {}", wpath.display(), e)
+        })?;
+
+        let privkey_hex = hex::encode(wallet.signing_key().to_bytes());
+        let pubkey_hex  = hex::encode(wallet.public_key().as_bytes());
+        println!("address:    {}", wallet.address());
+        println!("pubkey:     {}", pubkey_hex);
+        println!("privkey:    {}", privkey_hex);
+        return Ok(());
+    }
+    // ── End DumpPrivKey ───────────────────────────────────────────────────────
+
     // ── MasternodeReg: local signing then sendrawtransaction ─────────────────
     if let Commands::MasternodeReg {
         collateral,
@@ -716,34 +764,12 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         payout_address,
         wallet_path,
         wallet_password,
+        privkey,
     } = &args.command
     {
-        use ed25519_dalek::Signer;
+        use ed25519_dalek::{Signer, SigningKey};
         use sha2::{Digest, Sha256};
         use timed::wallet::Wallet;
-
-        // Resolve wallet path
-        let wpath = if let Some(p) = wallet_path {
-            std::path::PathBuf::from(p)
-        } else {
-            let data_dir = if is_testnet {
-                dirs::home_dir()
-                    .unwrap_or_default()
-                    .join(".timecoin")
-                    .join("testnet")
-            } else {
-                dirs::home_dir().unwrap_or_default().join(".timecoin")
-            };
-            data_dir.join("wallet.dat")
-        };
-
-        let wallet = Wallet::load(&wpath, wallet_password).map_err(|e| {
-            format!(
-                "Failed to load wallet from {}: {}. Use --wallet-path and --wallet-password.",
-                wpath.display(),
-                e
-            )
-        })?;
 
         let p2p_port = port.unwrap_or(if is_testnet { 24100 } else { 24000 });
 
@@ -763,7 +789,45 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         );
         let message = Sha256::digest(msg.as_bytes()).to_vec();
 
-        let signing_key = wallet.signing_key();
+        // Resolve signing key: --privkey takes priority over --wallet-path
+        let owned_key: SigningKey;
+        let signing_key: &SigningKey = if let Some(pk_hex) = privkey {
+            let bytes = hex::decode(pk_hex)
+                .map_err(|_| "--privkey must be 64 hex characters (32 bytes)")?;
+            if bytes.len() != 32 {
+                return Err("--privkey must be exactly 32 bytes (64 hex chars)".into());
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            owned_key = SigningKey::from_bytes(&arr);
+            &owned_key
+        } else {
+            // Fall back to wallet file
+            let wpath = if let Some(p) = wallet_path {
+                std::path::PathBuf::from(p)
+            } else {
+                let data_dir = if is_testnet {
+                    dirs::home_dir()
+                        .unwrap_or_default()
+                        .join(".timecoin")
+                        .join("testnet")
+                } else {
+                    dirs::home_dir().unwrap_or_default().join(".timecoin")
+                };
+                data_dir.join("wallet.dat")
+            };
+
+            let wallet = Wallet::load(&wpath, wallet_password).map_err(|e| {
+                format!(
+                    "Failed to load wallet from {}: {}. Use --wallet-path or --privkey.",
+                    wpath.display(),
+                    e
+                )
+            })?;
+            owned_key = wallet.signing_key().clone();
+            &owned_key
+        };
+
         let signature = signing_key.sign(&message);
         let owner_pubkey_hex = hex::encode(signing_key.verifying_key().as_bytes());
         let signature_hex = hex::encode(signature.to_bytes());
@@ -873,6 +937,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::ReleaseAllCollaterals => ("releaseallcollaterals", json!([])),
         Commands::ListLockedCollaterals => ("listlockedcollaterals", json!([])),
         Commands::MasternodeReg { .. } => unreachable!("handled above"),
+        Commands::DumpPrivKey { .. } => unreachable!("handled above"),
         Commands::GetConsensusInfo => ("getconsensusinfo", json!([])),
         Commands::GetTreasuryBalance => ("gettreasurybalance", json!([])),
         Commands::ValidateAddress { address } => ("validateaddress", json!([address])),
