@@ -762,13 +762,41 @@ impl UTXOStateManager {
 
     // ========== Masternode Collateral Locking Methods ==========
 
-    /// Lock a UTXO as masternode collateral
+    /// Lock a UTXO as masternode collateral.
+    ///
+    /// `persist` should be `true` only for the **local node's own** collateral.
+    /// Remote masternodes' collateral locks are in-memory only — they are
+    /// re-established from gossip on restart, so persisting them causes the
+    /// collateral_locks sled tree to grow unboundedly as more nodes join the
+    /// network.
     pub fn lock_collateral(
         &self,
         outpoint: OutPoint,
         masternode_address: String,
         lock_height: u64,
         amount: u64,
+    ) -> Result<(), UtxoError> {
+        self.lock_collateral_inner(outpoint, masternode_address, lock_height, amount, false)
+    }
+
+    /// Lock the local node's own collateral UTXO and persist it across restarts.
+    pub fn lock_local_collateral(
+        &self,
+        outpoint: OutPoint,
+        masternode_address: String,
+        lock_height: u64,
+        amount: u64,
+    ) -> Result<(), UtxoError> {
+        self.lock_collateral_inner(outpoint, masternode_address, lock_height, amount, true)
+    }
+
+    fn lock_collateral_inner(
+        &self,
+        outpoint: OutPoint,
+        masternode_address: String,
+        lock_height: u64,
+        amount: u64,
+        persist: bool,
     ) -> Result<(), UtxoError> {
         // Check if UTXO exists and is unspent
         match self.utxo_states.get(&outpoint) {
@@ -794,19 +822,22 @@ impl UTXOStateManager {
         self.locked_collaterals
             .insert(outpoint.clone(), locked_collateral.clone());
 
-        // Persist to disk if available
-        if let Some(tree) = &self.collateral_db {
-            let key = bincode::serialize(&outpoint).unwrap_or_default();
-            let value = bincode::serialize(&locked_collateral).unwrap_or_default();
-            if let Err(e) = tree.insert(key, value) {
-                tracing::warn!("⚠️ Failed to persist collateral lock to disk: {}", e);
+        // Persist to disk only for the local node's own collateral
+        if persist {
+            if let Some(tree) = &self.collateral_db {
+                let key = bincode::serialize(&outpoint).unwrap_or_default();
+                let value = bincode::serialize(&locked_collateral).unwrap_or_default();
+                if let Err(e) = tree.insert(key, value) {
+                    tracing::warn!("⚠️ Failed to persist collateral lock to disk: {}", e);
+                }
             }
         }
 
         tracing::debug!(
-            "🔒 Locked collateral UTXO {:?} (amount: {})",
+            "🔒 Locked collateral UTXO {:?} (amount: {}, persisted: {})",
             outpoint,
-            amount
+            amount,
+            persist,
         );
         Ok(())
     }

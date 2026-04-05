@@ -1242,7 +1242,7 @@ async fn main() {
                 if mn.tier != types::MasternodeTier::Free {
                     if let Some(ref outpoint) = mn.collateral_outpoint {
                         let lock_height = blockchain.get_height();
-                        if let Err(e) = consensus_engine.utxo_manager.lock_collateral(
+                        if let Err(e) = consensus_engine.utxo_manager.lock_local_collateral(
                             outpoint.clone(),
                             mn.address.clone(),
                             lock_height,
