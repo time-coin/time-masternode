@@ -3422,6 +3422,35 @@ impl MessageHandler {
                             continue;
                         }
 
+                        // Verify collateral ownership via canonical anchor.
+                        // Only the first IP to register this outpoint (or the on-chain
+                        // MasternodeReg signer) is authoritative. If a different peer claims
+                        // the same outpoint, reject their lock — they cannot prove ownership
+                        // via gossip alone.
+                        let anchor_ip = context
+                            .masternode_registry
+                            .get_collateral_anchor(&collateral_data.outpoint);
+                        if let Some(ref canonical) = anchor_ip {
+                            let canonical_ip = canonical.split(':').next().unwrap_or(canonical);
+                            let claiming_ip = collateral_data
+                                .masternode_address
+                                .split(':')
+                                .next()
+                                .unwrap_or(&collateral_data.masternode_address);
+                            if canonical_ip != claiming_ip {
+                                warn!(
+                                    "🚨 [{}] Rejecting collateral lock from {} for {:?}: \
+                                     outpoint is anchored to {}",
+                                    self.direction,
+                                    collateral_data.masternode_address,
+                                    collateral_data.outpoint,
+                                    canonical
+                                );
+                                invalid += 1;
+                                continue;
+                            }
+                        }
+
                         // Check if already locked
                         if utxo_manager.is_collateral_locked(&collateral_data.outpoint) {
                             // Already locked - potential conflict or duplicate

@@ -2803,6 +2803,19 @@ impl MasternodeRegistry {
             .and_then(|info| info.operator_pubkey.clone())
     }
 
+    /// Return the canonical IP address anchored to this collateral outpoint in sled,
+    /// if any.  The anchor is written by the first peer to register the outpoint (gossip)
+    /// or by an on-chain MasternodeReg tx (on-chain, always wins over gossip).
+    pub fn get_collateral_anchor(&self, outpoint: &OutPoint) -> Option<String> {
+        let outpoint_key = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
+        let anchor_db_key = format!("collateral_anchor:{}", outpoint_key);
+        self.db
+            .get(anchor_db_key.as_bytes())
+            .ok()
+            .flatten()
+            .and_then(|v| String::from_utf8(v.to_vec()).ok())
+    }
+
     /// Validate a CollateralUnlock special transaction.
     ///
     /// Checks:
