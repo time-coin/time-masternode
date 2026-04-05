@@ -2908,8 +2908,11 @@ impl MessageHandler {
                                         warn!(
                                             "🚨 [{}] COLLATERAL KEY MISMATCH: {} claimed \
                                              collateral {} but node key {}…  != embedded key {}…",
-                                            self.direction, peer_ip, outpoint,
-                                            &announcing_key_hex[..16], &embedded_key_hex[..16]
+                                            self.direction,
+                                            peer_ip,
+                                            outpoint,
+                                            &announcing_key_hex[..16],
+                                            &embedded_key_hex[..16]
                                         );
                                     }
                                     return Ok(None);
@@ -2940,8 +2943,11 @@ impl MessageHandler {
                                         warn!(
                                             "🚨 [{}] OPERATOR KEY MISMATCH: {} claimed collateral \
                                              {} but node key {} != registered operator {}",
-                                            self.direction, peer_ip, outpoint,
-                                            &announcing_key_hex[..16], &registered_op_hex[..16]
+                                            self.direction,
+                                            peer_ip,
+                                            outpoint,
+                                            &announcing_key_hex[..16],
+                                            &registered_op_hex[..16]
                                         );
                                     }
                                     return Ok(None);
@@ -2960,66 +2966,43 @@ impl MessageHandler {
                                     if info.masternode_address != peer_ip {
                                         // Conflict: two different IPs claim the same collateral.
                                         //
-                                        // Arbitrate using the reward_address the peer declared in
-                                        // their announcement — this is the TIME wallet address
-                                        // configured in time.conf, and it must equal utxo.address
-                                        // (the address the collateral was actually sent to).
+                                        // Gossip announcements are self-reported — any peer can
+                                        // set reward_address to any value, including the victim's
+                                        // utxo.address.  Evicting based on reward_address ==
+                                        // utxo.address is exploitable: an attacker sets
+                                        // reward_address = victim's utxo.address to evict the
+                                        // legitimate holder without owning the private key.
                                         //
-                                        // A legitimate owner always configures their own wallet
-                                        // address as the reward destination, so reward_address ==
-                                        // utxo.address proves ownership. A squatter using someone
-                                        // else's collateral UTXO would configure their OWN wallet
-                                        // address (different from utxo.address) so rewards flow to
-                                        // them — that mismatch exposes them.
+                                        // Collateral ownership can ONLY be proven by an on-chain
+                                        // MasternodeReg transaction signed with the key that
+                                        // controls the UTXO.  Those are handled in
+                                        // apply_masternode_reg() which performs full signature
+                                        // verification before evicting any gossip squatter.
                                         //
-                                        // Note: this is NOT used for banning (reward_address is
-                                        // self-reported). It is used only to decide which entry to
-                                        // keep. The on-chain MasternodeReg path issues bans.
-
-                                        if reward_address == utxo.address {
-                                            // Incoming peer's reward_address matches the UTXO —
-                                            // they are the legitimate owner. Evict the squatter
-                                            // (first-seen entry) and let this peer through.
-                                            let squatter_ip = info.masternode_address.clone();
+                                        // Gossip conflicts: always reject the new claimant.
+                                        static CONFLICT_WARN_TIMES: std::sync::OnceLock<
+                                            dashmap::DashMap<String, std::time::Instant>,
+                                        > = std::sync::OnceLock::new();
+                                        let warn_map =
+                                            CONFLICT_WARN_TIMES.get_or_init(dashmap::DashMap::new);
+                                        let should_warn = warn_map
+                                            .get(&peer_ip)
+                                            .map(|t| t.elapsed().as_secs() >= 600)
+                                            .unwrap_or(true);
+                                        if should_warn {
+                                            warn_map
+                                                .insert(peer_ip.clone(), std::time::Instant::now());
                                             warn!(
-                                                "🔁 [{}] Evicting squatter {} — legitimate owner {} \
-                                                 reclaiming collateral {} (reward_address matches \
-                                                 utxo.address: {})",
-                                                self.direction, squatter_ip, peer_ip,
-                                                outpoint, utxo.address
+                                                "🚨 [{}] Collateral conflict: {} claimed {} \
+                                                 already held by {} — gossip cannot prove \
+                                                 ownership, use on-chain MasternodeReg",
+                                                self.direction,
+                                                peer_ip,
+                                                outpoint,
+                                                info.masternode_address
                                             );
-                                            // Unlock so the legitimate owner can re-lock below
-                                            let _ = utxo_manager.unlock_collateral(&outpoint);
-                                        } else {
-                                            // Incoming peer's reward_address does NOT match the
-                                            // UTXO's address — they are claiming collateral they
-                                            // don't own. Reject silently; no ban because this
-                                            // signal is self-reported (bans come from on-chain).
-                                            static THEFT_WARN_TIMES: std::sync::OnceLock<
-                                                dashmap::DashMap<String, std::time::Instant>,
-                                            > = std::sync::OnceLock::new();
-                                            let warn_map =
-                                                THEFT_WARN_TIMES.get_or_init(dashmap::DashMap::new);
-                                            let should_warn = warn_map
-                                                .get(&peer_ip)
-                                                .map(|t| t.elapsed().as_secs() >= 600)
-                                                .unwrap_or(true);
-                                            if should_warn {
-                                                warn_map.insert(
-                                                    peer_ip.clone(),
-                                                    std::time::Instant::now(),
-                                                );
-                                                warn!(
-                                                    "🚨 [{}] COLLATERAL SQUATTER REJECTED: {} \
-                                                     claimed {} but reward_address {} != \
-                                                     utxo.address {} (held by {})",
-                                                    self.direction, peer_ip, outpoint,
-                                                    reward_address, utxo.address,
-                                                    info.masternode_address
-                                                );
-                                            }
-                                            return Ok(None);
                                         }
+                                        return Ok(None);
                                     }
                                 }
                             }
@@ -5624,7 +5607,7 @@ impl MessageHandler {
                                     script_pubkey: output.script_pubkey.clone(),
                                     address: String::from_utf8(output.script_pubkey.clone())
                                         .unwrap_or_default(),
-                                masternode_key: None,
+                                    masternode_key: None,
                                 };
                                 if let Err(e) = consensus.utxo_manager.add_utxo(utxo).await {
                                     tracing::warn!("Failed to add output UTXO vout={}: {}", idx, e);

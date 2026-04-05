@@ -1,11 +1,11 @@
+use bincode;
+use chrono;
 use clap::{Parser, Subcommand};
+use dirs;
+use hex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use timed::http_client::HttpClient;
-use dirs;
-use hex;
-use bincode;
-use chrono;
 
 #[derive(Parser, Debug)]
 #[command(name = "time-cli")]
@@ -729,26 +729,32 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .with_accept_invalid_certs(true);
 
     // ── DumpPrivKey: offline wallet key export (no RPC) ──────────────────────
-    if let Commands::DumpPrivKey { wallet_path, wallet_password } = &args.command {
+    if let Commands::DumpPrivKey {
+        wallet_path,
+        wallet_password,
+    } = &args.command
+    {
         use timed::wallet::Wallet;
 
         let wpath = if let Some(p) = wallet_path {
             std::path::PathBuf::from(p)
         } else {
             let data_dir = if is_testnet {
-                dirs::home_dir().unwrap_or_default().join(".timecoin").join("testnet")
+                dirs::home_dir()
+                    .unwrap_or_default()
+                    .join(".timecoin")
+                    .join("testnet")
             } else {
                 dirs::home_dir().unwrap_or_default().join(".timecoin")
             };
             data_dir.join("wallet.dat")
         };
 
-        let wallet = Wallet::load(&wpath, wallet_password).map_err(|e| {
-            format!("Failed to load wallet from {}: {}", wpath.display(), e)
-        })?;
+        let wallet = Wallet::load(&wpath, wallet_password)
+            .map_err(|e| format!("Failed to load wallet from {}: {}", wpath.display(), e))?;
 
         let privkey_hex = hex::encode(wallet.signing_key().to_bytes());
-        let pubkey_hex  = hex::encode(wallet.public_key().as_bytes());
+        let pubkey_hex = hex::encode(wallet.public_key().as_bytes());
         println!("address:    {}", wallet.address());
         println!("pubkey:     {}", pubkey_hex);
         println!("privkey:    {}", privkey_hex);
@@ -778,7 +784,9 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         if parts.len() != 2 {
             return Err("--collateral must be in txid_hex:vout format".into());
         }
-        let vout: u32 = parts[0].parse().map_err(|_| "Invalid vout in --collateral")?;
+        let vout: u32 = parts[0]
+            .parse()
+            .map_err(|_| "Invalid vout in --collateral")?;
         let txid_hex = parts[1];
         let outpoint_str = format!("{}:{}", txid_hex, vout);
 
@@ -872,7 +880,8 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                  Check: collateral UTXO exists, owner_pubkey matches utxo.address, \
                  and collateral is not already on-chain registered.",
                 error.message, error.code
-            ).into());
+            )
+            .into());
         }
         if let Some(txid) = rpc_response.result {
             println!("✅ MasternodeReg submitted!");

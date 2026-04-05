@@ -9565,8 +9565,7 @@ impl Blockchain {
                                         // (implies they built valid blocks on top of it).
                                         // Peers above our height but below the alternative
                                         // tip are NOT counted; their chain may diverge.
-                                        if (tip_h == peer_tip_height
-                                            && tip_hash == peer_tip_hash)
+                                        if (tip_h == peer_tip_height && tip_hash == peer_tip_hash)
                                             || tip_h > peer_tip_height
                                         {
                                             supporting += 1;
@@ -9624,20 +9623,15 @@ impl Blockchain {
                                 // Not enough peer support yet. Record when we first got
                                 // blocked for this ancestor so the escape hatch can fire.
                                 {
-                                    let mut guard =
-                                        self.finality_lock_blocked_since.write().await;
+                                    let mut guard = self.finality_lock_blocked_since.write().await;
                                     match guard.as_ref() {
                                         None => {
-                                            *guard = Some((
-                                                common_ancestor,
-                                                std::time::Instant::now(),
-                                            ));
+                                            *guard =
+                                                Some((common_ancestor, std::time::Instant::now()));
                                         }
                                         Some((a, _)) if *a != common_ancestor => {
-                                            *guard = Some((
-                                                common_ancestor,
-                                                std::time::Instant::now(),
-                                            ));
+                                            *guard =
+                                                Some((common_ancestor, std::time::Instant::now()));
                                         }
                                         _ => {} // Same ancestor — keep existing timer.
                                     }

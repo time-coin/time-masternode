@@ -1587,7 +1587,9 @@ async fn main() {
                         // requires a signature from the key whose address matches utxo.address.
                         // If the collateral belongs to a separate cold/GUI wallet, the node
                         // cannot sign on its behalf — the user must submit from that wallet.
-                        let can_self_register = if let Some(outpoint) = mn_for_sync.collateral_outpoint.as_ref() {
+                        let can_self_register = if let Some(outpoint) =
+                            mn_for_sync.collateral_outpoint.as_ref()
+                        {
                             match collateral_sync_utxo.get_utxo(outpoint).await {
                                 Ok(utxo) => {
                                     let node_pubkey = wallet_key_for_sync.verifying_key();
@@ -1595,7 +1597,8 @@ async fn main() {
                                     let node_addr = crate::address::Address::from_public_key(
                                         node_pubkey.as_bytes(),
                                         network,
-                                    ).as_string();
+                                    )
+                                    .as_string();
                                     if node_addr == utxo.address {
                                         true
                                     } else {
@@ -1603,7 +1606,9 @@ async fn main() {
                                             "⚠️  Cannot auto-submit MasternodeReg: collateral {} \
                                              belongs to address {} but this node's wallet address \
                                              is {}.",
-                                            new_outpoint_str, utxo.address, node_addr
+                                            new_outpoint_str,
+                                            utxo.address,
+                                            node_addr
                                         );
                                         tracing::warn!(
                                             "📋 ACTION REQUIRED: Submit MasternodeReg from the \
@@ -1648,9 +1653,7 @@ async fn main() {
                                         hex::encode(txid)
                                     ),
                                     Err(e) => {
-                                        tracing::warn!(
-                                            "⚠️ MasternodeReg submission failed: {}", e
-                                        )
+                                        tracing::warn!("⚠️ MasternodeReg submission failed: {}", e)
                                     }
                                 }
                             }
@@ -3437,7 +3440,8 @@ async fn main() {
                     tracing::warn!(
                         "⚠️ Fork-prevention override (attempt {}): peers report height {} but \
                          all their blocks have been invalid — producing our own block",
-                        leader_attempt, max_peer_height_final
+                        leader_attempt,
+                        max_peer_height_final
                     );
                     // Fall through to block production below
                 } else {

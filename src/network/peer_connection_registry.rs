@@ -190,7 +190,9 @@ impl PeerConnectionRegistry {
                 );
                 tracing::error!("🚫 INCOMPATIBLE PEER DETECTED: {}", ip_only);
                 tracing::error!("🚫 Reason: {}", reason);
-                tracing::error!("🚫 This is a GENESIS MISMATCH — peer will be PERMANENTLY ignored.");
+                tracing::error!(
+                    "🚫 This is a GENESIS MISMATCH — peer will be PERMANENTLY ignored."
+                );
                 tracing::error!("🚫 Peer should update software and resync from genesis.");
                 tracing::error!(
                     "🚫 ═══════════════════════════════════════════════════════════════════"
@@ -394,12 +396,8 @@ impl PeerConnectionRegistry {
                     ip_only
                 );
                 // Peer has no genesis — cannot be on our chain; exclude from sync/fork decisions
-                self.mark_incompatible(
-                    peer_ip,
-                    "No genesis block (old code or empty node)",
-                    false,
-                )
-                .await;
+                self.mark_incompatible(peer_ip, "No genesis block (old code or empty node)", false)
+                    .await;
                 false
             }
             Ok(other) => {
@@ -411,10 +409,7 @@ impl PeerConnectionRegistry {
                 // Unexpected response — likely old code; exclude from sync/fork decisions
                 self.mark_incompatible(
                     peer_ip,
-                    &format!(
-                        "Unexpected genesis response: {}",
-                        other.message_type()
-                    ),
+                    &format!("Unexpected genesis response: {}", other.message_type()),
                     false,
                 )
                 .await;

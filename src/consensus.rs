@@ -3112,7 +3112,7 @@ impl ConsensusEngine {
                         script_pubkey: output.script_pubkey.clone(),
                         address: String::from_utf8(output.script_pubkey.clone())
                             .unwrap_or_default(),
-                    masternode_key: None,
+                        masternode_key: None,
                     };
                     if let Err(e) = self.utxo_manager.add_utxo(utxo).await {
                         tracing::warn!("Failed to add output UTXO vout={}: {}", idx, e);
@@ -3334,7 +3334,7 @@ impl ConsensusEngine {
                                         script_pubkey: output.script_pubkey.clone(),
                                         address: String::from_utf8(output.script_pubkey.clone())
                                             .unwrap_or_default(),
-                                    masternode_key: None,
+                                        masternode_key: None,
                                     };
                                     if let Err(e) =
                                         consensus_engine_clone.utxo_manager.add_utxo(utxo).await

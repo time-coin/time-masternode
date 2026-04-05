@@ -1939,7 +1939,7 @@ dependencies = [
 
 [[package]]
 name = "timed"
-version = "1.4.33"
+version = "1.4.34"
 dependencies = [
  "aes-gcm",
  "argon2",

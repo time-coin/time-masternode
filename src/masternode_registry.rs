@@ -2675,9 +2675,7 @@ impl MasternodeRegistry {
                 .next();
 
             if let Some(squatter) = squatter_addr {
-                tracing::error!(
-                    "🚨 ════════════════════════════════════════════════════════════"
-                );
+                tracing::error!("🚨 ════════════════════════════════════════════════════════════");
                 tracing::error!("🚨 COLLATERAL SQUATTER EVICTED");
                 tracing::error!("🚨 IP: {}", squatter);
                 tracing::error!(
@@ -2693,9 +2691,7 @@ impl MasternodeRegistry {
                     "🚨 Legitimate owner {} proved ownership via signed on-chain tx.",
                     address
                 );
-                tracing::error!(
-                    "🚨 ════════════════════════════════════════════════════════════"
-                );
+                tracing::error!("🚨 ════════════════════════════════════════════════════════════");
                 nodes.remove(&squatter);
             }
         }
@@ -2793,15 +2789,18 @@ impl MasternodeRegistry {
     /// Used by gossip/handshake handlers to verify the announcing node is the registered operator.
     pub async fn get_operator_pubkey_for_collateral(&self, outpoint: &OutPoint) -> Option<String> {
         let nodes = self.masternodes.read().await;
-        nodes.values().find(|info| {
-            matches!(info.registration_source, RegistrationSource::OnChain(_))
-                && info
-                    .masternode
-                    .collateral_outpoint
-                    .as_ref()
-                    .map(|op| op.txid == outpoint.txid && op.vout == outpoint.vout)
-                    .unwrap_or(false)
-        }).and_then(|info| info.operator_pubkey.clone())
+        nodes
+            .values()
+            .find(|info| {
+                matches!(info.registration_source, RegistrationSource::OnChain(_))
+                    && info
+                        .masternode
+                        .collateral_outpoint
+                        .as_ref()
+                        .map(|op| op.txid == outpoint.txid && op.vout == outpoint.vout)
+                        .unwrap_or(false)
+            })
+            .and_then(|info| info.operator_pubkey.clone())
     }
 
     /// Validate a CollateralUnlock special transaction.

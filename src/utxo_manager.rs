@@ -326,7 +326,7 @@ impl UTXOStateManager {
                 "⚠️ Spending collateral-locked UTXO {:?} — releasing lock (on-chain spend is authoritative)",
                 outpoint
             );
-            self.unlock_collateral(outpoint);
+            let _ = self.unlock_collateral(outpoint);
         }
 
         // Remove from address index before removing from storage
@@ -1336,7 +1336,10 @@ mod tests {
         // Block-processing spend must succeed even on collateral-locked UTXOs —
         // an on-chain spend is authoritative and the lock is released automatically.
         let result = manager.spend_utxo(&outpoint).await;
-        assert!(result.is_ok(), "spend_utxo should release collateral lock and succeed");
+        assert!(
+            result.is_ok(),
+            "spend_utxo should release collateral lock and succeed"
+        );
         // Collateral lock should now be gone
         assert!(!manager.is_collateral_locked(&outpoint));
     }
