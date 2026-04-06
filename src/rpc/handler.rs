@@ -190,6 +190,7 @@ impl RpcHandler {
             "masternodelist" => self.masternode_list(&params_array).await,
             "masternodestatus" => self.masternode_status().await,
             "checkcollateral" => self.check_collateral().await,
+            "findcollateral" => self.find_collateral(&params_array).await,
             "listlockedcollaterals" => self.list_locked_collaterals().await,
             "unlockcollateral" => self.unlock_collateral_rpc(&params_array).await,
             "getconsensusinfo" => self.get_consensus_info().await,
@@ -2483,6 +2484,109 @@ impl RpcHandler {
                 "UTXO found but not locked — restart timed to re-register collateral lock"
             } else {
                 "Collateral is healthy"
+            }
+        }))
+    }
+
+    /// Look up who (if anyone) is currently claiming an arbitrary collateral outpoint.
+    ///
+    /// Unlike `checkcollateral` (which only inspects the locally-configured collateral),
+    /// this works for any txid:vout — useful for diagnosing squatted UTXOs that are
+    /// no longer configured in masternode.conf.
+    async fn find_collateral(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let outpoint_str = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Usage: findcollateral <txid:vout>".to_string(),
+            })?;
+
+        // Accept both "txid:vout" and separate txid + vout params
+        let (txid_str, vout_u32) = if let Some(pos) = outpoint_str.find(':') {
+            let txid = &outpoint_str[..pos];
+            let vout: u32 = outpoint_str[pos + 1..].parse().map_err(|_| RpcError {
+                code: -32602,
+                message: "Invalid vout in outpoint string".to_string(),
+            })?;
+            (txid.to_string(), vout)
+        } else {
+            let vout_val = params
+                .get(1)
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| RpcError {
+                    code: -32602,
+                    message: "Usage: findcollateral <txid:vout> OR findcollateral <txid> <vout>"
+                        .to_string(),
+                })? as u32;
+            (outpoint_str.to_string(), vout_val)
+        };
+
+        let txid_bytes = hex::decode(&txid_str).map_err(|_| RpcError {
+            code: -8,
+            message: "Invalid txid hex".to_string(),
+        })?;
+        if txid_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -8,
+                message: "txid must be 32 bytes (64 hex chars)".to_string(),
+            });
+        }
+        let mut txid = [0u8; 32];
+        txid.copy_from_slice(&txid_bytes);
+        let outpoint = crate::types::OutPoint { txid, vout: vout_u32 };
+        let outpoint_display = format!("{}:{}", txid_str, vout_u32);
+
+        // Registry: who currently claims this outpoint via gossip?
+        let registry_ip = self
+            .registry
+            .get_registered_ip_for_collateral(&outpoint)
+            .await;
+
+        // UTXOManager collateral lock
+        let lock_info = self.utxo_manager.get_locked_collateral(&outpoint);
+        let is_locked = lock_info.is_some();
+        let locked_to = lock_info
+            .as_ref()
+            .map(|l| l.masternode_address.clone())
+            .unwrap_or_default();
+
+        // On-chain UTXO
+        let utxo_result = self.utxo_manager.get_utxo(&outpoint).await;
+        let (utxo_found, utxo_value, utxo_address, detected_tier) = match &utxo_result {
+            Ok(utxo) => {
+                let tier = crate::types::MasternodeTier::from_collateral_value(utxo.value)
+                    .map(|t| format!("{:?}", t))
+                    .unwrap_or_else(|| format!("Unknown ({} TIME)", utxo.value / 100_000_000));
+                (true, utxo.value, utxo.address.clone(), tier)
+            }
+            Err(_) => (false, 0u64, String::new(), "Unknown".to_string()),
+        };
+
+        // Sled canonical anchor
+        let anchor_ip = self.registry.get_collateral_anchor(&outpoint);
+
+        let claimant = registry_ip.clone().or_else(|| anchor_ip.clone());
+        let status = if claimant.is_none() { "unclaimed" } else { "claimed" };
+
+        Ok(json!({
+            "outpoint": outpoint_display,
+            "status": status,
+            "registry_claimant": registry_ip,
+            "anchor_claimant": anchor_ip,
+            "collateral_locked": is_locked,
+            "locked_to": locked_to,
+            "utxo_found": utxo_found,
+            "utxo_value_satoshis": utxo_value,
+            "utxo_value_time": utxo_value / 100_000_000,
+            "utxo_address": utxo_address,
+            "detected_tier": detected_tier,
+            "advice": if !utxo_found {
+                "UTXO not found on this node — chain may not have it yet, or it was spent"
+            } else if claimant.is_some() {
+                "Outpoint is claimed — if this is your collateral, run 'masternodereg' with the correct IP to reclaim it on-chain, or configure it in masternode.conf and restart to trigger V4 auto-eviction"
+            } else {
+                "Outpoint is not claimed by any node"
             }
         }))
     }

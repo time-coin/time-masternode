@@ -59,6 +59,7 @@ Commands:
     masternodelist         List all masternodes
     masternodestatus       Get this node's masternode status
     checkcollateral        Check collateral UTXO health (on-chain, lock, squatter, tier)
+    findcollateral         Look up who is claiming any collateral outpoint [txid:vout]
     masternode genkey      Generate a new masternode key
     masternode list        List masternodes (alias)
     masternode status      Get masternode status (alias)
@@ -457,6 +458,19 @@ enum Commands {
     /// and whether a squatter has claimed the outpoint in the gossip registry.
     #[command(next_help_heading = "Masternode")]
     CheckCollateral,
+
+    /// Look up who is currently claiming any collateral outpoint.
+    ///
+    /// Works for any txid:vout, including UTXOs not configured locally.
+    /// Use this to diagnose squatted collaterals across all your masternodes.
+    ///
+    /// Example:
+    ///   time-cli findcollateral abc123...:0
+    #[command(next_help_heading = "Masternode")]
+    FindCollateral {
+        /// Outpoint in the form txid:vout (e.g. abc123...:0)
+        outpoint: String,
+    },
 
     /// Register or re-register a masternode on-chain (two-key model).
     ///
@@ -965,6 +979,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::ReleaseAllCollaterals => ("releaseallcollaterals", json!([])),
         Commands::ListLockedCollaterals => ("listlockedcollaterals", json!([])),
         Commands::CheckCollateral => ("checkcollateral", json!([])),
+        Commands::FindCollateral { outpoint } => ("findcollateral", json!([outpoint])),
         Commands::MasternodeReg { .. } => unreachable!("handled above"),
         Commands::DumpPrivKey { .. } => unreachable!("handled above"),
         Commands::GetConsensusInfo => ("getconsensusinfo", json!([])),
