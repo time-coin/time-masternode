@@ -3212,6 +3212,9 @@ impl MessageHandler {
                                     .masternode_registry
                                     .unregister(&registry_squatter)
                                     .await;
+                                // Also release the UTXOManager lock so the wallet can
+                                // spend the UTXO again if the squatter held the lock.
+                                let _ = utxo_manager.unlock_collateral(&outpoint);
                             } else {
                                 warn!(
                                     "🚨 [{}] Registry conflict: {} already holds {} — \
