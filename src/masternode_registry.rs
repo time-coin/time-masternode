@@ -1016,11 +1016,19 @@ impl MasternodeRegistry {
         // regardless of HashMap iteration order, preventing per-tier pool mismatches
         // caused by non-deterministic tier classification across different nodes.
         // Discriminant values: Gold=100000 > Silver=10000 > Bronze=1000 > Free=0
+        //
+        // Match against reward_address (if set) OR wallet_address, mirroring the
+        // block-production logic.  A mismatch here is what produces "unknown recipient"
+        // errors that incorrectly reject valid blocks (fork bug).
         self.masternodes
             .read()
             .await
             .values()
-            .filter(|info| info.masternode.wallet_address == wallet_address)
+            .filter(|info| {
+                info.masternode.wallet_address == wallet_address
+                    || (!info.reward_address.is_empty()
+                        && info.reward_address == wallet_address)
+            })
             .map(|info| info.masternode.tier)
             .max_by_key(|tier| *tier as u64)
     }

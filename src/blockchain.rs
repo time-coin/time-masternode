@@ -6303,11 +6303,22 @@ impl Blockchain {
         // We still use the registry for this single lookup (IP → wallet). The
         // producer's wallet address is stable — if we can't find it the block
         // is either very old or the registry is empty; skip validation.
+        //
+        // IMPORTANT: use reward_address (if set) before wallet_address, mirroring
+        // the produce_block logic exactly.  Validators that only check wallet_address
+        // will compute producer_received=0 when reward_address≠wallet_address,
+        // incorrectly rejecting the block and causing a consensus fork.
         let all_infos = self.masternode_registry.list_all().await;
         let producer_wallet = match all_infos
             .iter()
             .find(|info| info.masternode.address == *producer_addr)
-            .map(|info| info.masternode.wallet_address.clone())
+            .map(|info| {
+                if !info.reward_address.is_empty() {
+                    info.reward_address.clone()
+                } else {
+                    info.masternode.wallet_address.clone()
+                }
+            })
         {
             Some(w) => w,
             None => return Ok(()),
