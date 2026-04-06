@@ -70,6 +70,18 @@ fn utxo_divergence_rounds() -> &'static std::sync::atomic::AtomicU32 {
 /// Max age for cached peer UTXO hashes (10 minutes = 2 sync check cycles).
 const UTXO_HASH_CACHE_TTL: Duration = Duration::from_secs(600);
 
+/// After a V4 proof eviction fires for an outpoint, block further V4 evictions
+/// on that same outpoint for this many seconds.  Prevents infinite eviction storms
+/// when multiple nodes simultaneously hold valid V4 proofs for the same collateral.
+const V4_EVICTION_COOLDOWN_SECS: u64 = 60;
+
+/// Per-outpoint timestamp of the last accepted V4 proof eviction.
+fn v4_eviction_cooldown() -> &'static dashmap::DashMap<String, std::time::Instant> {
+    static INSTANCE: std::sync::OnceLock<dashmap::DashMap<String, std::time::Instant>> =
+        std::sync::OnceLock::new();
+    INSTANCE.get_or_init(dashmap::DashMap::new)
+}
+
 /// Direction of the network connection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionDirection {
@@ -3046,8 +3058,88 @@ impl MessageHandler {
                                         };
 
                                         let can_evict = if has_valid_proof {
-                                            // Tier 1: cryptographic proof
-                                            true
+                                            // Tier 1: cryptographic proof — but never evict the
+                                            // local node via gossip regardless of proof strength;
+                                            // the legitimate owner must file an on-chain
+                                            // MasternodeReg tx to reclaim the collateral.
+                                            let is_local_squatter = context
+                                                .node_masternode_address
+                                                .as_deref()
+                                                .map(|local| local == squatter_ip)
+                                                .unwrap_or(false);
+                                            if is_local_squatter {
+                                                static LOCAL_V4_WARN: std::sync::OnceLock<
+                                                    dashmap::DashMap<
+                                                        String,
+                                                        std::time::Instant,
+                                                    >,
+                                                > = std::sync::OnceLock::new();
+                                                let wm =
+                                                    LOCAL_V4_WARN.get_or_init(dashmap::DashMap::new);
+                                                if wm
+                                                    .get(&peer_ip)
+                                                    .map(|t| t.elapsed().as_secs() >= 120)
+                                                    .unwrap_or(true)
+                                                {
+                                                    wm.insert(
+                                                        peer_ip.clone(),
+                                                        std::time::Instant::now(),
+                                                    );
+                                                    warn!(
+                                                        "🛡️ [{}] Blocked V4 eviction of local node \
+                                                         {} by {} for {} — use on-chain \
+                                                         MasternodeReg to reclaim collateral",
+                                                        self.direction,
+                                                        squatter_ip,
+                                                        peer_ip,
+                                                        outpoint
+                                                    );
+                                                }
+                                                false
+                                            } else {
+                                                // Storm protection: rate-limit V4 evictions per
+                                                // outpoint to break infinite cycling when multiple
+                                                // nodes simultaneously hold valid V4 proofs.
+                                                let outpoint_key = outpoint.to_string();
+                                                let within_cooldown = v4_eviction_cooldown()
+                                                    .get(&outpoint_key)
+                                                    .map(|t| {
+                                                        t.elapsed().as_secs()
+                                                            < V4_EVICTION_COOLDOWN_SECS
+                                                    })
+                                                    .unwrap_or(false);
+                                                if within_cooldown {
+                                                    static STORM_WARN: std::sync::OnceLock<
+                                                        dashmap::DashMap<
+                                                            String,
+                                                            std::time::Instant,
+                                                        >,
+                                                    > = std::sync::OnceLock::new();
+                                                    let wm = STORM_WARN
+                                                        .get_or_init(dashmap::DashMap::new);
+                                                    if wm
+                                                        .get(&outpoint_key)
+                                                        .map(|t| t.elapsed().as_secs() >= 30)
+                                                        .unwrap_or(true)
+                                                    {
+                                                        wm.insert(
+                                                            outpoint_key,
+                                                            std::time::Instant::now(),
+                                                        );
+                                                        warn!(
+                                                            "🛡️ [{}] V4 eviction storm blocked \
+                                                             for {} ({} → {}) — cooldown active",
+                                                            self.direction,
+                                                            outpoint,
+                                                            squatter_ip,
+                                                            peer_ip
+                                                        );
+                                                    }
+                                                    false
+                                                } else {
+                                                    true
+                                                }
+                                            }
                                         } else if claimant_matches_utxo
                                             && !squatter_matches_utxo
                                         {
@@ -3087,6 +3179,10 @@ impl MessageHandler {
 
                                         if can_evict {
                                             if has_valid_proof {
+                                                v4_eviction_cooldown().insert(
+                                                    outpoint.to_string(),
+                                                    std::time::Instant::now(),
+                                                );
                                                 info!(
                                                     "✅ [{}] V4 collateral proof verified: evicting \
                                                      squatter {} and registering legitimate owner {} \
@@ -3206,7 +3302,69 @@ impl MessageHandler {
                             };
 
                             let can_evict = if has_valid_proof {
-                                true
+                                // Tier 1: cryptographic proof — but never evict the local node
+                                // via gossip regardless of proof strength.
+                                let is_local_squatter = context
+                                    .node_masternode_address
+                                    .as_deref()
+                                    .map(|local| local == registry_squatter.as_str())
+                                    .unwrap_or(false);
+                                if is_local_squatter {
+                                    static LOCAL_V4_WARN2: std::sync::OnceLock<
+                                        dashmap::DashMap<String, std::time::Instant>,
+                                    > = std::sync::OnceLock::new();
+                                    let wm = LOCAL_V4_WARN2.get_or_init(dashmap::DashMap::new);
+                                    if wm
+                                        .get(&peer_ip)
+                                        .map(|t| t.elapsed().as_secs() >= 120)
+                                        .unwrap_or(true)
+                                    {
+                                        wm.insert(peer_ip.clone(), std::time::Instant::now());
+                                        warn!(
+                                            "🛡️ [{}] Blocked V4 eviction of local node {} \
+                                             by {} for {} (registry path) \
+                                             — use on-chain MasternodeReg to reclaim",
+                                            self.direction, registry_squatter, peer_ip, outpoint
+                                        );
+                                    }
+                                    false
+                                } else {
+                                    // Storm protection: rate-limit V4 evictions per outpoint
+                                    let outpoint_key = outpoint.to_string();
+                                    let within_cooldown = v4_eviction_cooldown()
+                                        .get(&outpoint_key)
+                                        .map(|t| {
+                                            t.elapsed().as_secs() < V4_EVICTION_COOLDOWN_SECS
+                                        })
+                                        .unwrap_or(false);
+                                    if within_cooldown {
+                                        static STORM_WARN2: std::sync::OnceLock<
+                                            dashmap::DashMap<String, std::time::Instant>,
+                                        > = std::sync::OnceLock::new();
+                                        let wm = STORM_WARN2.get_or_init(dashmap::DashMap::new);
+                                        if wm
+                                            .get(&outpoint_key)
+                                            .map(|t| t.elapsed().as_secs() >= 30)
+                                            .unwrap_or(true)
+                                        {
+                                            wm.insert(
+                                                outpoint_key,
+                                                std::time::Instant::now(),
+                                            );
+                                            warn!(
+                                                "🛡️ [{}] V4 eviction storm blocked for {} \
+                                                 ({} → {}) — cooldown active (registry path)",
+                                                self.direction,
+                                                outpoint,
+                                                registry_squatter,
+                                                peer_ip
+                                            );
+                                        }
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                }
                             } else if claimant_matches_utxo && !squatter_matches_utxo {
                                 // SAFETY: never evict the local node via Tier 2 — see comment
                                 // in the UTXOManager-locked path above.
@@ -3238,6 +3396,10 @@ impl MessageHandler {
 
                             if can_evict {
                                 if has_valid_proof {
+                                    v4_eviction_cooldown().insert(
+                                        outpoint.to_string(),
+                                        std::time::Instant::now(),
+                                    );
                                     info!(
                                         "✅ [{}] V4 proof evicts registry squatter {} for {} \
                                          (UTXOManager lock was absent — registry-only eviction)",
