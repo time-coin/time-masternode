@@ -15,7 +15,7 @@ This document provides a comprehensive security analysis of TimeCoin against all
 **Overall Security Rating: 🟢 STRONG** (with recommended enhancements)
 
 ### Key Findings
-- ✅ **21 attack vectors fully mitigated**
+- ✅ **22 attack vectors fully mitigated** (+1 from January 2026 audit: collateral anchor squatting)
 - ⚠️ **4 attack vectors with recommended enhancements**
 - ❌ **0 critical vulnerabilities**
 - 🟢 **Already 2106-safe** (ahead of Bitcoin's uint32 → uint64 migration)
@@ -226,6 +226,49 @@ producer_drift_history: HashMap<MnId, Vec<i64>>
 - `src/ai/anomaly_detector.rs` - Z-score anomaly detection on network events
 - `src/ai/attack_detector.rs` - Sybil/eclipse/fork bombing detection with auto-ban enforcement
 - `src/masternode_registry.rs` - Tier collateral requirements
+
+---
+
+### 2.1a ✅ Collateral Anchor Squatting
+**Status:** **MITIGATED** (commit `6e6d14e` — 2026-04-06)
+
+**Attack:** Attacker monitors the mempool for a new collateral UTXO (e.g. a Silver
+send-to-self from `188.166.243.108`), then gossips a `MasternodeAnnouncement` claiming
+that TXID before the legitimate node can announce itself. The attacker's IP is anchored
+first and the legitimate owner is permanently locked out.
+
+**Root cause:** Gossip announcements are self-reported — any node can claim any UTXO
+outpoint, and the first-claim anchor in sled was permanent. The `wallet_address` field
+was unverifiable because it came from the announcement message itself.
+
+**TimeCoin Protection (V4 collateral proof):**
+- On startup, the masternode daemon signs `"TIME_COLLATERAL_CLAIM:<txid>:<vout>"` with
+  `masternodeprivkey` (from `time.conf`) and broadcasts `MasternodeAnnouncementV4`
+  with the signature in `collateral_proof`.
+- When a conflict is detected (another IP holds the collateral lock), two conditions
+  are tested:
+  1. The proof signature verifies against the announcing node's own `public_key` over
+     the exact UTXO outpoint — binding this masternode key to this UTXO.
+  2. `reward_address == utxo.address` — the announced reward address matches the
+     on-chain (immutable) address of the collateral UTXO. Since operators configure
+     `reward_address` in `time.conf` to the same address as the collateral UTXO
+     output address, this is always true for the legitimate owner.
+- If both conditions pass: squatter evicted (lock released, registry entry removed),
+  legitimate owner registered.
+- **No GUI wallet changes required** — `masternodeprivkey` and the outpoint in
+  `masternode.conf` are sufficient. The proof is generated and broadcast automatically.
+
+**Attack economics under the new scheme:**
+- To pass condition (1): attacker needs the victim's `masternodeprivkey` — not feasible.
+- To pass condition (2) with their own key: attacker sets `reward_address = victim's address`,
+  meaning all rewards go to the victim's wallet. No financial upside.
+- V4-vs-V4 race: attacker must continuously re-squat (every 60 s) while donating
+  all rewards to the victim — economically irrational.
+
+**Code References:**
+- `src/network/message_handler.rs` - `handle_masternode_announcement` conflict resolution
+- `src/main.rs` - V4 announcement signing in announcement task
+- `analysis/2026-04-05_POOL_DISTRIBUTION_ATTACK_VECTORS.md` - Full incident analysis (AV4)
 
 ---
 

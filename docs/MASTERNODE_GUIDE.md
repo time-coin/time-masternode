@@ -291,6 +291,12 @@ masternodeprivkey=5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ
 
 Generate a key with `time-cli masternode genkey`. If omitted, the node uses its wallet's auto-generated key.
 
+> **Important:** Set `reward_address` to the **same address you sent the collateral to** in
+> your GUI wallet. The daemon uses this to prove ownership of the collateral UTXO — if
+> `reward_address` matches the on-chain UTXO output address, the node can evict any squatter
+> that grabbed the UTXO before you announced. See [Squatter protection](#squatter-protection)
+> below.
+
 > **Note on `reward_address` changes:** If you update `reward_address` in `time.conf` and restart, the daemon overwrites the stored `wallet_address` on re-registration so block rewards route to the new address immediately. (Prior to v1.3.0 the stale address persisted until a full re-collateralization.)
 
 ### masternode.conf Format
@@ -337,6 +343,57 @@ After registration, the daemon automatically:
 4. Locks the collateral
 5. Registers the masternode on the network
 6. Begins participating in consensus
+
+---
+
+## Squatter Protection
+
+### What is collateral squatting?
+
+An attacker who monitors the mempool can see a new collateral UTXO appear
+(your send-to-self transaction) and immediately gossip a masternode announcement
+claiming that TXID before your daemon starts. Under the old first-claim rule,
+this permanently blocked your legitimate registration.
+
+### How the daemon protects you (v1.4.35+)
+
+When your daemon announces itself, it signs a **V4 collateral proof**:
+
+```
+"TIME_COLLATERAL_CLAIM:<txid>:<vout>"  signed with masternodeprivkey
+```
+
+If another node already holds the collateral lock, two conditions are checked:
+
+1. **Proof valid** — the signature verifies against your public key over the
+   exact UTXO outpoint.
+2. **Reward address matches** — your `reward_address` in `time.conf` must
+   equal the on-chain address of the collateral UTXO (i.e. the wallet address
+   you sent the coins to).
+
+If both pass, the squatter is **automatically evicted** and you are registered.
+
+### What you need to do
+
+Set `reward_address` in `time.conf` to the same address you used when sending
+collateral from the GUI wallet:
+
+```ini
+masternode=1
+masternodeprivkey=5HueCGU8...
+reward_address=TIME1YourCollateralWalletAddressHere
+```
+
+No additional steps required. The daemon generates and broadcasts the proof
+automatically on every announcement (startup + every 60 seconds).
+
+### What an attacker cannot do
+
+| Attack | Why it fails |
+|---|---|
+| Squatter uses own `reward_address` | `reward_address ≠ utxo.address` → condition 2 fails |
+| Squatter uses victim's `reward_address` | All rewards go to victim's wallet — no benefit |
+| Squatter forges the proof signature | Requires victim's `masternodeprivkey` — not feasible |
 
 ### Verify Registration
 
