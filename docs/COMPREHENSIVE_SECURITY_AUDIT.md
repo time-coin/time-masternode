@@ -118,7 +118,8 @@ pub struct VoteResponse {
 - **TimeVote finality**: Must accumulate votes from 67% stake to finalize
 
 **Code References:**
-- `src/tsdc.rs:116-203` - Deterministic slot-based leader selection
+- `src/timelock.rs` - Deterministic slot-based leader selection (TimeLock protocol)
+- `src/block/vrf.rs` - VRF leader sortition
 - `src/main.rs:1326-1440` - Block production and immediate broadcast
 
 ---
@@ -153,7 +154,7 @@ vrf_input = H(
 This limits pre-computation to 1-2 slots ahead while maintaining determinism.
 
 **Code References:**
-- `src/tsdc.rs:161-165` - VRF input construction
+- `src/block/vrf.rs` - VRF input construction (ECVRF per RFC 9381)
 - Uses ed25519-dalek for ECVRF implementation
 
 ---
@@ -165,16 +166,16 @@ This limits pre-computation to 1-2 slots ahead while maintaining determinism.
 
 **TimeCoin Protection:**
 - **Timestamp validation**: Blocks rejected if timestamp too far in past/future
-- **Tolerance window**: ±600 seconds (TIMESTAMP_TOLERANCE_SECS)
-- **Deterministic slot times**: Block timestamps expected at slot_time = genesis + (slot × 600)
+- **Tolerance window**: ±5 seconds future (`TIMESTAMP_TOLERANCE_SECS = 5` in `src/constants.rs`); blocks claiming a future timestamp are rejected immediately
+- **Deterministic slot times**: Block timestamps expected at slot_time = genesis + (slot × 600); blocks produced more than 30s early are rejected for recent heights
 - **Verification**: Nodes reject blocks with timestamps deviating from expected slot time
-- 🟢 **2106-safe**: Uses `u64` timestamps throughout (no uint32 overflow issues like Bitcoin)
+- 🟢 **2106-safe**: Uses `i64` timestamps throughout (no uint32 overflow issues like Bitcoin)
 
 **Code References:**
-- `src/blockchain.rs:1741-1755` - Timestamp validation
-- `src/tsdc.rs:256-259` - Slot time calculation
-- `src/block/types.rs:21` - u64 slot_time field
-- `src/transaction.rs:34` - u64 timestamp fields
+- `src/blockchain.rs` - `validate_block()` (future-timestamp rejection) and `add_block()` (past-timestamp gating)
+- `src/constants.rs:63` - `TIMESTAMP_TOLERANCE_SECS = 5`
+- `src/timelock.rs` - Slot time calculation (genesis + height × 600)
+- `src/block/types.rs` - Block header timestamp field
 
 **Limits:** Timestamps can vary within ±10 minutes, but doesn't affect consensus security.
 
@@ -201,7 +202,8 @@ producer_drift_history: HashMap<MnId, Vec<i64>>
 - **Masternode connections**: Reserved slots for whitelisted masternodes
 
 **Code References:**
-- `src/network/peer_selection.rs:67-98` - Epsilon-greedy peer diversity
+- `src/ai/peer_selector.rs` - Epsilon-greedy peer diversity and multi-dimensional scoring
+- `src/network/peer_scoring.rs` - Per-peer quality scoring
 - `src/main.rs:1331-1380` - Multi-peer chain tip verification
 
 ---
@@ -307,13 +309,14 @@ was unverifiable because it came from the announcement message itself.
 - **Connection diversity**: Separate inbound/outbound limits
 
 **Code References:**
-- `src/network/peer_selection.rs:28-65` - Multi-dimensional peer scoring
+- `src/ai/peer_selector.rs` - Multi-dimensional peer scoring
+- `src/network/peer_scoring.rs` - Per-peer quality metrics
 - `src/network/connection_manager.rs:178-202` - Connection slot management
 
 ---
 
-### 2.4 ⚠️ BGP Hijacking / Routing Attacks
-**Status:** **PARTIALLY MITIGATED (TLS IMPLEMENTED BUT NOT INTEGRATED)**
+### 2.4 ✅ BGP Hijacking / Routing Attacks
+**Status:** **MITIGATED (TLS ENABLED BY DEFAULT)**
 
 **Attack:** Hijack network routes to intercept/modify traffic.
 
@@ -321,17 +324,16 @@ was unverifiable because it came from the announcement message itself.
 - ✅ **Cryptographic message authentication**: Ed25519 signatures on all consensus messages
 - ✅ **Block hash verification**: Tampering detected via SHA256 hashes
 - ✅ **P2P redundancy**: Multiple peer connections reduce single-point failure
-- ✅ **TLS implementation complete**: `src/network/tls.rs` + `src/network/secure_transport.rs` ready
-- ⚠️ **Not yet integrated**: TLS code exists but not active in main server/client
+- ✅ **TLS integrated and enabled by default**: `enable_tls = true` in `SecurityConfig`; server wraps accepted connections via `tls.accept_server()`, client connects via `set_tls_config()`
+- ✅ **Self-signed P2P certificates**: Auto-generated on first start via `TlsConfig::new_self_signed()`. Custom certs supported via `tls=` / `tlscert=` / `tlskey=` config keys.
 
-**Current Status:** TLS layer fully implemented with rustls, self-signed certificates for P2P, and combined transport layer. Requires integration into main network architecture.
-
-**Recommendation:** Complete TLS integration into ConnectionManager and P2PServer.
+**Current Status:** TLS is active on mainnet by default. Disable with `tls=0` in `time.conf` (for isolated testnets only).
 
 **Code References:**
-- `src/network/message.rs:21-67` - NetworkMessage definitions
-- `src/network/tls.rs` - Complete TLS implementation (ready)
-- `src/network/secure_transport.rs` - TLS + signature layer (ready)
+- `src/network/tls.rs` - TLS implementation (rustls)
+- `src/network/server.rs:542-587` - TLS accept on inbound connections
+- `src/main.rs:4460-4464` - TLS config wiring at daemon startup
+- `src/config.rs:629` - `enable_tls: true` default
 
 ---
 
@@ -534,7 +536,7 @@ pub struct BlockHeader {
 
 **Code References:**
 - `src/main.rs:1326-1440` - Block production and broadcast
-- `src/tsdc.rs:422-469` - Backup leader fallback
+- `src/timelock.rs` - Backup leader fallback (TimeGuard protocol)
 
 ---
 
@@ -930,12 +932,12 @@ pub struct BlockHeader {
 | **Nothing-at-Stake** | ✅ N/A | 🟢 Low | BFT consensus prevents multi-voting |
 | **Selfish Mining** | ✅ Mitigated | 🟢 Low | Deterministic slots, no mining advantage |
 | **Stake Grinding** | ✅ Mitigated | 🟢 Low | VRF-based leader selection implemented |
-| **Timestamp Attacks** | ✅ Mitigated | 🟢 Low | ±10 min tolerance, validated |
+| **Timestamp Attacks** | ✅ Mitigated | 🟢 Low | ±5s future tolerance, slot-time validation |
 | **Eclipse (Consensus)** | ✅ Mitigated | 🟢 Low | Multi-peer verification, fork detection |
 | **Sybil Attack** | ✅ Strong | 🟢 Low | Connection limits + stake requirements |
 | **DDoS** | ✅ Strong | 🟢 Low | Comprehensive rate limiting |
 | **Eclipse (Network)** | ✅ Mitigated | 🟢 Low | Diverse peer selection, masternode slots |
-| **BGP Hijacking** | ⚠️ Partial | 🟡 Medium | TLS complete but not integrated |
+| **BGP Hijacking** | ✅ Mitigated | 🟢 Low | TLS enabled by default on P2P connections |
 | **Message Replay** | ✅ Strong | 🟢 Low | Time-windowed Bloom filters |
 | **Double-Spend** | ✅ Strong | 🟢 Low | Atomic UTXO locking |
 | **TX Malleability** | ✅ N/A | 🟢 Low | Ed25519 prevents malleability |
@@ -1053,12 +1055,9 @@ pub struct BlockHeader {
 3. **COMPLETED ✅:** VRF for leader selection (Implemented Jan 2026)
 
 ### 🟡 MEDIUM PRIORITY
-4. **Integrate TLS into Network Stack** ⚠️ IN PROGRESS
-   - TLS implementation complete in `src/network/tls.rs` and `src/network/secure_transport.rs`
-   - Needs integration into `ConnectionManager` and `P2PServer`
-   - Will eliminate BGP hijacking and MITM attack vectors
-   - Estimated effort: 3-5 days (integration only)
-   - **Status:** Code complete, awaiting integration
+4. **COMPLETED ✅:** TLS Integration (enabled by default, commit `c69f159`)
+   - TLS active on all P2P connections via `enable_tls = true` (config default)
+   - Eliminates BGP hijacking and MITM attack vectors
 
 5. **Implement Stake Slashing**
    - Penalize provable misbehavior (double signing, invalid blocks)
