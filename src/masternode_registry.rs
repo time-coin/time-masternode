@@ -2894,6 +2894,23 @@ impl MasternodeRegistry {
             .and_then(|v| String::from_utf8(v.to_vec()).ok())
     }
 
+    /// Return the IP of the masternode currently claiming the given collateral outpoint
+    /// in the in-memory `nodes` map, or `None` if no node claims it.
+    ///
+    /// Used by the message handler to detect registry conflicts when the UTXOManager
+    /// lock was lost (e.g., after a restart) but the gossip registry entry survived.
+    pub async fn get_registered_ip_for_collateral(&self, outpoint: &OutPoint) -> Option<String> {
+        let nodes = self.masternodes.read().await;
+        for (addr, info) in nodes.iter() {
+            if let Some(ref op) = info.masternode.collateral_outpoint {
+                if op.txid == outpoint.txid && op.vout == outpoint.vout {
+                    return Some(addr.clone());
+                }
+            }
+        }
+        None
+    }
+
     /// Validate a CollateralUnlock special transaction.
     ///
     /// Checks:

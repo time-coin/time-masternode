@@ -3089,6 +3089,68 @@ impl MessageHandler {
                     }
 
                     // Lock the collateral
+                    //
+                    // Before locking, also check the registry's in-memory nodes map for a
+                    // conflicting claim.  The UTXOManager lock can be lost after a restart
+                    // while the gossip registry entry survives — in that case
+                    // `is_collateral_locked` above returns false and the V4 eviction block
+                    // is bypassed.  This second check ensures the registry is always clean
+                    // before we attempt to register the new node.
+                    if let Some(registry_squatter) = context
+                        .masternode_registry
+                        .get_registered_ip_for_collateral(&outpoint)
+                        .await
+                    {
+                        if registry_squatter != peer_ip {
+                            // Re-fetch UTXO to verify reward_address ownership.
+                            let utxo_addr_opt = utxo_manager
+                                .get_utxo(&outpoint)
+                                .await
+                                .ok()
+                                .map(|u| u.address);
+
+                            let txid_hex = hex::encode(outpoint.txid);
+                            let proof_msg = format!(
+                                "TIME_COLLATERAL_CLAIM:{}:{}",
+                                txid_hex, outpoint.vout
+                            );
+                            let can_evict = if !collateral_proof.is_empty()
+                                && utxo_addr_opt
+                                    .as_deref()
+                                    .map(|a| a == reward_address)
+                                    .unwrap_or(false)
+                            {
+                                use ed25519_dalek::Verifier;
+                                ed25519_dalek::Signature::from_slice(&collateral_proof)
+                                    .map(|sig| {
+                                        public_key.verify(proof_msg.as_bytes(), &sig).is_ok()
+                                    })
+                                    .unwrap_or(false)
+                            } else {
+                                false
+                            };
+
+                            if can_evict {
+                                info!(
+                                    "✅ [{}] V4 proof evicts registry squatter {} for {} \
+                                     (UTXOManager lock was absent — registry-only eviction)",
+                                    self.direction, registry_squatter, outpoint
+                                );
+                                let _ = context
+                                    .masternode_registry
+                                    .unregister(&registry_squatter)
+                                    .await;
+                            } else {
+                                warn!(
+                                    "🚨 [{}] Registry conflict: {} already holds {} — \
+                                     no valid V4 proof from {}, rejecting",
+                                    self.direction, registry_squatter, outpoint, peer_ip
+                                );
+                                return Ok(None);
+                            }
+                        }
+                    }
+
                     let lock_height = context.blockchain.get_height();
                     if let Err(e) = utxo_manager.lock_collateral(
                         outpoint.clone(),
