@@ -394,44 +394,38 @@ impl PeerConnectionRegistry {
                 height: 0,
                 hash: None,
             }) => {
-                tracing::warn!(
-                    "🚫 Peer {} has no genesis block - treating as incompatible",
+                // Old code returns None hash for height 0 — assume compatible.
+                tracing::debug!(
+                    "ℹ️  Peer {} returned no genesis hash (old code): assuming compatible",
                     ip_only
                 );
-                // Peer has no genesis — cannot be on our chain; exclude from sync/fork decisions
-                self.mark_incompatible(peer_ip, "No genesis block (old code or empty node)", false)
-                    .await;
-                false
+                true
             }
             Ok(other) => {
-                tracing::warn!(
-                    "⚠️ Unexpected response from {} for genesis hash: {:?} - treating as incompatible",
+                // Unexpected message type — old code responding to GetGenesisHash with
+                // whatever message it had queued.  Assume compatible, don't penalise.
+                tracing::debug!(
+                    "ℹ️  Unexpected genesis response from {} ({:?}): assuming compatible (old code)",
                     ip_only,
                     other.message_type()
                 );
-                // Unexpected response — likely old code; exclude from sync/fork decisions
-                self.mark_incompatible(
-                    peer_ip,
-                    &format!("Unexpected genesis response: {}", other.message_type()),
-                    false,
-                )
-                .await;
-                false
+                true
             }
             Err(e) => {
-                tracing::warn!(
-                    "🚫 Failed to get genesis hash from {}: {} - treating as incompatible",
+                // Timeout or channel error: the peer is running software that predates the
+                // GetGenesisHash message.  This is NOT evidence of an incompatible chain —
+                // it simply means the peer hasn't been upgraded yet.  Treating timeout as
+                // incompatible causes a complete network partition on startup because ALL
+                // pre-upgrade nodes would be blacklisted simultaneously.
+                //
+                // Policy: timeout → assume compatible.  Only mark incompatible if the peer
+                // actually replies with a DIFFERENT genesis hash (strong proof of wrong chain).
+                tracing::debug!(
+                    "ℹ️  No genesis hash response from {} ({}): assuming compatible (old software)",
                     ip_only,
                     e
                 );
-                // Timeout or channel error — likely running old code that does not handle
-                // GetBlockHash(0).  Mark temporarily incompatible so they are excluded from
-                // get_compatible_peers(), which drives both sync-coordinator height consensus
-                // and finality-lock peer-support counts.  They will be re-checked after the
-                // INCOMPATIBLE_RECHECK_SECS cooldown.
-                self.mark_incompatible(peer_ip, "Genesis check timeout (likely old code)", false)
-                    .await;
-                false
+                true
             }
         }
     }

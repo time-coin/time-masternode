@@ -573,6 +573,25 @@ impl MasternodeRegistry {
                     return Err(RegistryError::CollateralAlreadyLocked);
                 }
 
+                // Even a Free-tier incoming claim must not displace a paid-tier holder.
+                // Attackers exploit the Free-tier migration path to re-steal collateral
+                // that was just reclaimed by a legitimate Bronze/Silver/Gold node via
+                // Tier-2 eviction (which does not set a canonical anchor).
+                let existing_tier = nodes
+                    .get(&old_addr)
+                    .map(|n| n.masternode.tier.clone())
+                    .unwrap_or(crate::types::MasternodeTier::Free);
+                if existing_tier != crate::types::MasternodeTier::Free {
+                    tracing::warn!(
+                        "🛡️ Free-tier claim rejected: {} tried to take {} from paid-tier {} \
+                         — on-chain MasternodeReg required",
+                        masternode.address,
+                        outpoint,
+                        old_addr
+                    );
+                    return Err(RegistryError::CollateralAlreadyLocked);
+                }
+
                 // Free tier: no collateral to protect, allow migration with cooldown
                 // Never let a remote peer steal the local masternode's collateral
                 let old_ip = old_addr.split(':').next().unwrap_or(&old_addr);
