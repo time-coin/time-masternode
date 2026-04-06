@@ -3831,10 +3831,43 @@ impl Blockchain {
                 let mut distributed = 0u64;
                 for (mn, _) in tier_nodes.iter().take(recipient_count) {
                     let share = per_node;
-                    let dest = if !mn.reward_address.is_empty() {
+                    let registered_dest = if !mn.reward_address.is_empty() {
                         mn.reward_address.clone()
                     } else {
                         mn.masternode.wallet_address.clone()
+                    };
+                    // After COLLATERAL_REWARD_ENFORCEMENT_HEIGHT, paid-tier rewards are
+                    // always sent to the collateral UTXO's output address.  This removes
+                    // the economic incentive for collateral squatting: a squatter that
+                    // gossip-registers someone else's UTXO cannot redirect the reward to
+                    // their own wallet — it always flows to the UTXO owner.
+                    let dest = if !is_free_tier
+                        && next_height
+                            >= constants::blockchain::COLLATERAL_REWARD_ENFORCEMENT_HEIGHT
+                    {
+                        if let Some(ref outpoint) = mn.masternode.collateral_outpoint {
+                            if let Ok(utxo) = self.utxo_manager.get_utxo(outpoint).await {
+                                if !utxo.address.is_empty()
+                                    && utxo.address != registered_dest
+                                {
+                                    tracing::info!(
+                                        "💰 Block {}: redirecting reward for {} from {} to UTXO \
+                                         owner {} (collateral enforcement)",
+                                        next_height,
+                                        mn.masternode.address,
+                                        &registered_dest[..20.min(registered_dest.len())],
+                                        &utxo.address[..20.min(utxo.address.len())]
+                                    );
+                                }
+                                utxo.address
+                            } else {
+                                registered_dest
+                            }
+                        } else {
+                            registered_dest
+                        }
+                    } else {
+                        registered_dest
                     };
                     if let Some(entry) = rewards.iter_mut().find(|(a, _)| a == &dest) {
                         entry.1 += share;
@@ -6247,8 +6280,8 @@ impl Blockchain {
         calculated_fees: u64,
     ) -> Result<(), String> {
         use crate::constants::blockchain::{
-            GOLD_POOL_SATOSHIS, MAX_FREE_TIER_RECIPIENTS, POOL_VALIDATION_MIN_HEIGHT,
-            PRODUCER_REWARD_SATOSHIS, SATOSHIS_PER_TIME,
+            COLLATERAL_REWARD_ENFORCEMENT_HEIGHT, GOLD_POOL_SATOSHIS, MAX_FREE_TIER_RECIPIENTS,
+            POOL_VALIDATION_MIN_HEIGHT, PRODUCER_REWARD_SATOSHIS, SATOSHIS_PER_TIME,
         };
         use crate::types::MasternodeTier;
 
@@ -6280,6 +6313,42 @@ impl Blockchain {
             None => return Ok(()),
         };
 
+        // ── Collateral UTXO owner map (anti-squatter enforcement) ────────────
+        // After COLLATERAL_REWARD_ENFORCEMENT_HEIGHT, produce_block redirects paid-tier
+        // rewards to the collateral UTXO's output address rather than the registered
+        // reward_address.  A squatter controlling the gossip anchor cannot profit: the
+        // reward always flows to whoever owns the UTXO key.
+        //
+        // Validators must accept these redirected payments.  We pre-build a map from
+        // UTXO-owner address → tier so that Step 2 and Step 5 can classify them correctly
+        // even when tier_for_wallet(utxo_owner_addr) returns None (because the squatter,
+        // not the UTXO owner, holds the registry anchor).
+        let collateral_utxo_tier_map: std::collections::HashMap<String, MasternodeTier> =
+            if block.header.height >= COLLATERAL_REWARD_ENFORCEMENT_HEIGHT
+                && !block.header.active_masternodes_bitmap.is_empty()
+            {
+                let bitmap_nodes = self
+                    .masternode_registry
+                    .get_active_from_bitmap(&block.header.active_masternodes_bitmap)
+                    .await;
+                let mut map = std::collections::HashMap::new();
+                for info in &bitmap_nodes {
+                    if info.masternode.tier == MasternodeTier::Free {
+                        continue; // Free tier has no collateral UTXO
+                    }
+                    if let Some(ref outpoint) = info.masternode.collateral_outpoint {
+                        if let Ok(utxo) = self.utxo_manager.get_utxo(outpoint).await {
+                            if !utxo.address.is_empty() {
+                                map.insert(utxo.address, info.masternode.tier);
+                            }
+                        }
+                    }
+                }
+                map
+            } else {
+                std::collections::HashMap::new()
+            };
+
         // ── Step 2: partition block.masternode_rewards into producer vs tier pools ──
         // Each entry in masternode_rewards is a (TIME_wallet_address, satoshis) pair
         // committed in the block.  Look up each non-producer wallet's tier from the
@@ -6299,16 +6368,24 @@ impl Blockchain {
                         *tier_paid.entry(tier).or_insert(0) += amount;
                     }
                     None => {
-                        // Wallet not in current registry — masternode may have
-                        // deregistered since the block was produced.  Accept the
-                        // payment as long as it doesn't exceed the largest single pool.
-                        unknown_non_producer_paid += amount;
-                        if *amount > GOLD_POOL_SATOSHIS {
-                            return Err(format!(
-                                "Block {} unknown recipient {} received {} satoshis, \
-                                 exceeds max tier pool {}",
-                                block.header.height, wallet, amount, GOLD_POOL_SATOSHIS
-                            ));
+                        // Check if this wallet is a UTXO-owner address under anti-squatter
+                        // enforcement (block.height >= COLLATERAL_REWARD_ENFORCEMENT_HEIGHT).
+                        // A squatter holds the registry anchor, so tier_for_wallet returns None
+                        // for the legitimate UTXO owner — use the pre-built collateral map.
+                        if let Some(&tier) = collateral_utxo_tier_map.get(wallet.as_str()) {
+                            *tier_paid.entry(tier).or_insert(0) += amount;
+                        } else {
+                            // Wallet not in current registry — masternode may have
+                            // deregistered since the block was produced.  Accept the
+                            // payment as long as it doesn't exceed the largest single pool.
+                            unknown_non_producer_paid += amount;
+                            if *amount > GOLD_POOL_SATOSHIS {
+                                return Err(format!(
+                                    "Block {} unknown recipient {} received {} satoshis, \
+                                     exceeds max tier pool {}",
+                                    block.header.height, wallet, amount, GOLD_POOL_SATOSHIS
+                                ));
+                            }
                         }
                     }
                 }
@@ -6607,6 +6684,12 @@ impl Blockchain {
                 // (they produced the block, so they were clearly active)
                 let mut eligible = active_wallets.clone();
                 eligible.insert(producer_wallet.clone());
+                // After COLLATERAL_REWARD_ENFORCEMENT_HEIGHT, rewards for paid-tier nodes
+                // are redirected to the UTXO owner's address.  Add those addresses so
+                // validators don't flag them as "not in bitmap" injection attempts.
+                for utxo_owner in collateral_utxo_tier_map.keys() {
+                    eligible.insert(utxo_owner.clone());
+                }
 
                 for (wallet, amount) in &block.masternode_rewards {
                     if *amount == 0 {

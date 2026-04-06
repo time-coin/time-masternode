@@ -93,6 +93,15 @@ pub mod blockchain {
     /// (at 681) without re-validating blocks they cannot currently pass. All
     /// blocks above this height are fully validated with the corrected logic.
     pub const POOL_VALIDATION_MIN_HEIGHT: u64 = 682;
+
+    /// Fork height at which collateral reward-address enforcement activates.
+    ///
+    /// After this height, a paid-tier masternode's reward is redirected to the
+    /// collateral UTXO's output address when the registered reward_address differs.
+    /// This eliminates the economic incentive for collateral squatting: a node
+    /// that gossip-squats a UTXO it doesn't own cannot redirect rewards to itself.
+    /// Free-tier nodes (no collateral) are unaffected.
+    pub const COLLATERAL_REWARD_ENFORCEMENT_HEIGHT: u64 = 750;
 }
 
 /// Network protocol constants
