@@ -1205,6 +1205,9 @@ impl MessageHandler {
                     "🚨 [{}] Possible sync loop detected: {} sent {} similar GetBlocks requests in 30s (ranges near {}-{}). Ignoring this request.",
                     self.direction, self.peer_ip, similar_count, start, end
                 );
+                if let Some(ai) = &context.ai_system {
+                    ai.attack_detector.record_sync_flood(&self.peer_ip);
+                }
                 // Return no response — an empty BlocksResponse is indistinguishable from
                 // "no blocks in that range" and causes the peer to retry immediately,
                 // perpetuating the loop. Silence forces the peer to time out and back off.
@@ -3095,6 +3098,9 @@ impl MessageHandler {
                                                         outpoint
                                                     );
                                                 }
+                                                if let Some(ai) = &context.ai_system {
+                                                    ai.attack_detector.record_collateral_spoof_attempt(&peer_ip, &outpoint.to_string());
+                                                }
                                                 false
                                             } else {
                                                 // Storm protection: rate-limit V4 evictions per
@@ -3134,6 +3140,9 @@ impl MessageHandler {
                                                             squatter_ip,
                                                             peer_ip
                                                         );
+                                                    }
+                                                    if let Some(ai) = &context.ai_system {
+                                                        ai.attack_detector.record_eviction_storm_attempt(&peer_ip, &outpoint.to_string());
                                                     }
                                                     false
                                                 } else {
@@ -3327,6 +3336,9 @@ impl MessageHandler {
                                             self.direction, registry_squatter, peer_ip, outpoint
                                         );
                                     }
+                                    if let Some(ai) = &context.ai_system {
+                                        ai.attack_detector.record_collateral_spoof_attempt(&peer_ip, &outpoint.to_string());
+                                    }
                                     false
                                 } else {
                                     // Storm protection: rate-limit V4 evictions per outpoint
@@ -3359,6 +3371,9 @@ impl MessageHandler {
                                                 registry_squatter,
                                                 peer_ip
                                             );
+                                        }
+                                        if let Some(ai) = &context.ai_system {
+                                            ai.attack_detector.record_eviction_storm_attempt(&peer_ip, &outpoint.to_string());
                                         }
                                         false
                                     } else {

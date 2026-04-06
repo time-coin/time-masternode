@@ -234,9 +234,13 @@ impl NetworkServer {
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
 
+                    // take_pending_mitigations() returns only attacks that haven't been actioned
+                    // yet, and marks them so subsequent ticks don't re-apply the same violation.
+                    // This prevents a single detection event from accumulating 10 violations and
+                    // triggering a permanent ban within 5 minutes.
                     let attacks = enforce_ai
                         .attack_detector
-                        .get_recent_attacks(std::time::Duration::from_secs(300));
+                        .take_pending_mitigations();
 
                     if attacks.is_empty() {
                         continue;
@@ -413,6 +417,7 @@ impl NetworkServer {
             let fork_status = self.peer_fork_status.clone();
             let tls_config = self.tls_config.clone();
             let network_type = self.network_type;
+            let ai_system = self.ai_system.clone();
 
             tokio::spawn(async move {
                 let _ = handle_peer(
@@ -441,6 +446,7 @@ impl NetworkServer {
                     is_whitelisted,
                     tls_config,
                     network_type,
+                    ai_system,
                 )
                 .await;
             });
@@ -507,6 +513,7 @@ async fn handle_peer(
     is_whitelisted: bool,
     tls_config: Option<Arc<crate::network::tls::TlsConfig>>,
     network_type: crate::network_type::NetworkType,
+    ai_system: Option<Arc<crate::ai::AISystem>>,
 ) -> Result<(), std::io::Error> {
     // Extract IP from address
     let ip: IpAddr = peer
@@ -838,6 +845,9 @@ async fn handle_peer(
                                     }
                                     _ => {
                                         tracing::warn!("⚠️  {} sent message before handshake - closing connection (not blacklisting)", peer.addr);
+                                        if let Some(ref ai) = ai_system {
+                                            ai.attack_detector.record_pre_handshake_violation(&ip_str);
+                                        }
                                         // Don't blacklist - could be network timing issue or legitimate peer
                                         // Just close the connection and let them reconnect
                                         break;

@@ -17,12 +17,15 @@ const DB_KEY_ATTACKS: &[u8] = b"ai:attack_detector:attacks";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AttackType {
-    EclipseAttack,      // Peer isolation attempt
-    SybilAttack,        // Fake peer flooding
-    TimingAttack,       // Clock manipulation
-    DoublespendAttack,  // Multiple conflicting transactions
-    ForkBombing,        // Intentional fork creation
-    ResourceExhaustion, // Memory/bandwidth exhaustion
+    EclipseAttack,         // Peer isolation attempt
+    SybilAttack,           // Fake peer flooding
+    TimingAttack,          // Clock manipulation
+    DoublespendAttack,     // Multiple conflicting transactions
+    ForkBombing,           // Intentional fork creation
+    ResourceExhaustion,    // Memory/bandwidth exhaustion
+    GossipEvictionStorm,   // Repeated V4 eviction attempts for the same outpoint
+    CollateralSpoofing,    // Attempting to claim another node's registered collateral
+    SyncLoopFlooding,      // Excessive GetBlocks for same range (sync loop DoS)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +38,10 @@ pub struct AttackPattern {
     pub last_seen: u64,
     pub source_ips: Vec<String>,
     pub recommended_action: MitigationAction,
+    /// Set when the server enforcement loop has applied this pattern's mitigation action.
+    /// Prevents the same detection from triggering repeated blacklist violations.
+    #[serde(default)]
+    pub mitigation_applied_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -61,6 +68,8 @@ struct PeerBehavior {
     connect_count: u32,
     disconnect_count: u32,
     invalid_messages: u32,
+    pre_handshake_violations: u32,
+    eviction_storm_attempts: u32,
     /// Timestamps of recent forks — entries older than FORK_BOMB_WINDOW_SECS are pruned.
     fork_timestamps: VecDeque<u64>,
     timestamp_drift: Vec<i64>,
@@ -175,6 +184,8 @@ impl AttackDetector {
             connect_count: 0,
             disconnect_count: 0,
             invalid_messages: 0,
+            pre_handshake_violations: 0,
+            eviction_storm_attempts: 0,
             fork_timestamps: VecDeque::new(),
             timestamp_drift: Vec::new(),
             first_seen: now,
@@ -310,6 +321,148 @@ impl AttackDetector {
         }
     }
 
+    /// Record that a V4 eviction attempt was blocked by the per-outpoint cooldown (storm in
+    /// progress). After 3 blocked attempts from the same IP, classify as GossipEvictionStorm.
+    pub fn record_eviction_storm_attempt(&self, addr: &str, outpoint: &str) {
+        let now = Self::now_secs();
+        let mut behaviors = self.peer_behaviors.write();
+        let behavior = behaviors.entry(addr.to_string()).or_insert(PeerBehavior {
+            _addr: addr.to_string(),
+            connect_count: 0,
+            disconnect_count: 0,
+            invalid_messages: 0,
+            pre_handshake_violations: 0,
+            eviction_storm_attempts: 0,
+            fork_timestamps: VecDeque::new(),
+            timestamp_drift: Vec::new(),
+            first_seen: now,
+            last_activity: now,
+        });
+        behavior.eviction_storm_attempts += 1;
+        behavior.last_activity = now;
+        let attempts = behavior.eviction_storm_attempts;
+        drop(behaviors);
+
+        // Even a single blocked attempt is suspicious — detect immediately and escalate
+        // confidence with repeated attempts.
+        let confidence = (0.70 + (attempts.saturating_sub(1) as f64 * 0.05)).min(0.99);
+        self.maybe_add_attack(AttackPattern {
+            attack_type: AttackType::GossipEvictionStorm,
+            confidence,
+            severity: AttackSeverity::Critical,
+            indicators: vec![
+                format!("{} eviction storm attempts for outpoint {} from {}", attempts, outpoint, addr),
+                "V4 eviction blocked by per-outpoint cooldown".to_string(),
+            ],
+            first_detected: now,
+            last_seen: now,
+            source_ips: vec![addr.to_string()],
+            recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+            mitigation_applied_at: None,
+        });
+    }
+
+    /// Record that a V4 announcement attempted to evict the local node (collateral spoofing).
+    pub fn record_collateral_spoof_attempt(&self, addr: &str, outpoint: &str) {
+        let now = Self::now_secs();
+        self.maybe_add_attack(AttackPattern {
+            attack_type: AttackType::CollateralSpoofing,
+            confidence: 0.95,
+            severity: AttackSeverity::Critical,
+            indicators: vec![
+                format!("V4 proof used to evict local node from outpoint {}", outpoint),
+                format!("Attacker IP: {}", addr),
+                "Gossip eviction of local node blocked — on-chain MasternodeReg required".to_string(),
+            ],
+            first_detected: now,
+            last_seen: now,
+            source_ips: vec![addr.to_string()],
+            recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+            mitigation_applied_at: None,
+        });
+    }
+
+    /// Record that a peer triggered the GetBlocks sync-loop detector.
+    pub fn record_sync_flood(&self, addr: &str) {
+        let now = Self::now_secs();
+        self.maybe_add_attack(AttackPattern {
+            attack_type: AttackType::SyncLoopFlooding,
+            confidence: 0.80,
+            severity: AttackSeverity::Medium,
+            indicators: vec![
+                format!("Peer {} sent ≥20 similar GetBlocks requests within 30s", addr),
+                "Sync loop DoS pattern detected".to_string(),
+            ],
+            first_detected: now,
+            last_seen: now,
+            source_ips: vec![addr.to_string()],
+            recommended_action: MitigationAction::RateLimitPeer(addr.to_string()),
+            mitigation_applied_at: None,
+        });
+    }
+
+    /// Record that a peer sent a protocol message before completing the handshake.
+    pub fn record_pre_handshake_violation(&self, addr: &str) {
+        let now = Self::now_secs();
+        let mut behaviors = self.peer_behaviors.write();
+        let behavior = behaviors.entry(addr.to_string()).or_insert(PeerBehavior {
+            _addr: addr.to_string(),
+            connect_count: 0,
+            disconnect_count: 0,
+            invalid_messages: 0,
+            pre_handshake_violations: 0,
+            eviction_storm_attempts: 0,
+            fork_timestamps: VecDeque::new(),
+            timestamp_drift: Vec::new(),
+            first_seen: now,
+            last_activity: now,
+        });
+        behavior.pre_handshake_violations += 1;
+        behavior.last_activity = now;
+        let violations = behavior.pre_handshake_violations;
+        drop(behaviors);
+
+        // Only flag as attack after 3 pre-handshake violations (reduces false positives from
+        // transient network issues or NAT traversal probes).
+        if violations >= 3 {
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::ResourceExhaustion,
+                confidence: 0.75,
+                severity: AttackSeverity::Medium,
+                indicators: vec![
+                    format!("{} pre-handshake message violations from {}", violations, addr),
+                    "Peer sends data before completing Version/Verack exchange".to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::RateLimitPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        }
+    }
+
+    /// Return attack patterns whose mitigation action has not yet been applied, and mark them
+    /// as applied.  The enforcement loop calls this instead of `get_recent_attacks` so that each
+    /// detected attack only triggers one blacklist violation — preventing rapid escalation to
+    /// permanent ban from a single detection event.
+    pub fn take_pending_mitigations(&self) -> Vec<AttackPattern> {
+        let now = Self::now_secs();
+        let mut attacks = self.detected_attacks.write();
+        let mut pending = Vec::new();
+        for attack in attacks.iter_mut() {
+            if attack.mitigation_applied_at.is_none() {
+                attack.mitigation_applied_at = Some(now);
+                pending.push(attack.clone());
+            }
+        }
+        drop(attacks);
+        if !pending.is_empty() {
+            self.persist_attacks();
+        }
+        pending
+    }
+
     /// Check for eclipse attack (isolated from network)
     pub fn check_eclipse_attack(&self, connected_peer_count: usize, unique_ips: &[String]) -> bool {
         if connected_peer_count < 3 {
@@ -357,6 +510,7 @@ impl AttackDetector {
             last_seen: now,
             source_ips: vec![addr.to_string()],
             recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+            mitigation_applied_at: None,
         });
     }
 
@@ -377,6 +531,7 @@ impl AttackDetector {
             last_seen: now,
             source_ips: vec![addr.to_string()],
             recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+            mitigation_applied_at: None,
         });
     }
 
@@ -394,6 +549,7 @@ impl AttackDetector {
             last_seen: now,
             source_ips: vec![addr.to_string()],
             recommended_action: MitigationAction::RateLimitPeer(addr.to_string()),
+            mitigation_applied_at: None,
         });
     }
 
@@ -411,6 +567,7 @@ impl AttackDetector {
             last_seen: now,
             source_ips: sources,
             recommended_action: MitigationAction::AlertOperator,
+            mitigation_applied_at: None,
         });
     }
 
@@ -432,6 +589,7 @@ impl AttackDetector {
             last_seen: now,
             source_ips: peer_ips.to_vec(),
             recommended_action: MitigationAction::EmergencySync,
+            mitigation_applied_at: None,
         });
     }
 
@@ -449,6 +607,7 @@ impl AttackDetector {
             last_seen: now,
             source_ips: vec![addr.to_string()],
             recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+            mitigation_applied_at: None,
         });
     }
 
