@@ -3051,17 +3051,36 @@ impl MessageHandler {
                                         } else if claimant_matches_utxo
                                             && !squatter_matches_utxo
                                         {
-                                            // Tier 2: address-match beats address-mismatch squatter
-                                            info!(
-                                                "✅ [{}] Address-match eviction: {} has \
-                                                 reward_address == utxo.address for {} — \
-                                                 evicting squatter {} (mismatched address)",
-                                                self.direction,
-                                                peer_ip,
-                                                outpoint,
-                                                squatter_ip
-                                            );
-                                            true
+                                            // Tier 2: address-match beats address-mismatch squatter.
+                                            // SAFETY: never evict the local node via Tier 2 — a remote
+                                            // peer that knows the UTXO's on-chain address could spoof
+                                            // reward_address to match it and displace us.  Require Tier 1
+                                            // (V4 cryptographic proof) to displace the local node.
+                                            let is_local_squatter = context
+                                                .node_masternode_address
+                                                .as_deref()
+                                                .map(|local| local == squatter_ip)
+                                                .unwrap_or(false);
+                                            if is_local_squatter {
+                                                warn!(
+                                                    "🛡️ [{}] Blocked Tier 2 eviction attack: \
+                                                     {} tried to displace local node {} for {} \
+                                                     — cryptographic proof (V4) required",
+                                                    self.direction, peer_ip, squatter_ip, outpoint
+                                                );
+                                                false
+                                            } else {
+                                                info!(
+                                                    "✅ [{}] Address-match eviction: {} has \
+                                                     reward_address == utxo.address for {} — \
+                                                     evicting squatter {} (mismatched address)",
+                                                    self.direction,
+                                                    peer_ip,
+                                                    outpoint,
+                                                    squatter_ip
+                                                );
+                                                true
+                                            }
                                         } else {
                                             false
                                         };
@@ -3189,13 +3208,30 @@ impl MessageHandler {
                             let can_evict = if has_valid_proof {
                                 true
                             } else if claimant_matches_utxo && !squatter_matches_utxo {
-                                info!(
-                                    "✅ [{}] Address-match eviction (registry): {} has \
-                                     reward_address == utxo.address for {} — evicting \
-                                     squatter {} (UTXOManager lock absent, mismatched address)",
-                                    self.direction, peer_ip, outpoint, registry_squatter
-                                );
-                                true
+                                // SAFETY: never evict the local node via Tier 2 — see comment
+                                // in the UTXOManager-locked path above.
+                                let is_local_squatter = context
+                                    .node_masternode_address
+                                    .as_deref()
+                                    .map(|local| local == registry_squatter.as_str())
+                                    .unwrap_or(false);
+                                if is_local_squatter {
+                                    warn!(
+                                        "🛡️ [{}] Blocked Tier 2 eviction attack (registry): \
+                                         {} tried to displace local node {} for {} \
+                                         — cryptographic proof (V4) required",
+                                        self.direction, peer_ip, registry_squatter, outpoint
+                                    );
+                                    false
+                                } else {
+                                    info!(
+                                        "✅ [{}] Address-match eviction (registry): {} has \
+                                         reward_address == utxo.address for {} — evicting \
+                                         squatter {} (UTXOManager lock absent, mismatched address)",
+                                        self.direction, peer_ip, outpoint, registry_squatter
+                                    );
+                                    true
+                                }
                             } else {
                                 false
                             };
