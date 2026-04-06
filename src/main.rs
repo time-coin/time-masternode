@@ -1299,16 +1299,44 @@ async fn main() {
                 // (see announcement task below)
             }
             Err(crate::masternode_registry::RegistryError::CollateralAlreadyLocked) => {
-                // Another IP holds this collateral in the gossip registry.
-                // Do NOT crash — the on-chain collateral auto-sync task (below) will
-                // submit a signed MasternodeReg transaction that proves ownership via
-                // the wallet private key and evicts any gossip-only squatter.
-                tracing::warn!(
-                    "⚠️ Collateral already held by another node in local registry — \
-                     will file on-chain MasternodeReg to claim ownership after sync"
-                );
-                // Still mark ourselves as the local masternode so the auto-sync runs
-                registry.set_local_masternode(mn.address.clone()).await;
+                // A gossip squatter holds our collateral in the local registry.
+                // We know this collateral belongs to us (UTXO scan confirmed it).
+                // Evict the squatter now so we show up correctly in the local registry
+                // and the dashboard, then broadcast a V4 proof to claim it on peers.
+                let squatter_addr = if let Some(ref outpoint) = mn.collateral_outpoint {
+                    registry.find_holder_of_outpoint(outpoint).await
+                } else {
+                    None
+                };
+
+                if let Some(ref sq) = squatter_addr {
+                    tracing::warn!(
+                        "🛡️ Evicting gossip squatter {} from local registry (collateral belongs to us)",
+                        sq
+                    );
+                    let _ = registry.unregister(sq).await;
+                }
+
+                // Re-register — squatter and its canonical anchor are now gone
+                match registry
+                    .register(mn.clone(), mn.wallet_address.clone())
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::info!(
+                            "✅ Local masternode re-registered after evicting squatter"
+                        );
+                        registry.set_local_masternode(mn.address.clone()).await;
+                    }
+                    Err(e2) => {
+                        tracing::warn!(
+                            "⚠️ Could not re-register after squatter eviction ({:?}); \
+                             will retry via V4 broadcast",
+                            e2
+                        );
+                        registry.set_local_masternode(mn.address.clone()).await;
+                    }
+                }
             }
             Err(e) => {
                 tracing::error!("❌ Failed to register masternode: {}", e);

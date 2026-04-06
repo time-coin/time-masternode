@@ -993,6 +993,18 @@ impl MasternodeRegistry {
             .map(|(addr, info)| (addr.clone(), info.clone()))
     }
 
+    /// Find which network address currently holds the given collateral outpoint.
+    pub async fn find_holder_of_outpoint(
+        &self,
+        outpoint: &crate::types::OutPoint,
+    ) -> Option<String> {
+        let nodes = self.masternodes.read().await;
+        nodes
+            .iter()
+            .find(|(_, info)| info.masternode.collateral_outpoint.as_ref() == Some(outpoint))
+            .map(|(addr, _)| addr.clone())
+    }
+
     #[allow(dead_code)]
     pub async fn get(&self, address: &str) -> Option<MasternodeInfo> {
         self.masternodes.read().await.get(address).cloned()
