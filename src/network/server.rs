@@ -2312,12 +2312,21 @@ async fn handle_peer(
     connection_manager.mark_inbound_disconnected(&ip_str);
     peer_registry.unregister_peer(&ip_str).await;
 
-    // Mark masternode as inactive if this was a masternode connection
-    if let Err(e) = masternode_registry
-        .mark_inactive_on_disconnect(&ip_str)
-        .await
-    {
-        tracing::debug!("Note: {} is not a registered masternode ({})", ip_str, e);
+    // Mark masternode as inactive only if the handshake completed.
+    // Connections that never completed the version exchange (e.g., old
+    // software that sends messages before the handshake) must not trigger
+    // registry changes: the peer never identified itself on this connection,
+    // so there is nothing meaningful to update.  Without this guard, inbound
+    // pre-handshake failures from old-software peers cause their previously
+    // registered entry (which may be a paid-tier node) to be removed as a
+    // "transient Free-tier" node, creating continuous reconnection churn.
+    if handshake_done {
+        if let Err(e) = masternode_registry
+            .mark_inactive_on_disconnect(&ip_str)
+            .await
+        {
+            tracing::debug!("Note: {} is not a registered masternode ({})", ip_str, e);
+        }
     }
 
     tracing::info!("🔌 Peer {} disconnected", peer.addr);
