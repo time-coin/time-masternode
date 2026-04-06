@@ -1117,13 +1117,169 @@ TimeCoin demonstrates **strong security posture** against the vast majority of k
 
 ---
 
-**Document Version:** 1.1  
-**Last Updated:** January 23, 2026  
-**Changes from v1.0:**
-- Verified all implementation claims against current codebase
-- Updated stake grinding status (VRF implemented)
-- Updated BGP hijacking status (TLS implemented but not integrated)
-- Revised priority recommendations based on completed work
-- Added implementation progress tracking
+## LIVE MAINNET ATTACK VECTORS (April 2026)
+
+The following attack vectors were observed and exploited against the live mainnet network in April 2026.
+All have been investigated, root-caused, and fixed. Fixes shipped in commits `89bd02d`–`2d842f6` plus the
+inbound V4 context fix.
+
+---
+
+### AV-6 ✅ Pre-Handshake Deregistration Attack
+**Status:** **FIXED** (commit `89bd02d`)
+
+**Attack:** Adversary opens a TCP connection to a node and immediately closes it before sending the
+handshake (`Version`/`Verack`). The disconnect event fires and `mark_inactive_on_disconnect()` is
+called with the connecting IP. If that IP matches a registered masternode's address, the masternode
+entry is marked inactive/removed.
+
+**Root cause:** `server.rs` called `mark_inactive_on_disconnect` unconditionally on TCP close, without
+checking whether the handshake had completed.
+
+**Fix:** Added `handshake_done: bool` tracking per connection. `mark_inactive_on_disconnect` is now
+gated: only called when `handshake_done = true`. Pre-handshake closes trigger a `WARN` but do not
+touch the masternode registry.
+
+**Evidence from logs:**
+```
+WARN ⚠️  47.82.240.104:34204 sent message before handshake - closing connection (not blacklisting)
+INFO 🔌 Peer 47.82.240.104:34204 disconnected
+```
+
+---
+
+### AV-7 ✅ Genesis Isolation via Timeout
+**Status:** **FIXED** (commit `12e4fb1`)
+
+**Attack:** Older nodes that don't implement `GetGenesisHash` time out when queried. The node marks
+every peer that times out as "incompatible" with a 300-second re-check ban. On a large network with
+many older nodes, all peers become simultaneously marked incompatible → `get_compatible_peers()`
+returns empty → sync coordinator and fork detection stall completely. The node effectively isolates
+itself from the network.
+
+**Root cause:** `verify_genesis_compatibility()` in `peer_connection_registry.rs` treated timeout, I/O
+errors, and unexpected response types identically to an explicit hash mismatch, all leading to
+`mark_incompatible`.
+
+**Fix:** Only an explicit hash mismatch (received a valid `GenesisHashResponse` with a different hash)
+marks a peer as incompatible. Timeout, I/O error, or unrecognized response type now returns `true`
+(assume compatible) with a debug log. Peers are only isolated when their genesis hash is provably wrong.
+
+---
+
+### AV-8 ✅ Free-Tier Collateral Squatting via Gossip Migration
+**Status:** **FIXED** (commit `12e4fb1`)
+
+**Attack:** A paid-tier masternode (Tier 1/2/3) is registered with a specific collateral outpoint.
+An adversary registers as Free-tier with the same IP but different collateral. Then, the adversary
+sends a gossip `MasternodeAnnouncementV3` with a new IP and the paid-tier node's collateral outpoint.
+Free-tier nodes allow gossip IP migration without proof, so the paid collateral gets "migrated" to the
+attacker's chosen IP, ejecting the legitimate owner.
+
+**Root cause:** `register_internal()` in `masternode_registry.rs` allowed Free-tier migration to
+overwrite any existing holder of an outpoint, including paid-tier holders.
+
+**Fix:** Added a check: if the current holder of a collateral outpoint is a paid tier (Tier 1/2/3),
+Free-tier gossip migration is blocked. The attacker receives a `🛡️` warning log and the migration is
+rejected. Only an on-chain `MasternodeReg` transaction can claim a paid-tier collateral.
+
+---
+
+### AV-9 ✅ Startup Squatter Eviction Race
+**Status:** **FIXED** (commits `73275c7`, `99e3718`)
+
+**Attack:** The local node starts up and attempts to register its collateral. If an attacker already
+squatted the outpoint (e.g., by gossip before the node restarted), `register_masternode()` returns
+`CollateralAlreadyLocked`. The original code logged an error and exited the registration path,
+leaving the local node unregistered. The attacker's squatter entry remained, and the dashboard showed
+"Node is not configured as a masternode."
+
+**Root cause:** `main.rs` treated `CollateralAlreadyLocked` as fatal, not as "evict squatter and
+proceed."
+
+**Fix:** On `CollateralAlreadyLocked`, the startup path now:
+1. Calls `find_holder_of_outpoint()` to identify the squatter's IP.
+2. Calls `unregister(squatter_ip)` to evict it.
+3. Re-runs `register_masternode()` (succeeds now that lock is released).
+4. Runs the full post-registration setup: `lock_local_collateral()`, reward address registration,
+   `set_local_masternode()`, `mark_reachable()`.
+
+This ensures the local node is fully operational even after a cold-start squatter attack.
+
+---
+
+### AV-10 ✅ V4 Eviction Storm (Per-Outpoint Denial of Service)
+**Status:** **FIXED** (commit `2d842f6`)
+
+**Attack:** Adversaries with a valid V4 collateral proof for a target outpoint repeatedly send
+`MasternodeAnnouncementV4` messages, evicting the current holder. Because `unregister()` clears the
+`collateral_anchor` sled key, each eviction resets the outpoint to claimable, allowing the next
+eviction cycle immediately. With three coordinated attacker IPs, 435 V4 eviction events were observed
+in 2 seconds against a single collateral outpoint (`926b2fb0:0`).
+
+**Root cause (Path 1):** In `handle_masternode_announcement()`, the UTXOManager lock conflict path
+set `can_evict = true` unconditionally for Tier 1 (V4 proof), without any rate limiting.
+
+**Root cause (Path 2):** The registry-only eviction path (no UTXOManager lock present) had the same
+unconditional `can_evict = true`.
+
+**Fix:**
+- Added `V4_EVICTION_COOLDOWN_SECS = 60` per-outpoint cooldown map (`v4_eviction_cooldown()`).
+- Both eviction paths now check: if a V4 eviction occurred within the last 60 seconds for this
+  outpoint, reject and log a storm warning (rate-limited to once per 30s per outpoint).
+- Rate-limited storm warning logs prevent log flooding under sustained attack.
+
+---
+
+### AV-11 ✅ V4 Eviction of Local Node
+**Status:** **FIXED** (commit `2d842f6`)
+
+**Attack:** The local node's own collateral outpoint is targeted by an attacker who obtains (or
+forges) a V4 collateral proof. The V4 eviction path removes the local node from the masternode
+registry. `get_local_masternode()` then returns `None`, causing all RPC calls that depend on it to
+return error `-4` ("Node is not configured as a masternode"). The dashboard shows the node as
+deregistered while it is still running, causing operators to believe the node is broken and potentially
+restart or reconfigure it (which the attacker hopes will disrupt service further).
+
+**Root cause:** Both V4 eviction paths lacked a guard against evicting the node's own IP.
+
+**Fix:** Both eviction paths now check `is_local_node` (comparing the eviction candidate IP against
+`context.node_masternode_address`). If the candidate is the local node, eviction is blocked and a
+`WARN` is logged:
+```
+WARN 🛡️ [Inbound] Blocking V4 eviction attempt against local node by <attacker_ip>
+```
+
+---
+
+### AV-12 ✅ Inbound V4 Announcement Missing UTXO Manager
+**Status:** **FIXED** (server.rs explicit V4 handler)
+
+**Attack:** A paid-tier node sends a `MasternodeAnnouncementV4` message to a peer inbound connection.
+Because `server.rs` had no explicit case for `NetworkMessage::MasternodeAnnouncementV4`, the message
+fell through to the `_ =>` fallback handler, which creates a `MessageContext::minimal()` without
+`utxo_manager`. The announcement handler requires `utxo_manager` to verify and lock the collateral;
+without it, the message is silently dropped with:
+```
+WARN ⚠️ [Inbound] Cannot verify collateral for <ip> — no UTXO manager available
+```
+This prevented legitimate V4 masternodes from registering on nodes they connected to inbound, leaving
+them invisible to part of the network and ineligible for rewards from those nodes.
+
+**Root cause:** `server.rs` explicitly handled `MasternodeAnnouncementV2` and `V3` with UTXO manager
+wiring, but omitted `V4`. The fallback `_ =>` handler never sets `utxo_manager`.
+
+**Fix:** Added an explicit `NetworkMessage::MasternodeAnnouncementV4` match arm in `server.rs`
+(inbound message loop) that mirrors the V2/V3 handlers: normalises the address from the TCP peer
+address, sets `context.utxo_manager` and `context.peer_manager`, and delegates to the unified
+`MessageHandler`.
+
+---
+
+**Document Version:** 1.2  
+**Last Updated:** April 2026  
+**Changes from v1.1:**
+- Added AV-6 through AV-12: seven live mainnet attack vectors discovered and fixed April 2026
+- All fixes shipped and verified on mainnet
 
 **Next Review:** Quarterly or after major protocol changes

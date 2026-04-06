@@ -1353,6 +1353,35 @@ async fn handle_peer(
                                         let _ = peer_registry.send_to_peer(&peer.addr, response).await;
                                     }
                                 }
+                                NetworkMessage::MasternodeAnnouncementV4 { address: _, reward_address, tier, public_key, collateral_outpoint, certificate, started_at, collateral_proof } => {
+                                    check_rate_limit!("masternode_announce");
+                                    if !is_stable_connection {
+                                        is_stable_connection = true;
+                                    }
+                                    let peer_ip_str = peer.addr.split(':').next().unwrap_or("").to_string();
+                                    if peer_ip_str.is_empty() { continue; }
+                                    let v4_msg = NetworkMessage::MasternodeAnnouncementV4 {
+                                        address: peer_ip_str.clone(),
+                                        reward_address: reward_address.clone(),
+                                        tier: *tier,
+                                        public_key: *public_key,
+                                        collateral_outpoint: collateral_outpoint.clone(),
+                                        certificate: certificate.clone(),
+                                        started_at: *started_at,
+                                        collateral_proof: collateral_proof.clone(),
+                                    };
+                                    let handler = MessageHandler::new(peer_ip_str, ConnectionDirection::Inbound);
+                                    let mut context = MessageContext::minimal(
+                                        Arc::clone(&blockchain),
+                                        Arc::clone(&peer_registry),
+                                        Arc::clone(&masternode_registry),
+                                    );
+                                    context.utxo_manager = Some(Arc::clone(&consensus.utxo_manager));
+                                    context.peer_manager = Some(Arc::clone(&peer_manager));
+                                    if let Ok(Some(response)) = handler.handle_message(&v4_msg, &context).await {
+                                        let _ = peer_registry.send_to_peer(&peer.addr, response).await;
+                                    }
+                                }
                                 NetworkMessage::GetPeers => {
                                     check_rate_limit!("get_peers");
 
