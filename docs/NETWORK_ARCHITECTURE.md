@@ -610,7 +610,7 @@ bootstrap_peers = ["seed1.time-coin.io:24100", "seed2.time-coin.io:24100"]
 
 - **Protocol**: [TIME Coin Protocol v5](../docs/TIMECOIN_PROTOCOL_V5.md)
 - **Build**: [Compilation Status](../COMPILATION_COMPLETE.md)
-- **Analysis**: See `analysis/` directory for detailed studies
+
 
 ---
 

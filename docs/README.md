@@ -63,14 +63,6 @@ This folder contains:
 - ✅ Best practices and guidelines
 - ✅ API and RPC documentation
 
-### Implementation Analysis (`/analysis`)
-For implementation details, architectural decisions, and status reports, see `/analysis/`:
-- Implementation progress tracking
-- Architectural decision records (ADRs)
-- Build and deployment notes
-- Gap analysis and issue tracking
-- Session summaries and bug fixes
-
 ## Quick Links
 
 - [Protocol Overview](TIMECOIN_PROTOCOL.md#overview)
@@ -84,8 +76,6 @@ For implementation details, architectural decisions, and status reports, see `/a
 - [Security Model](TIMECOIN_PROTOCOL.md#security-model)
 
 ## Contributing
-
-For development documentation and implementation status, see `/analysis/README.md`.
 
 ## License
 

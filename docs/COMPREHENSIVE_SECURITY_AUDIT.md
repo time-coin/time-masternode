@@ -268,7 +268,6 @@ was unverifiable because it came from the announcement message itself.
 **Code References:**
 - `src/network/message_handler.rs` - `handle_masternode_announcement` conflict resolution
 - `src/main.rs` - V4 announcement signing in announcement task
-- `analysis/2026-04-05_POOL_DISTRIBUTION_ATTACK_VECTORS.md` - Full incident analysis (AV4)
 
 ---
 
