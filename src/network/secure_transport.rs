@@ -272,6 +272,7 @@ impl SecureConnection {
             magic: our_magic,
             protocol_version: 1,
             network: our_network.to_string(),
+            commit_count: env!("GIT_COMMIT_COUNT").parse::<u32>().unwrap_or(0),
         };
 
         self.send_message(handshake).await?;
@@ -282,6 +283,7 @@ impl SecureConnection {
                 magic,
                 protocol_version: _,
                 network,
+                commit_count: _,
             } => {
                 if magic != our_magic {
                     return Err(SecureTransportError::HandshakeFailed(format!(

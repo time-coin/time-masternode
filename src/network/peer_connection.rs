@@ -1011,6 +1011,7 @@ impl PeerConnection {
             magic: self.network_type.magic_bytes(),
             protocol_version: 1,
             network: format!("{}", self.network_type).to_lowercase(),
+            commit_count: env!("GIT_COMMIT_COUNT").parse::<u32>().unwrap_or(0),
         };
 
         if let Err(e) = Self::send_message(&self.writer_tx, &handshake) {
@@ -1071,8 +1072,8 @@ impl PeerConnection {
                             let handle_result = self.handle_message_unified(message, &config, &handler).await;
 
                             if let Err(e) = handle_result {
-                                if e.contains("is blacklisted") {
-                                    warn!("🚫 [{:?}] Disconnecting blacklisted peer {}", self.direction, self.peer_ip);
+                                if e.contains("is blacklisted") || e.contains("DISCONNECT:") {
+                                    warn!("🚫 [{:?}] Disconnecting peer {}: {}", self.direction, self.peer_ip, e);
                                     break;
                                 }
                                 warn!("⚠️ [{:?}] Error handling message from {}: {}",

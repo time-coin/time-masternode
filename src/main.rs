@@ -3639,11 +3639,8 @@ async fn main() {
                                 "✅ Prepare consensus already reached for block {} — generating precommit",
                                 block_height
                             );
-                            block_consensus_engine
-                                .timevote
-                                .generate_precommit_vote(block_hash, our_addr, our_weight);
-
-                            // Broadcast our precommit vote
+                            // Broadcast our precommit vote — compute signature first so it can
+                            // also be stored in the accumulator alongside the vote weight.
                             let precommit_sig = if let Some(signing_key) =
                                 block_consensus_engine.get_signing_key()
                             {
@@ -3656,6 +3653,9 @@ async fn main() {
                             } else {
                                 vec![]
                             };
+                            block_consensus_engine
+                                .timevote
+                                .generate_precommit_vote(block_hash, our_addr, our_weight, precommit_sig.clone());
                             let precommit =
                                 crate::network::message::NetworkMessage::TimeVotePrecommit {
                                     block_hash,

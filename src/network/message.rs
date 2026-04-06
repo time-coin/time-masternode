@@ -27,6 +27,9 @@ pub enum NetworkMessage {
         magic: [u8; 4],
         protocol_version: u32,
         network: String,
+        /// Number of git commits in the sender's build. Used to detect outdated nodes.
+        /// Nodes with a lower count than ours are flagged as running old code.
+        commit_count: u32,
     },
     // Acknowledgment for handshake and critical messages
     Ack {

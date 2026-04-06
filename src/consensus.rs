@@ -502,8 +502,8 @@ impl PrepareVoteAccumulator {
 /// Pure timevote: After prepare consensus, validators continue voting for finality
 #[derive(Debug)]
 pub struct PrecommitVoteAccumulator {
-    /// block_hash -> Vec<(voter_id, weight)>
-    votes: DashMap<Hash256, Vec<(String, u64)>>,
+    /// block_hash -> Vec<(voter_id, ed25519_signature_bytes, weight)>
+    votes: DashMap<Hash256, Vec<(String, Vec<u8>, u64)>>,
     /// Track which blocks already reached consensus (prevents duplicate actions)
     consensus_signaled: DashSet<Hash256>,
 }
@@ -524,10 +524,10 @@ impl PrecommitVoteAccumulator {
 
     /// Add a precommit vote for a block.
     /// A voter can only vote for ONE block — first vote wins.
-    pub fn add_vote(&self, block_hash: Hash256, voter_id: String, weight: u64) {
+    pub fn add_vote(&self, block_hash: Hash256, voter_id: String, signature: Vec<u8>, weight: u64) {
         // Check if this voter already voted for a DIFFERENT block
         for entry in self.votes.iter() {
-            if *entry.key() != block_hash && entry.value().iter().any(|(id, _)| *id == voter_id) {
+            if *entry.key() != block_hash && entry.value().iter().any(|(id, _, _)| *id == voter_id) {
                 tracing::debug!(
                     "⚠️ Ignoring duplicate precommit vote from {} — already voted for different block",
                     voter_id
@@ -537,10 +537,10 @@ impl PrecommitVoteAccumulator {
         }
         // Also prevent double-voting for the same block
         let mut votes = self.votes.entry(block_hash).or_default();
-        if votes.iter().any(|(id, _)| *id == voter_id) {
+        if votes.iter().any(|(id, _, _)| *id == voter_id) {
             return;
         }
-        votes.push((voter_id, weight));
+        votes.push((voter_id, signature, weight));
     }
 
     /// Check if timevote consensus reached: majority of participating validator WEIGHT agrees.
@@ -559,7 +559,7 @@ impl PrecommitVoteAccumulator {
         let (vote_count, block_weight) = match self.votes.get(&block_hash) {
             Some(entry) => {
                 let count = entry.len();
-                let weight: u64 = entry.iter().map(|(_, w)| *w).sum();
+                let weight: u64 = entry.iter().map(|(_, _, w)| *w).sum();
                 (count, weight)
             }
             None => return false,
@@ -575,7 +575,7 @@ impl PrecommitVoteAccumulator {
         let mut total_weight: u64 = 0;
         let mut seen_voters = std::collections::HashSet::new();
         for entry in self.votes.iter() {
-            for (voter_id, w) in entry.value() {
+            for (voter_id, _, w) in entry.value() {
                 if seen_voters.insert(voter_id.clone()) {
                     total_weight += w;
                 }
@@ -602,7 +602,7 @@ impl PrecommitVoteAccumulator {
     pub fn get_weight(&self, block_hash: Hash256) -> u64 {
         self.votes
             .get(&block_hash)
-            .map(|entry| entry.iter().map(|(_, w)| w).sum())
+            .map(|entry| entry.iter().map(|(_, _, w)| w).sum())
             .unwrap_or(0)
     }
 
@@ -610,7 +610,20 @@ impl PrecommitVoteAccumulator {
     pub fn get_voters(&self, block_hash: Hash256) -> Vec<String> {
         self.votes
             .get(&block_hash)
-            .map(|entry| entry.iter().map(|(id, _)| id.clone()).collect())
+            .map(|entry| entry.iter().map(|(id, _, _)| id.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Get list of (voter_id, signature) pairs for this block
+    pub fn get_signatures(&self, block_hash: Hash256) -> Vec<(String, Vec<u8>)> {
+        self.votes
+            .get(&block_hash)
+            .map(|entry| {
+                entry
+                    .iter()
+                    .map(|(id, sig, _)| (id.clone(), sig.clone()))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -632,7 +645,7 @@ impl PrecommitVoteAccumulator {
             .iter()
             .map(|entry| {
                 let hash = *entry.key();
-                let voters = entry.value().iter().map(|(id, _)| id.clone()).collect();
+                let voters = entry.value().iter().map(|(id, _, _)| id.clone()).collect();
                 (hash, voters)
             })
             .collect()
@@ -1457,10 +1470,16 @@ impl TimeVoteConsensus {
 
     /// Generate a precommit vote for a block (Phase 3E.1)
     /// Called after prepare consensus is reached
-    pub fn generate_precommit_vote(&self, block_hash: Hash256, voter_id: &str, voter_weight: u64) {
-        // Add our own vote to the accumulator
+    pub fn generate_precommit_vote(
+        &self,
+        block_hash: Hash256,
+        voter_id: &str,
+        voter_weight: u64,
+        signature: Vec<u8>,
+    ) {
+        // Add our own vote to the accumulator, including the signature
         self.precommit_votes
-            .add_vote(block_hash, voter_id.to_string(), voter_weight);
+            .add_vote(block_hash, voter_id.to_string(), signature, voter_weight);
 
         tracing::debug!(
             "✅ Generated precommit vote for block {} from {} (weight: {})",
@@ -1476,9 +1495,10 @@ impl TimeVoteConsensus {
         block_hash: Hash256,
         voter_id: String,
         voter_weight: u64,
+        signature: Vec<u8>,
     ) {
         self.precommit_votes
-            .add_vote(block_hash, voter_id.clone(), voter_weight);
+            .add_vote(block_hash, voter_id.clone(), signature, voter_weight);
 
         let current_weight = self.precommit_votes.get_weight(block_hash);
         tracing::debug!(
@@ -1517,6 +1537,11 @@ impl TimeVoteConsensus {
     /// Get precommit vote weight for a block
     pub fn get_precommit_weight(&self, block_hash: Hash256) -> u64 {
         self.precommit_votes.get_weight(block_hash)
+    }
+
+    /// Get all collected (voter_id, signature) pairs for a block's precommit round
+    pub fn get_precommit_signatures(&self, block_hash: Hash256) -> Vec<(String, Vec<u8>)> {
+        self.precommit_votes.get_signatures(block_hash)
     }
 
     /// Clean up votes after block finalization (Phase 3E.6)

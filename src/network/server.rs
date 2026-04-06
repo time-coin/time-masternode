@@ -660,7 +660,7 @@ async fn handle_peer(
                             // First message MUST be a valid handshake
                             if !handshake_done {
                                 match &msg {
-                                    NetworkMessage::Handshake { magic, protocol_version, network } => {
+                                    NetworkMessage::Handshake { magic, protocol_version, network, commit_count } => {
                                         if magic != &magic_bytes {
                                             tracing::warn!("🚫 Rejecting {} - invalid magic bytes: {:?}", peer.addr, magic);
                                             blacklist.write().await.record_violation(
@@ -677,7 +677,20 @@ async fn handle_peer(
                                             );
                                             break;
                                         }
-                                        tracing::info!("✅ Handshake accepted from {} (network: {})", peer.addr, network);
+                                        let our_commits = env!("GIT_COMMIT_COUNT").parse::<u32>().unwrap_or(0);
+                                        if *commit_count < our_commits {
+                                            tracing::warn!(
+                                                "⚠️ Peer {} is running outdated software \
+                                                (commit {}, we are at commit {}). \
+                                                Please upgrade: https://github.com/TimeCoinsOfficial/time-masternode",
+                                                peer.addr, commit_count, our_commits
+                                            );
+                                        }
+                                        peer_registry.set_peer_commit_count(&ip_str, *commit_count).await;
+                                        tracing::info!(
+                                            "✅ Handshake accepted from {} (network: {}, commit: {})",
+                                            peer.addr, network, commit_count
+                                        );
                                         handshake_done = true;
 
                                         // Atomically register inbound connection to prevent race conditions
@@ -2255,8 +2268,15 @@ async fn handle_peer(
                                         Arc::clone(&masternode_registry),
                                     );
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => {
+                                            let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                        }
+                                        Err(e) if e.contains("DISCONNECT:") => {
+                                            tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e);
+                                            break;
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }

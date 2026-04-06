@@ -8411,31 +8411,22 @@ impl Blockchain {
 
         if height_advantage == 0 {
             // Same-height fork — chain was selected by deterministic hash tiebreaker
-            // (lower hash wins). Require weighted masternode stake majority to switch.
+            // (lower hash wins). Log stake distribution for diagnostics only.
+            // DO NOT gate on stake weight here: the hash tiebreaker is the canonical
+            // rule and must be followed regardless of which side holds more stake.
+            // A 67% stake threshold would permanently deadlock any ~60/40 split
+            // (neither side reaches 67%, so neither ever switches).
+            // The peer-count guard below (MIN_PEERS_FOR_FORK_SWITCH) provides
+            // sufficient anti-manipulation protection.
             let weighted_ratio = consensus_weight as f64 / total_responding_weight as f64;
-            const WEIGHTED_CONSENSUS_THRESHOLD: f64 = 0.67; // 67% weighted stake required
-
-            if weighted_ratio < WEIGHTED_CONSENSUS_THRESHOLD {
-                tracing::info!(
-                    "🔀 Same-height fork at {}: weighted stake {:.1}% < {:.0}% threshold — \
-                    keeping our chain (consensus weight {}/{}, {} peers)",
-                    consensus_height,
-                    weighted_ratio * 100.0,
-                    WEIGHTED_CONSENSUS_THRESHOLD * 100.0,
-                    consensus_weight,
-                    total_responding_weight,
-                    consensus_peers.len(),
-                );
-                return None;
-            }
-
             tracing::info!(
-                "🔀 Same-height fork at {}: weighted stake {:.1}% ≥ {:.0}% — accepting consensus chain ({}/{})",
+                "🔀 Same-height fork at {}: consensus chain (lower hash) has {:.1}% weighted stake \
+                ({}/{}, {} peers) — applying hash tiebreaker",
                 consensus_height,
                 weighted_ratio * 100.0,
-                WEIGHTED_CONSENSUS_THRESHOLD * 100.0,
                 consensus_weight,
                 total_responding_weight,
+                consensus_peers.len(),
             );
         } else {
             // Longest chain is strictly taller — it wins by longest chain rule
@@ -9361,7 +9352,14 @@ impl Blockchain {
                                 }
                             }
                         }
-                        if total_checked > 0 && supporting_peers < MIN_PEERS_FOR_ONDEMAND_FORK {
+                        // Only enforce the MIN_PEERS threshold when we can actually see at least
+                        // that many peers. If the network is smaller than the threshold (e.g.
+                        // testnet, post-partition with few nodes), requiring MIN_PEERS support
+                        // creates a permanent deadlock: no side has enough visible peers so
+                        // same-height forks never resolve via the hash tiebreaker.
+                        if total_checked >= MIN_PEERS_FOR_ONDEMAND_FORK
+                            && supporting_peers < MIN_PEERS_FOR_ONDEMAND_FORK
+                        {
                             info!(
                                 "🛡️ On-demand fork REJECTED: only {}/{} peers support peer tip \
                                 (need {}). Single-peer fork attempt from {}",

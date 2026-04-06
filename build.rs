@@ -10,11 +10,21 @@ fn main() {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
+    // Get total git commit count — used in handshake so peers can detect outdated nodes
+    let git_commit_count: u32 = Command::new("git")
+        .args(["rev-list", "--count", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+
     // Get build date
     let build_date = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
 
     // Set environment variables for build
     println!("cargo:rustc-env=GIT_HASH={}", git_hash);
+    println!("cargo:rustc-env=GIT_COMMIT_COUNT={}", git_commit_count);
     println!("cargo:rustc-env=BUILD_DATE={}", build_date);
 
     // Rerun if git HEAD changes or source files change

@@ -1550,9 +1550,25 @@ impl MessageHandler {
                     .await
                     .max(1);
 
+            // Sign the precommit vote before storing it in the accumulator
+            let self_signature = if let Some(signing_key) = consensus.get_signing_key() {
+                use ed25519_dalek::Signer;
+                let mut msg = Vec::new();
+                msg.extend_from_slice(&block_hash);
+                msg.extend_from_slice(validator_id.as_bytes());
+                msg.extend_from_slice(b"PRECOMMIT"); // Vote type
+                signing_key.sign(&msg).to_bytes().to_vec()
+            } else {
+                debug!(
+                    "[{}] No signing key available for precommit vote",
+                    self.direction
+                );
+                vec![]
+            };
+
             consensus
                 .timevote
-                .generate_precommit_vote(block_hash, &validator_id, validator_weight);
+                .generate_precommit_vote(block_hash, &validator_id, validator_weight, self_signature.clone());
             debug!(
                 "✅ [{}] Generated precommit vote for block {}",
                 self.direction,
@@ -1561,26 +1577,10 @@ impl MessageHandler {
 
             // Broadcast precommit vote
             if let Some(broadcast_tx) = &context.broadcast_tx {
-                // Sign the precommit vote
-                let signature = if let Some(signing_key) = consensus.get_signing_key() {
-                    use ed25519_dalek::Signer;
-                    let mut msg = Vec::new();
-                    msg.extend_from_slice(&block_hash);
-                    msg.extend_from_slice(validator_id.as_bytes());
-                    msg.extend_from_slice(b"PRECOMMIT"); // Vote type
-                    signing_key.sign(&msg).to_bytes().to_vec()
-                } else {
-                    debug!(
-                        "[{}] No signing key available for precommit vote",
-                        self.direction
-                    );
-                    vec![]
-                };
-
                 let precommit_vote = NetworkMessage::TimeVotePrecommit {
                     block_hash,
                     voter_id: validator_id,
-                    signature,
+                    signature: self_signature,
                 };
 
                 match broadcast_tx.send(precommit_vote) {
@@ -1644,7 +1644,7 @@ impl MessageHandler {
 
         consensus
             .timevote
-            .accumulate_precommit_vote(block_hash, voter_id.clone(), voter_weight);
+            .accumulate_precommit_vote(block_hash, voter_id.clone(), voter_weight, signature.clone());
 
         // Check if precommit consensus reached (>50% majority timevote)
         if consensus.timevote.check_precommit_consensus(block_hash) {
@@ -1659,36 +1659,15 @@ impl MessageHandler {
             if let Some(cache) = &context.block_cache {
                 if let Some(block) = cache.remove(&block_hash) {
                     // 2. Collect precommit signatures for finality proof
-                    //
-                    // TODO: Implement signature collection
-                    //
-                    // MISSING FUNCTIONALITY:
-                    // The current implementation accumulates vote weights but doesn't
-                    // store the actual Ed25519 signatures from precommit votes.
-                    //
-                    // Required changes:
-                    // 1. Modify accumulate_precommit_vote() to store (voter_id, signature, weight)
-                    //    instead of just aggregating weights
-                    // 2. Add get_precommit_signatures(block_hash) method to retrieve them
-                    // 3. Create FinalityProof with collected signatures:
-                    //    ```rust
-                    //    let signatures = consensus.timevote.get_precommit_signatures(block_hash)?;
-                    //    let finality_proof = FinalityProof {
-                    //        block_hash,
-                    //        height: block.header.height,
-                    //        signatures,
-                    //        total_stake: precommit_weight,
-                    //        timestamp: chrono::Utc::now().timestamp() as u64,
-                    //    };
-                    //    ```
-                    //
-                    // IMPACT: Without this, finality proofs lack cryptographic signatures,
-                    // making them non-verifiable by light clients or external validators.
-                    //
-                    // PRIORITY: HIGH - Required for light client support
-                    //
-                    // For now, we proceed without signatures (finality still achieved via consensus)
-                    let _signatures: Vec<Vec<u8>> = vec![]; // Placeholder
+                    let precommit_weight = consensus.timevote.get_precommit_weight(block_hash);
+                    let signatures = consensus.timevote.get_precommit_signatures(block_hash);
+                    debug!(
+                        "📋 [{}] Collected {} precommit signatures for block {} (total weight: {})",
+                        self.direction,
+                        signatures.len(),
+                        hex::encode(block_hash),
+                        precommit_weight
+                    );
 
                     // 3. Phase 3E.3: Call timelock.finalize_block_complete()
                     // Note: This would be called through a TimeLock module instance
@@ -2308,7 +2287,11 @@ impl MessageHandler {
             }
         }
 
-        Ok(None)
+        Err(format!(
+            "DISCONNECT: genesis hash mismatch (ours={}, theirs={})",
+            hex::encode(&our_genesis_hash[..8]),
+            hex::encode(&peer_genesis_hash[..8])
+        ))
     }
 
     /// Handle RequestGenesis
@@ -2414,6 +2397,10 @@ impl MessageHandler {
                                 "committed_to_different_genesis",
                             )
                             .await;
+                        return Err(format!(
+                            "DISCONNECT: peer {} is committed to a different genesis at height {}",
+                            self.peer_ip, peer_committed_height
+                        ));
                     } else {
                         debug!(
                             "⏭️ [{}] Kept our genesis (already lower hash) — ignoring peer {}",
@@ -2440,6 +2427,10 @@ impl MessageHandler {
                                 "wrong_timestamp",
                             )
                             .await;
+                        return Err(format!(
+                            "DISCONNECT: peer {} has genesis timestamp mismatch: {}",
+                            self.peer_ip, e
+                        ));
                     } else {
                         warn!(
                             "⚠️ [{}] Candidate genesis from {} rejected: {}",
@@ -4867,9 +4858,13 @@ impl MessageHandler {
                         txid_hex
                     );
 
-                    // Step 4: Get our voting weight and broadcast vote
-                    // TODO: Get actual voter weight from masternode collateral
-                    let voter_weight = 1_000_000_000; // Placeholder: 1 tier weight
+                    // Step 4: Get our voting weight from the masternode registry and broadcast vote
+                    let our_id = context
+                        .node_masternode_address
+                        .as_deref()
+                        .unwrap_or_default();
+                    let voter_weight =
+                        Self::get_voter_weight(&context.masternode_registry, our_id).await;
 
                     if let Err(e) = consensus
                         .broadcast_fallback_vote(proposal_hash, vote_decision, voter_weight)
