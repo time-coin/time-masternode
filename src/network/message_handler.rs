@@ -2247,68 +2247,74 @@ impl MessageHandler {
                 self.peer_ip,
                 hex::encode(&our_genesis_hash[..8])
             );
-            // Mark peer as genesis-compatible by resetting any fork errors
+            // Mark peer as genesis-confirmed and reset any fork errors
             context.peer_registry.reset_fork_errors(&self.peer_ip);
-        } else {
-            let our_height = context.blockchain.get_height();
-
-            if our_height == 0 {
-                // Still at genesis height — genesis convergence is still possible.
-                // Request the peer's genesis block so we can compare hashes and keep
-                // whichever is lower (deterministic tie-break; see replace_genesis_if_lower).
-                info!(
-                    "🔀 [{}] Genesis hash differs from peer {} at height 0 — requesting \
-                     their genesis for convergence (ours: {}, theirs: {})",
-                    self.direction,
-                    self.peer_ip,
-                    hex::encode(&our_genesis_hash[..8]),
-                    hex::encode(&peer_genesis_hash[..8])
-                );
-                return Ok(Some(
-                    crate::network::message::NetworkMessage::RequestGenesis,
-                ));
-            }
-
-            // height > 0: we have blocks built on our genesis and are fully committed to it.
-            warn!(
-                "🚫 [{}] Genesis hash MISMATCH with peer {} - INCOMPATIBLE!",
-                self.direction, self.peer_ip
-            );
-            warn!("   Our genesis:   {}", hex::encode(&our_genesis_hash[..8]));
-            warn!("   Their genesis: {}", hex::encode(&peer_genesis_hash[..8]));
-
-            // Mark peer as permanently incompatible
             context
                 .peer_registry
-                .mark_genesis_incompatible(
-                    &self.peer_ip,
-                    &hex::encode(&our_genesis_hash[..8]),
-                    &hex::encode(&peer_genesis_hash[..8]),
-                )
+                .mark_genesis_confirmed(&self.peer_ip)
                 .await;
+            return Ok(None);
+        }
 
-            // Permanently ban the peer in the IP blacklist — a wrong genesis
-            // means this peer is on a completely different chain and will never
-            // be useful to us.
-            if let Some(blacklist) = &context.blacklist {
-                let bare_ip = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
-                if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
-                    let mut bl = blacklist.write().await;
-                    bl.add_permanent_ban(
-                        ip,
-                        &format!(
-                            "Genesis hash mismatch: ours={}, theirs={}",
-                            hex::encode(&our_genesis_hash[..8]),
-                            hex::encode(&peer_genesis_hash[..8])
-                        ),
-                    );
-                    error!(
-                        "🚫 [AI] Permanently banned {} — wrong genesis block (theirs: {}, ours: {})",
-                        bare_ip,
-                        hex::encode(&peer_genesis_hash[..8]),
-                        hex::encode(&our_genesis_hash[..8])
-                    );
-                }
+        // Hashes differ.
+        let our_height = context.blockchain.get_height();
+
+        if our_height == 0 {
+            // Still at genesis height — genesis convergence is still possible.
+            // Request the peer's genesis block so we can compare hashes and keep
+            // whichever is lower (deterministic tie-break; see replace_genesis_if_lower).
+            info!(
+                "🔀 [{}] Genesis hash differs from peer {} at height 0 — requesting \
+                 their genesis for convergence (ours: {}, theirs: {})",
+                self.direction,
+                self.peer_ip,
+                hex::encode(&our_genesis_hash[..8]),
+                hex::encode(&peer_genesis_hash[..8])
+            );
+            return Ok(Some(
+                crate::network::message::NetworkMessage::RequestGenesis,
+            ));
+        }
+
+        // height > 0: we have blocks built on our genesis and are fully committed to it.
+        warn!(
+            "🚫 [{}] Genesis hash MISMATCH with peer {} - INCOMPATIBLE!",
+            self.direction, self.peer_ip
+        );
+        warn!("   Our genesis:   {}", hex::encode(&our_genesis_hash[..8]));
+        warn!("   Their genesis: {}", hex::encode(&peer_genesis_hash[..8]));
+
+        // Mark peer as permanently incompatible
+        context
+            .peer_registry
+            .mark_genesis_incompatible(
+                &self.peer_ip,
+                &hex::encode(&our_genesis_hash[..8]),
+                &hex::encode(&peer_genesis_hash[..8]),
+            )
+            .await;
+
+        // Permanently ban the peer in the IP blacklist — a wrong genesis
+        // means this peer is on a completely different chain and will never
+        // be useful to us.
+        if let Some(blacklist) = &context.blacklist {
+            let bare_ip = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
+            if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
+                let mut bl = blacklist.write().await;
+                bl.add_permanent_ban(
+                    ip,
+                    &format!(
+                        "Genesis hash mismatch: ours={}, theirs={}",
+                        hex::encode(&our_genesis_hash[..8]),
+                        hex::encode(&peer_genesis_hash[..8])
+                    ),
+                );
+                error!(
+                    "🚫 [AI] Permanently banned {} — wrong genesis block (theirs: {}, ours: {})",
+                    bare_ip,
+                    hex::encode(&peer_genesis_hash[..8]),
+                    hex::encode(&our_genesis_hash[..8])
+                );
             }
         }
 

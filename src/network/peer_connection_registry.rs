@@ -437,8 +437,9 @@ impl PeerConnectionRegistry {
     }
 
     /// Mark a peer's genesis hash as confirmed (same chain as us).
-    /// Called by verify_genesis_compatibility when the peer's hash matches ours.
-    async fn mark_genesis_confirmed(&self, peer_ip: &str) {
+    /// Called by verify_genesis_compatibility when the peer's hash matches ours,
+    /// and by handle_genesis_hash_response when a GenesisHashResponse is verified.
+    pub async fn mark_genesis_confirmed(&self, peer_ip: &str) {
         let ip_only = extract_ip(peer_ip);
         self.genesis_confirmed_peers
             .write()
