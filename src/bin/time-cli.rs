@@ -24,6 +24,7 @@ Commands:
     getblockhash           Get block hash at a given height
     getblockheader         Get block header by height or hash
     gettxoutsetinfo        Get information about the UTXO set
+    gettxout               Get details about an unspent transaction output [txid] [vout]
   Network
     getnetworkinfo         Get network information
     getpeerinfo            Get peer information
@@ -57,6 +58,7 @@ Commands:
   Masternode
     masternodelist         List all masternodes
     masternodestatus       Get this node's masternode status
+    checkcollateral        Check collateral UTXO health (on-chain, lock, squatter, tier)
     masternode genkey      Generate a new masternode key
     masternode list        List masternodes (alias)
     masternode status      Get masternode status (alias)
@@ -161,6 +163,15 @@ enum Commands {
     /// Get information about the UTXO set
     #[command(next_help_heading = "Blockchain")]
     GetTxOutSetInfo,
+
+    /// Get details about an unspent transaction output
+    #[command(next_help_heading = "Blockchain")]
+    GetTxOut {
+        /// Transaction ID
+        txid: String,
+        /// Output index
+        vout: u32,
+    },
 
     // ============================================================
     // NETWORK COMMANDS
@@ -439,6 +450,13 @@ enum Commands {
     /// List all locked collaterals
     #[command(next_help_heading = "Masternode")]
     ListLockedCollaterals,
+
+    /// Check the health of the local masternode's configured collateral UTXO.
+    ///
+    /// Reports whether the UTXO exists on-chain, the detected tier, lock status,
+    /// and whether a squatter has claimed the outpoint in the gossip registry.
+    #[command(next_help_heading = "Masternode")]
+    CheckCollateral,
 
     /// Register or re-register a masternode on-chain (two-key model).
     ///
@@ -906,6 +924,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::GetNetworkInfo => ("getnetworkinfo", json!([])),
         Commands::GetPeerInfo => ("getpeerinfo", json!([])),
         Commands::GetTxOutSetInfo => ("gettxoutsetinfo", json!([])),
+        Commands::GetTxOut { txid, vout } => ("gettxout", json!([txid, vout])),
         Commands::GetTransaction { txid } => ("gettransaction", json!([txid])),
         Commands::GetRawTransaction { txid, verbose } => {
             ("getrawtransaction", json!([txid, verbose]))
@@ -945,6 +964,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         },
         Commands::ReleaseAllCollaterals => ("releaseallcollaterals", json!([])),
         Commands::ListLockedCollaterals => ("listlockedcollaterals", json!([])),
+        Commands::CheckCollateral => ("checkcollateral", json!([])),
         Commands::MasternodeReg { .. } => unreachable!("handled above"),
         Commands::DumpPrivKey { .. } => unreachable!("handled above"),
         Commands::GetConsensusInfo => ("getconsensusinfo", json!([])),

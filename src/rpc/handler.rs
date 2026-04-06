@@ -189,6 +189,7 @@ impl RpcHandler {
             "getwalletinfo" => self.get_wallet_info().await,
             "masternodelist" => self.masternode_list(&params_array).await,
             "masternodestatus" => self.masternode_status().await,
+            "checkcollateral" => self.check_collateral().await,
             "listlockedcollaterals" => self.list_locked_collaterals().await,
             "unlockcollateral" => self.unlock_collateral_rpc(&params_array).await,
             "getconsensusinfo" => self.get_consensus_info().await,
@@ -2378,6 +2379,112 @@ impl RpcHandler {
                 "message": "This node is not configured as a masternode"
             }))
         }
+    }
+
+    /// Check the health of the local node's configured collateral UTXO(s).
+    ///
+    /// Reports:
+    /// - Whether the UTXO exists on-chain
+    /// - The detected tier (Bronze/Silver/Gold) based on value
+    /// - Whether it is locked as collateral in UTXOManager
+    /// - Whether a squatter (different IP) has claimed it in the gossip registry
+    async fn check_collateral(&self) -> Result<Value, RpcError> {
+        let local_mn = match self.registry.get_local_masternode().await {
+            Some(mn) => mn,
+            None => {
+                return Ok(json!({
+                    "status": "not_configured",
+                    "message": "This node is not configured as a masternode (masternode=1 not set)"
+                }));
+            }
+        };
+
+        let outpoint = match local_mn.masternode.collateral_outpoint {
+            Some(ref op) => op.clone(),
+            None => {
+                return Ok(json!({
+                    "status": "no_collateral",
+                    "tier": format!("{:?}", local_mn.masternode.tier),
+                    "message": "Free-tier node — no collateral configured in masternode.conf"
+                }));
+            }
+        };
+
+        let txid_hex = hex::encode(outpoint.txid);
+        let outpoint_str = format!("{}:{}", txid_hex, outpoint.vout);
+
+        // UTXO on-chain existence check
+        let utxo_result = self.utxo_manager.get_utxo(&outpoint).await;
+        let (utxo_found, utxo_value, utxo_address, detected_tier) = match &utxo_result {
+            Ok(utxo) => {
+                let tier = crate::types::MasternodeTier::from_collateral_value(utxo.value)
+                    .map(|t| format!("{:?}", t))
+                    .unwrap_or_else(|| format!("Unknown ({} TIME)", utxo.value / 100_000_000));
+                (true, utxo.value, utxo.address.clone(), tier)
+            }
+            Err(_) => (false, 0u64, String::new(), String::from("Unknown")),
+        };
+
+        // UTXOManager lock check
+        let lock_info = self.utxo_manager.get_locked_collateral(&outpoint);
+        let is_locked = lock_info.is_some();
+        let locked_to = lock_info
+            .as_ref()
+            .map(|l| l.masternode_address.clone())
+            .unwrap_or_default();
+
+        // Registry squatter check
+        let registry_ip = self
+            .registry
+            .get_registered_ip_for_collateral(&outpoint)
+            .await;
+        let local_ip = local_mn.masternode.address.clone();
+        let (squatter, squatter_ip) = match &registry_ip {
+            Some(ip) if ip != &local_ip => (true, ip.clone()),
+            _ => (false, String::new()),
+        };
+
+        let tier_match = !squatter && (format!("{:?}", local_mn.masternode.tier) == detected_tier
+            || local_mn.masternode.tier == crate::types::MasternodeTier::Free);
+
+        let overall = if !utxo_found {
+            "utxo_not_found"
+        } else if squatter {
+            "squatted"
+        } else if !is_locked {
+            "not_locked"
+        } else {
+            "ok"
+        };
+
+        Ok(json!({
+            "status": overall,
+            "collateral": outpoint_str,
+            "txid": txid_hex,
+            "vout": outpoint.vout,
+            "utxo_found": utxo_found,
+            "utxo_value_satoshis": utxo_value,
+            "utxo_value_time": utxo_value / 100_000_000,
+            "utxo_address": utxo_address,
+            "detected_tier": detected_tier,
+            "configured_tier": format!("{:?}", local_mn.masternode.tier),
+            "tier_match": tier_match,
+            "collateral_locked": is_locked,
+            "locked_to_ip": locked_to,
+            "registry_ip": registry_ip.unwrap_or_else(|| local_ip.clone()),
+            "local_ip": local_ip,
+            "squatter_detected": squatter,
+            "squatter_ip": squatter_ip,
+            "advice": if !utxo_found {
+                "UTXO not found — send 1000/10000/100000 TIME to yourself and add txid:vout to masternode.conf, or add tier=bronze/silver/gold to time.conf to skip UTXO lookup"
+            } else if squatter {
+                "Squatter detected — restart both nodes (v1.4.34+) to trigger V4 auto-eviction, or use 'masternodereg' to force an on-chain reclaim"
+            } else if !is_locked {
+                "UTXO found but not locked — restart timed to re-register collateral lock"
+            } else {
+                "Collateral is healthy"
+            }
+        }))
     }
 
     async fn masternode_genkey(&self) -> Result<Value, RpcError> {
