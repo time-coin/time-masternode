@@ -898,6 +898,7 @@ async fn main() {
     }
     let registry = Arc::new(MasternodeRegistry::new(registry_db.clone(), network_type));
     registry.set_peer_manager(peer_manager.clone()).await;
+    registry.set_utxo_manager(utxo_mgr.clone()).await;
     println!("  ✅ Peer manager initialized");
     println!();
 

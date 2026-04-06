@@ -259,6 +259,29 @@ pub enum NetworkMessage {
         #[serde(default)]
         started_at: u64,
     },
+    /// V4 masternode announcement with collateral ownership proof.
+    ///
+    /// Adds a cryptographic proof that the announcing node controls the private key
+    /// of the collateral UTXO's output address.  This prevents outpoint squatting:
+    /// a bad actor who gossips a collateral outpoint first cannot block the legitimate
+    /// owner from registering, because only the owner can produce a valid signature.
+    ///
+    /// Proof message: `b"TIME Masternode:" + ip + b":" + txid_hex + b":" + vout`
+    /// Signed with the Ed25519 key that controls the collateral UTXO's output address.
+    /// Empty Vec means no proof (treated identically to V3 — first-claim wins).
+    MasternodeAnnouncementV4 {
+        address: String,
+        reward_address: String,
+        tier: MasternodeTier,
+        public_key: VerifyingKey,
+        collateral_outpoint: Option<OutPoint>,
+        certificate: Vec<u8>,
+        #[serde(default)]
+        started_at: u64,
+        /// Ed25519 signature over the collateral proof message (64 bytes), or empty.
+        #[serde(default)]
+        collateral_proof: Vec<u8>,
+    },
     /// A payment request relayed between masternodes (24h TTL, signed by requester)
     PaymentRequestRelay(PaymentRequest),
     /// Requester cancelled their own pending payment request
@@ -481,6 +504,7 @@ impl NetworkMessage {
             NetworkMessage::GetGovernanceState => "GetGovernanceState",
             NetworkMessage::GovernanceStateResponse { .. } => "GovernanceStateResponse",
             NetworkMessage::ConnectivityWarning { .. } => "ConnectivityWarning",
+            NetworkMessage::MasternodeAnnouncementV4 { .. } => "MasternodeAnnouncementV4",
         }
     }
 

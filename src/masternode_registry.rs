@@ -179,6 +179,8 @@ pub struct MasternodeRegistry {
     /// Prevents rapid flip-flop when two peers gossip the same collateral with different IPs.
     /// Key: "<txid>:<vout>", Value: Unix timestamp of the last accepted migration.
     collateral_migration_times: Arc<DashMap<String, u64>>,
+    /// Optional reference to the UTXO manager, used for collateral ownership verification.
+    utxo_manager: Arc<RwLock<Option<Arc<crate::utxo_manager::UTXOStateManager>>>>,
 }
 
 impl MasternodeRegistry {
@@ -267,7 +269,17 @@ impl MasternodeRegistry {
             pending_collateral_locks: Arc::new(parking_lot::Mutex::new(Vec::new())),
             collateral_miss_counts: Arc::new(DashMap::new()),
             collateral_migration_times: Arc::new(DashMap::new()),
+            utxo_manager: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Inject the UTXO manager after construction so that collateral ownership
+    /// can be verified during gossip registration without circular dependencies.
+    pub async fn set_utxo_manager(
+        &self,
+        utxo_manager: Arc<crate::utxo_manager::UTXOStateManager>,
+    ) {
+        *self.utxo_manager.write().await = Some(utxo_manager);
     }
 
     fn now() -> u64 {
@@ -435,41 +447,100 @@ impl MasternodeRegistry {
                     .next()
                     .unwrap_or(&masternode.address);
                 if canonical_ip != incoming_ip {
-                    // Rate-limit the WARN to once per 5 minutes per (outpoint, claimant) pair
-                    // to avoid spam when a rejected node keeps gossiping.
-                    let spam_key = format!("hijack_warn:{}:{}", outpoint_key, incoming_ip);
-                    let last_warned = self
-                        .collateral_migration_times
-                        .get(&spam_key)
-                        .map(|v| *v)
-                        .unwrap_or(0);
-                    if now.saturating_sub(last_warned) >= 300 {
-                        self.collateral_migration_times.insert(spam_key, now);
-                        let existing_is_onchain = nodes
-                            .get(canonical_ip)
-                            .map(|i| {
-                                matches!(i.registration_source, RegistrationSource::OnChain(_))
-                            })
-                            .unwrap_or(false);
-                        if existing_is_onchain {
-                            tracing::warn!(
-                                "🛡️ Collateral hijack rejected: {} tried to claim {} \
-                                 already anchored on-chain to {}",
+                    // Before rejecting, check if the incoming node can prove ownership of
+                    // the collateral UTXO via its output address.  The UTXO was created by
+                    // the GUI wallet sending TIME to itself — the output address is the wallet
+                    // address of the real owner.  A squatter gossips a txid they don't own;
+                    // they can't match the UTXO's output address without controlling that key.
+                    //
+                    // If the incoming wallet_address matches the UTXO's output address, the
+                    // incoming node is the legitimate owner — evict the squatter and re-anchor.
+                    let utxo_mgr_guard = self.utxo_manager.read().await;
+                    let utxo_addr = if let Some(ref utxo_manager) = *utxo_mgr_guard {
+                        utxo_manager.get_utxo(outpoint).await.ok().map(|u| u.address)
+                    } else {
+                        None
+                    };
+                    drop(utxo_mgr_guard);
+
+                    if let Some(ref utxo_address) = utxo_addr {
+                        if !utxo_address.is_empty()
+                            && utxo_address == &masternode.wallet_address
+                        {
+                            // Legitimate owner proved via UTXO output address — evict squatter
+                            tracing::info!(
+                                "✅ Collateral ownership verified via UTXO address for {} \
+                                 (outpoint {}): evicting squatter {}",
                                 masternode.address,
                                 outpoint,
                                 canonical
                             );
+                            // Re-anchor to the legitimate owner
+                            let _ = self
+                                .db
+                                .insert(anchor_db_key.as_bytes(), masternode.address.as_bytes());
+                            // Remove the squatter's registry entry
+                            nodes.remove(canonical_ip);
+                            // Fall through to register the legitimate owner
                         } else {
-                            tracing::warn!(
-                                "🛡️ Collateral hijack rejected: {} tried to claim {} \
-                                 already anchored (first filed) to {}",
-                                masternode.address,
-                                outpoint,
-                                canonical
-                            );
+                            // UTXO address doesn't match — genuine hijack attempt or wrong wallet
+                            let spam_key =
+                                format!("hijack_warn:{}:{}", outpoint_key, incoming_ip);
+                            let last_warned = self
+                                .collateral_migration_times
+                                .get(&spam_key)
+                                .map(|v| *v)
+                                .unwrap_or(0);
+                            if now.saturating_sub(last_warned) >= 300 {
+                                self.collateral_migration_times.insert(spam_key, now);
+                                tracing::warn!(
+                                    "🛡️ Collateral hijack rejected: {} tried to claim {} \
+                                     anchored to {} (UTXO address: {})",
+                                    masternode.address,
+                                    outpoint,
+                                    canonical,
+                                    utxo_address
+                                );
+                            }
+                            return Err(RegistryError::CollateralAlreadyLocked);
                         }
+                    } else {
+                        // Can't look up UTXO address (no UTXO manager or UTXO not found) —
+                        // fall back to original first-claim behaviour.
+                        let spam_key = format!("hijack_warn:{}:{}", outpoint_key, incoming_ip);
+                        let last_warned = self
+                            .collateral_migration_times
+                            .get(&spam_key)
+                            .map(|v| *v)
+                            .unwrap_or(0);
+                        if now.saturating_sub(last_warned) >= 300 {
+                            self.collateral_migration_times.insert(spam_key, now);
+                            let existing_is_onchain = nodes
+                                .get(canonical_ip)
+                                .map(|i| {
+                                    matches!(i.registration_source, RegistrationSource::OnChain(_))
+                                })
+                                .unwrap_or(false);
+                            if existing_is_onchain {
+                                tracing::warn!(
+                                    "🛡️ Collateral hijack rejected: {} tried to claim {} \
+                                     already anchored on-chain to {}",
+                                    masternode.address,
+                                    outpoint,
+                                    canonical
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "🛡️ Collateral hijack rejected: {} tried to claim {} \
+                                     already anchored (first filed) to {}",
+                                    masternode.address,
+                                    outpoint,
+                                    canonical
+                                );
+                            }
+                        }
+                        return Err(RegistryError::CollateralAlreadyLocked);
                     }
-                    return Err(RegistryError::CollateralAlreadyLocked);
                 }
                 // Same address → legitimate reconnect, fall through
             }
@@ -3035,6 +3106,7 @@ impl Clone for MasternodeRegistry {
             pending_collateral_locks: self.pending_collateral_locks.clone(),
             collateral_miss_counts: self.collateral_miss_counts.clone(),
             collateral_migration_times: self.collateral_migration_times.clone(),
+            utxo_manager: self.utxo_manager.clone(),
         }
     }
 }
