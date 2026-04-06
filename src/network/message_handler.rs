@@ -2989,30 +2989,48 @@ impl MessageHandler {
                                     if info.masternode_address != peer_ip {
                                         // Conflict: two different IPs claim the same collateral.
                                         //
-                                        // A V4 announcement with a valid self-signed proof AND
-                                        // reward_address == utxo.address can evict a squatter:
+                                        // Three-tier eviction priority (gossip only, no consensus impact):
                                         //
-                                        //   1. The proof binds this masternode key to the UTXO
-                                        //      outpoint — the daemon signs it on startup using
-                                        //      masternodeprivkey from time.conf.
-                                        //   2. reward_address == utxo.address means rewards go
-                                        //      to the wallet that created the UTXO. An attacker
-                                        //      squatting with their own reward_address fails this
-                                        //      check; an attacker using the victim's address gains
-                                        //      nothing (rewards are sent to the victim's wallet).
+                                        //   Tier 1 — V4 proof: valid masternodeprivkey signature
+                                        //     + reward_address == utxo.address.  Definitive proof of
+                                        //     ownership; always evicts any gossip squatter.
                                         //
-                                        // Without a valid proof, reject as before (first-claim wins).
+                                        //   Tier 2 — Address match: reward_address == utxo.address
+                                        //     but no signature.  The claimant's rewards go to the UTXO
+                                        //     owner's wallet — a squatter using their OWN reward_address
+                                        //     gains nothing from contesting this.  Safe to evict any
+                                        //     squatter whose reward_address != utxo.address.  If the
+                                        //     current holder ALSO has reward_address == utxo.address
+                                        //     (address-match stalemate), require a signature to break
+                                        //     the tie and reject the new claimant.
+                                        //
+                                        //   Tier 3 — No match: reject (first-claim wins).
                                         let squatter_ip = info.masternode_address.clone();
                                         drop(existing);
 
-                                        let can_evict = if !collateral_proof.is_empty()
-                                            && reward_address == utxo.address
+                                        let txid_hex = hex::encode(outpoint.txid);
+                                        let proof_msg = format!(
+                                            "TIME_COLLATERAL_CLAIM:{}:{}",
+                                            txid_hex, outpoint.vout
+                                        );
+
+                                        let claimant_matches_utxo =
+                                            reward_address == utxo.address;
+
+                                        // Look up the squatter's stored reward_address to detect
+                                        // address-match stalemates.
+                                        let squatter_reward_addr = context
+                                            .masternode_registry
+                                            .get_reward_address_for_ip(&squatter_ip)
+                                            .await;
+                                        let squatter_matches_utxo = squatter_reward_addr
+                                            .as_deref()
+                                            .map(|a| a == utxo.address)
+                                            .unwrap_or(false);
+
+                                        let has_valid_proof = if !collateral_proof.is_empty()
+                                            && claimant_matches_utxo
                                         {
-                                            let txid_hex = hex::encode(outpoint.txid);
-                                            let proof_msg = format!(
-                                                "TIME_COLLATERAL_CLAIM:{}:{}",
-                                                txid_hex, outpoint.vout
-                                            );
                                             use ed25519_dalek::Verifier;
                                             ed25519_dalek::Signature::from_slice(
                                                 &collateral_proof,
@@ -3027,13 +3045,39 @@ impl MessageHandler {
                                             false
                                         };
 
-                                        if can_evict {
+                                        let can_evict = if has_valid_proof {
+                                            // Tier 1: cryptographic proof
+                                            true
+                                        } else if claimant_matches_utxo
+                                            && !squatter_matches_utxo
+                                        {
+                                            // Tier 2: address-match beats address-mismatch squatter
                                             info!(
-                                                "✅ [{}] V4 collateral proof verified: evicting \
-                                                 squatter {} and registering legitimate owner {} \
-                                                 for {}",
-                                                self.direction, squatter_ip, peer_ip, outpoint
+                                                "✅ [{}] Address-match eviction: {} has \
+                                                 reward_address == utxo.address for {} — \
+                                                 evicting squatter {} (mismatched address)",
+                                                self.direction,
+                                                peer_ip,
+                                                outpoint,
+                                                squatter_ip
                                             );
+                                            true
+                                        } else {
+                                            false
+                                        };
+
+                                        if can_evict {
+                                            if has_valid_proof {
+                                                info!(
+                                                    "✅ [{}] V4 collateral proof verified: evicting \
+                                                     squatter {} and registering legitimate owner {} \
+                                                     for {}",
+                                                    self.direction,
+                                                    squatter_ip,
+                                                    peer_ip,
+                                                    outpoint
+                                                );
+                                            }
                                             let _ = utxo_manager.unlock_collateral(&outpoint);
                                             let _ = context
                                                 .masternode_registry
@@ -3041,7 +3085,7 @@ impl MessageHandler {
                                                 .await;
                                             // Fall through to lock and register the legitimate owner
                                         } else {
-                                            // Gossip conflicts: always reject the new claimant.
+                                            // Gossip conflicts: reject the new claimant.
                                             static CONFLICT_WARN_TIMES: std::sync::OnceLock<
                                                 dashmap::DashMap<String, std::time::Instant>,
                                             > = std::sync::OnceLock::new();
@@ -3102,23 +3146,35 @@ impl MessageHandler {
                         .await
                     {
                         if registry_squatter != peer_ip {
-                            // Re-fetch UTXO to verify reward_address ownership.
+                            // Re-fetch UTXO for address comparison.
                             let utxo_addr_opt = utxo_manager
                                 .get_utxo(&outpoint)
                                 .await
                                 .ok()
                                 .map(|u| u.address);
 
+                            let claimant_matches_utxo = utxo_addr_opt
+                                .as_deref()
+                                .map(|a| a == reward_address)
+                                .unwrap_or(false);
+
+                            let squatter_reward_addr = context
+                                .masternode_registry
+                                .get_reward_address_for_ip(&registry_squatter)
+                                .await;
+                            let squatter_matches_utxo = squatter_reward_addr
+                                .as_deref()
+                                .and_then(|a| utxo_addr_opt.as_deref().map(|u| a == u))
+                                .unwrap_or(false);
+
                             let txid_hex = hex::encode(outpoint.txid);
                             let proof_msg = format!(
                                 "TIME_COLLATERAL_CLAIM:{}:{}",
                                 txid_hex, outpoint.vout
                             );
-                            let can_evict = if !collateral_proof.is_empty()
-                                && utxo_addr_opt
-                                    .as_deref()
-                                    .map(|a| a == reward_address)
-                                    .unwrap_or(false)
+
+                            let has_valid_proof = if !collateral_proof.is_empty()
+                                && claimant_matches_utxo
                             {
                                 use ed25519_dalek::Verifier;
                                 ed25519_dalek::Signature::from_slice(&collateral_proof)
@@ -3130,12 +3186,28 @@ impl MessageHandler {
                                 false
                             };
 
-                            if can_evict {
+                            let can_evict = if has_valid_proof {
+                                true
+                            } else if claimant_matches_utxo && !squatter_matches_utxo {
                                 info!(
-                                    "✅ [{}] V4 proof evicts registry squatter {} for {} \
-                                     (UTXOManager lock was absent — registry-only eviction)",
-                                    self.direction, registry_squatter, outpoint
+                                    "✅ [{}] Address-match eviction (registry): {} has \
+                                     reward_address == utxo.address for {} — evicting \
+                                     squatter {} (UTXOManager lock absent, mismatched address)",
+                                    self.direction, peer_ip, outpoint, registry_squatter
                                 );
+                                true
+                            } else {
+                                false
+                            };
+
+                            if can_evict {
+                                if has_valid_proof {
+                                    info!(
+                                        "✅ [{}] V4 proof evicts registry squatter {} for {} \
+                                         (UTXOManager lock was absent — registry-only eviction)",
+                                        self.direction, registry_squatter, outpoint
+                                    );
+                                }
                                 let _ = context
                                     .masternode_registry
                                     .unregister(&registry_squatter)

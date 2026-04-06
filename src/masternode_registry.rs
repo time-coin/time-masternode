@@ -2911,6 +2911,15 @@ impl MasternodeRegistry {
         None
     }
 
+    /// Return the reward_address stored for a given masternode IP, or `None` if not found.
+    ///
+    /// Used by the eviction logic to determine whether a squatter is using the UTXO
+    /// owner's address (address-match stalemate) or their own address (safe to evict).
+    pub async fn get_reward_address_for_ip(&self, ip: &str) -> Option<String> {
+        let nodes = self.masternodes.read().await;
+        nodes.get(ip).map(|info| info.reward_address.clone())
+    }
+
     /// Validate a CollateralUnlock special transaction.
     ///
     /// Checks:
