@@ -1438,6 +1438,7 @@ async fn main() {
         let peer_registry_for_announcement = peer_connection_registry.clone();
         let registry_for_announcement = registry.clone();
         let announcement_blockchain = blockchain.clone();
+        let signing_key_for_announcement = masternode_signing_key.clone();
 
         let announcement_handle = tokio::spawn(async move {
             // Wait for initial sync to complete before announcing
@@ -1454,8 +1455,33 @@ async fn main() {
             // Build the announcement, using current registry state so that any
             // tier upgrade (e.g. on-chain registration processed after startup)
             // is reflected in re-broadcasts.
-            let build_announcement =
-                |mn: &types::Masternode| NetworkMessage::MasternodeAnnouncementV3 {
+            //
+            // When a collateral outpoint is configured and masternodeprivkey is
+            // available, broadcast V4 with a self-signed collateral proof.  The
+            // proof message "TIME_COLLATERAL_CLAIM:<txid>:<vout>" is signed with
+            // the masternode key and lets other nodes evict V3 squatters who
+            // grabbed the UTXO before the legitimate owner announced.
+            let build_announcement = |mn: &types::Masternode| -> NetworkMessage {
+                if let (Some(ref signing_key), Some(ref outpoint)) =
+                    (&signing_key_for_announcement, &mn.collateral_outpoint)
+                {
+                    let txid_hex = hex::encode(outpoint.txid);
+                    let proof_msg =
+                        format!("TIME_COLLATERAL_CLAIM:{}:{}", txid_hex, outpoint.vout);
+                    use ed25519_dalek::Signer;
+                    let sig = signing_key.sign(proof_msg.as_bytes());
+                    return NetworkMessage::MasternodeAnnouncementV4 {
+                        address: mn.address.clone(),
+                        reward_address: mn.wallet_address.clone(),
+                        tier: mn.tier,
+                        public_key: mn.public_key,
+                        collateral_outpoint: mn.collateral_outpoint.clone(),
+                        certificate: vec![0u8; 64],
+                        started_at: daemon_started_at,
+                        collateral_proof: sig.to_bytes().to_vec(),
+                    };
+                }
+                NetworkMessage::MasternodeAnnouncementV3 {
                     address: mn.address.clone(),
                     reward_address: mn.wallet_address.clone(),
                     tier: mn.tier,
@@ -1463,11 +1489,21 @@ async fn main() {
                     collateral_outpoint: mn.collateral_outpoint.clone(),
                     certificate: vec![0u8; 64],
                     started_at: daemon_started_at,
-                };
+                }
+            };
 
             let announcement = build_announcement(&mn_for_announcement);
             peer_registry_for_announcement.broadcast(announcement).await;
-            tracing::info!("📢 Broadcast masternode announcement (V3) to network");
+            tracing::info!(
+                "📢 Broadcast masternode announcement ({}) to network",
+                if signing_key_for_announcement.is_some()
+                    && mn_for_announcement.collateral_outpoint.is_some()
+                {
+                    "V4 with collateral proof"
+                } else {
+                    "V3"
+                }
+            );
 
             // Continue broadcasting every 60 seconds; refresh tier from registry
             // so that an on-chain registration that upgrades Free→Bronze is propagated.

@@ -529,7 +529,7 @@ impl MessageHandler {
                 public_key,
                 collateral_outpoint,
             } => {
-                // V2 without certificate — treat as empty certificate
+                // V2 without certificate — treat as empty certificate, no proof
                 self.handle_masternode_announcement(
                     address.clone(),
                     reward_address.clone(),
@@ -538,6 +538,7 @@ impl MessageHandler {
                     collateral_outpoint.clone(),
                     vec![0u8; 64],
                     0, // V2 has no started_at
+                    vec![],
                     context,
                 )
                 .await
@@ -559,6 +560,30 @@ impl MessageHandler {
                     collateral_outpoint.clone(),
                     certificate.clone(),
                     *started_at,
+                    vec![],
+                    context,
+                )
+                .await
+            }
+            NetworkMessage::MasternodeAnnouncementV4 {
+                address,
+                reward_address,
+                tier,
+                public_key,
+                collateral_outpoint,
+                certificate,
+                started_at,
+                collateral_proof,
+            } => {
+                self.handle_masternode_announcement(
+                    address.clone(),
+                    reward_address.clone(),
+                    *tier,
+                    *public_key,
+                    collateral_outpoint.clone(),
+                    certificate.clone(),
+                    *started_at,
+                    collateral_proof.clone(),
                     context,
                 )
                 .await
@@ -2818,6 +2843,7 @@ impl MessageHandler {
         collateral_outpoint: Option<crate::types::OutPoint>,
         certificate: Vec<u8>,
         started_at: u64,
+        collateral_proof: Vec<u8>,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         let peer_ip = self.peer_ip.clone();
@@ -2957,43 +2983,85 @@ impl MessageHandler {
                                     if info.masternode_address != peer_ip {
                                         // Conflict: two different IPs claim the same collateral.
                                         //
-                                        // Gossip announcements are self-reported — any peer can
-                                        // set reward_address to any value, including the victim's
-                                        // utxo.address.  Evicting based on reward_address ==
-                                        // utxo.address is exploitable: an attacker sets
-                                        // reward_address = victim's utxo.address to evict the
-                                        // legitimate holder without owning the private key.
+                                        // A V4 announcement with a valid self-signed proof AND
+                                        // reward_address == utxo.address can evict a squatter:
                                         //
-                                        // Collateral ownership can ONLY be proven by an on-chain
-                                        // MasternodeReg transaction signed with the key that
-                                        // controls the UTXO.  Those are handled in
-                                        // apply_masternode_reg() which performs full signature
-                                        // verification before evicting any gossip squatter.
+                                        //   1. The proof binds this masternode key to the UTXO
+                                        //      outpoint — the daemon signs it on startup using
+                                        //      masternodeprivkey from time.conf.
+                                        //   2. reward_address == utxo.address means rewards go
+                                        //      to the wallet that created the UTXO. An attacker
+                                        //      squatting with their own reward_address fails this
+                                        //      check; an attacker using the victim's address gains
+                                        //      nothing (rewards are sent to the victim's wallet).
                                         //
-                                        // Gossip conflicts: always reject the new claimant.
-                                        static CONFLICT_WARN_TIMES: std::sync::OnceLock<
-                                            dashmap::DashMap<String, std::time::Instant>,
-                                        > = std::sync::OnceLock::new();
-                                        let warn_map =
-                                            CONFLICT_WARN_TIMES.get_or_init(dashmap::DashMap::new);
-                                        let should_warn = warn_map
-                                            .get(&peer_ip)
-                                            .map(|t| t.elapsed().as_secs() >= 600)
-                                            .unwrap_or(true);
-                                        if should_warn {
-                                            warn_map
-                                                .insert(peer_ip.clone(), std::time::Instant::now());
-                                            warn!(
-                                                "🚨 [{}] Collateral conflict: {} claimed {} \
-                                                 already held by {} — gossip cannot prove \
-                                                 ownership, use on-chain MasternodeReg",
-                                                self.direction,
-                                                peer_ip,
-                                                outpoint,
-                                                info.masternode_address
+                                        // Without a valid proof, reject as before (first-claim wins).
+                                        let squatter_ip = info.masternode_address.clone();
+                                        drop(existing);
+
+                                        let can_evict = if !collateral_proof.is_empty()
+                                            && reward_address == utxo.address
+                                        {
+                                            let txid_hex = hex::encode(outpoint.txid);
+                                            let proof_msg = format!(
+                                                "TIME_COLLATERAL_CLAIM:{}:{}",
+                                                txid_hex, outpoint.vout
                                             );
+                                            use ed25519_dalek::Verifier;
+                                            ed25519_dalek::Signature::from_slice(
+                                                &collateral_proof,
+                                            )
+                                            .map(|sig| {
+                                                public_key
+                                                    .verify(proof_msg.as_bytes(), &sig)
+                                                    .is_ok()
+                                            })
+                                            .unwrap_or(false)
+                                        } else {
+                                            false
+                                        };
+
+                                        if can_evict {
+                                            info!(
+                                                "✅ [{}] V4 collateral proof verified: evicting \
+                                                 squatter {} and registering legitimate owner {} \
+                                                 for {}",
+                                                self.direction, squatter_ip, peer_ip, outpoint
+                                            );
+                                            let _ = utxo_manager.unlock_collateral(&outpoint);
+                                            let _ = context
+                                                .masternode_registry
+                                                .unregister(&squatter_ip)
+                                                .await;
+                                            // Fall through to lock and register the legitimate owner
+                                        } else {
+                                            // Gossip conflicts: always reject the new claimant.
+                                            static CONFLICT_WARN_TIMES: std::sync::OnceLock<
+                                                dashmap::DashMap<String, std::time::Instant>,
+                                            > = std::sync::OnceLock::new();
+                                            let warn_map = CONFLICT_WARN_TIMES
+                                                .get_or_init(dashmap::DashMap::new);
+                                            let should_warn = warn_map
+                                                .get(&peer_ip)
+                                                .map(|t| t.elapsed().as_secs() >= 600)
+                                                .unwrap_or(true);
+                                            if should_warn {
+                                                warn_map.insert(
+                                                    peer_ip.clone(),
+                                                    std::time::Instant::now(),
+                                                );
+                                                warn!(
+                                                    "🚨 [{}] Collateral conflict: {} claimed {} \
+                                                     already held by {} — gossip cannot prove \
+                                                     ownership, use on-chain MasternodeReg",
+                                                    self.direction,
+                                                    peer_ip,
+                                                    outpoint,
+                                                    squatter_ip
+                                                );
+                                            }
+                                            return Ok(None);
                                         }
-                                        return Ok(None);
                                     }
                                 }
                             }
@@ -3092,7 +3160,18 @@ impl MessageHandler {
                     }
                     if is_new {
                         if let Some(broadcast_tx) = &context.broadcast_tx {
-                            let relay =
+                            let relay = if !collateral_proof.is_empty() {
+                                crate::network::message::NetworkMessage::MasternodeAnnouncementV4 {
+                                    address: peer_ip.clone(),
+                                    reward_address,
+                                    tier,
+                                    public_key,
+                                    collateral_outpoint: Some(outpoint_for_relay),
+                                    certificate: Vec::new(),
+                                    started_at,
+                                    collateral_proof: collateral_proof.clone(),
+                                }
+                            } else {
                                 crate::network::message::NetworkMessage::MasternodeAnnouncementV3 {
                                     address: peer_ip.clone(),
                                     reward_address,
@@ -3101,7 +3180,8 @@ impl MessageHandler {
                                     collateral_outpoint: Some(outpoint_for_relay),
                                     certificate: Vec::new(),
                                     started_at,
-                                };
+                                }
+                            };
                             let _ = broadcast_tx.send(relay);
                             debug!(
                                 "📡 [{}] Relayed new {:?} masternode {} announcement to all peers",
