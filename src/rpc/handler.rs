@@ -1168,14 +1168,26 @@ impl RpcHandler {
 
         let utxos = self.utxo_manager.list_utxos_by_address(&filter_addr).await;
 
+        // Determine local node IP for collateral lock ownership filtering
+        let local_mn_ip = self
+            .registry
+            .get_local_masternode()
+            .await
+            .map(|mn| mn.masternode.address.clone());
+
         let mut spendable: u64 = 0;
         let mut locked_collateral: u64 = 0;
         let mut pending: u64 = 0;
 
         for u in &utxos {
-            if self.utxo_manager.is_collateral_locked(&u.outpoint) {
-                locked_collateral += u.value;
-                continue;
+            // Only count a collateral lock as "locked" if our own node placed it.
+            // Foreign masternodes can gossip any outpoint as their collateral; if one
+            // of those is in our UTXO set we must not hide it from our spendable balance.
+            if let Some(lock) = self.utxo_manager.get_locked_collateral(&u.outpoint) {
+                if local_mn_ip.as_deref() == Some(&lock.masternode_address) {
+                    locked_collateral += u.value;
+                    continue;
+                }
             }
             match self.utxo_manager.get_state(&u.outpoint) {
                 Some(crate::types::UTXOState::Unspent) => spendable += u.value,
@@ -3885,12 +3897,23 @@ impl RpcHandler {
             let mut pending_balance: u64 = 0;
             let mut utxo_count: usize = 0;
 
+            // The local node's IP address, used to identify which collateral locks belong to us.
+            let local_mn_addr = &local_mn.masternode.address;
+
             for u in utxos.iter().filter(|u| &u.address == spendable_addr) {
                 utxo_count += 1;
 
-                if self.utxo_manager.is_collateral_locked(&u.outpoint) {
-                    locked_collateral += u.value;
-                    continue;
+                // Only count a collateral lock as "our locked collateral" if the lock was placed
+                // by our own masternode. Foreign masternodes can claim any outpoint as their
+                // collateral via gossip; if one of those outpoints happens to be in our UTXO
+                // set, we must NOT show it as locked balance — we still own and can spend it.
+                if let Some(lock) = self.utxo_manager.get_locked_collateral(&u.outpoint) {
+                    if &lock.masternode_address == local_mn_addr {
+                        locked_collateral += u.value;
+                        continue;
+                    }
+                    // Foreign lock on our UTXO — treat as spendable (we can override via
+                    // unlockcollateral RPC if needed, but don't hide it from the balance)
                 }
 
                 match self.utxo_manager.get_state(&u.outpoint) {
