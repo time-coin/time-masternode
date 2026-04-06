@@ -31,6 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Genesis Verification False Disconnect (Critical)
+
+- **`handle_genesis_hash_response` always disconnected peers, including compatible ones**: The function had an unconditional `Err("DISCONNECT: genesis hash mismatch ...")` at the end of the function body — **outside** the `if/else` that compared hashes. When a peer's genesis matched ours, the compatible branch logged "✅ compatible" and called `reset_fork_errors`, but then fell through to the trailing `Err` which disconnected the peer with a spurious mismatch message showing *identical* hashes on both sides.
+
+  Cascade effect observed on mainnet (April 6 2026, nodes stuck at height 753):
+  - Every genesis-responding peer was immediately disconnected after passing verification
+  - No peer ever reached `is_genesis_confirmed()` state
+  - Fork resolution was unconditionally skipped for **all** peers: `"Skipping fork resolution — peer not genesis-confirmed (likely old code)"`
+  - All nodes stuck at height 753 despite 20+ connected peers at heights 754–757
+
+  Fix: compatible branch now calls `mark_genesis_confirmed()` and returns `Ok(None)`. `Err("DISCONNECT: ...")` is only returned when hashes genuinely differ. `mark_genesis_confirmed()` made `pub` so `message_handler` can call it directly alongside the existing `verify_genesis_compatibility` background path.
+
 ### Added — Windows Tooling
 
 - **`scripts/install-masternode.bat`**: Automated Windows installer — checks prerequisites (Git, Rust, VS Build Tools), clones/updates the repo, builds release binaries, generates `time.conf` with random RPC credentials, adds binaries to `PATH`, and opens the P2P firewall port. Mirrors `install-masternode.sh`. Usage: `scripts\install-masternode.bat [mainnet|testnet]`.

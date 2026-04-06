@@ -1,7 +1,27 @@
 # TimeCoin Architecture Overview
 
-**Last Updated:** 2026-03-19
-**Version:** 1.2.3 (Solo Production Prevention, Block Timing Enforcement, Sync Loop Fix, Fork Resolution Bugs 1-4, Faster Peer Connections, Encrypted Memos, Payment Request URIs)
+**Last Updated:** 2026-04-06
+**Version:** 1.4.34 (Genesis Verification False Disconnect Fix, Solo Production Prevention, Block Timing Enforcement, Sync Loop Fix, Fork Resolution Bugs 1-4, Faster Peer Connections, Encrypted Memos, Payment Request URIs)
+
+---
+
+## Recent Updates (v1.7.0 - April 2026)
+
+### Genesis Verification False Disconnect Fix (Critical)
+
+`handle_genesis_hash_response` had an unconditional `Err("DISCONNECT: genesis hash mismatch ...")` at the end of the function that fired for every peer — including those whose genesis hash **matched** ours. The compatible branch correctly logged "✅ compatible" and reset fork errors, but then fell through to the trailing `Err` which disconnected the peer with a spurious mismatch showing identical hashes on both sides.
+
+**Cascade observed on mainnet (April 6 2026):**
+- Every genesis-responding peer was disconnected immediately after passing verification
+- `is_genesis_confirmed()` was never set for any peer
+- Fork resolution was unconditionally skipped: *"Skipping fork resolution — peer not genesis-confirmed (likely old code)"*
+- All nodes stuck at height 753 despite 20+ peers being at 754–757
+
+**Fix:** The compatible branch now calls `mark_genesis_confirmed()` and `return Ok(None)`. The `Err("DISCONNECT: ...")` is only reached when hashes genuinely differ. `mark_genesis_confirmed()` is now `pub` so `message_handler` can call it directly.
+
+**Genesis verification paths (two):**
+1. **Background task** (`verify_genesis_compatibility` in `peer_connection_registry.rs`): sends `GetBlockHash(0)`, waits for `BlockHashResponse` — correctly called `mark_genesis_confirmed()` already.
+2. **Inline handler** (`handle_genesis_hash_response` in `message_handler.rs`): handles incoming `GenesisHashResponse` messages — this was the broken path; now fixed to also call `mark_genesis_confirmed()` on match.
 
 ---
 
@@ -1062,6 +1082,8 @@ Collateral locking includes a 10-minute timeout cleanup for orphaned locks.
    - Prevents duplicate sync to the same height range
 
 #### Fork Resolution Flow
+
+**Prerequisite — genesis confirmation:** Fork resolution only engages with `genesis_confirmed` peers. A peer becomes genesis-confirmed when `handle_genesis_hash_response` or `verify_genesis_compatibility` verifies its genesis hash matches ours. Peers that never respond to genesis requests are marked temporarily incompatible (5-minute cooldown) and are excluded from fork decisions to prevent old-code nodes from triggering endless reorg attempts.
 
 Chain comparison in `compare_chain_with_peers()` (`blockchain.rs`):
 1. **Height-first** (primary): longest chain wins
