@@ -1327,6 +1327,86 @@ async fn main() {
                             "✅ Local masternode re-registered after evicting squatter"
                         );
                         registry.set_local_masternode(mn.address.clone()).await;
+
+                        // Mark as OnChain so it persists across peer disconnects
+                        if mn.tier != types::MasternodeTier::Free {
+                            let _ = registry
+                                .set_registration_source(
+                                    &mn.address,
+                                    crate::masternode_registry::RegistrationSource::OnChain(
+                                        blockchain.get_height(),
+                                    ),
+                                )
+                                .await;
+                        }
+
+                        registry.set_local_certificate([0u8; 64]).await;
+
+                        // Configure consensus identity (same logic as normal Ok path)
+                        let signing_key = if let Some(ref mn_key) = masternode_signing_key {
+                            mn_key.clone()
+                        } else {
+                            wallet.signing_key().clone()
+                        };
+                        if let Err(e) = consensus_engine
+                            .set_identity(mn.address.clone(), signing_key)
+                        {
+                            eprintln!("⚠️ Failed to set consensus identity: {}", e);
+                        }
+                        if let Err(e) =
+                            consensus_engine.set_wallet_signing_key(wallet.signing_key().clone())
+                        {
+                            eprintln!("⚠️ Failed to set wallet signing key: {}", e);
+                        }
+                        consensus_engine.utxo_manager.register_pubkey(
+                            &mn.wallet_address,
+                            wallet.signing_key().verifying_key().to_bytes(),
+                        );
+
+                        // Lock collateral UTXO so it shows as locked in wallet balance
+                        if mn.tier != types::MasternodeTier::Free {
+                            if let Some(ref outpoint) = mn.collateral_outpoint {
+                                let lock_height = blockchain.get_height();
+                                if let Err(e) = consensus_engine.utxo_manager.lock_local_collateral(
+                                    outpoint.clone(),
+                                    mn.address.clone(),
+                                    lock_height,
+                                    mn.tier.collateral(),
+                                ) {
+                                    tracing::warn!("⚠️ Failed to lock local collateral UTXO: {:?}", e);
+                                } else {
+                                    tracing::info!(
+                                        "🔒 Locked collateral UTXO for {:?} tier",
+                                        mn.tier
+                                    );
+                                }
+                            }
+                        }
+
+                        // Rebuild collateral locks for all known masternodes
+                        {
+                            let all_masternodes = registry.list_all().await;
+                            let lock_height = blockchain.get_height();
+                            let entries: Vec<_> = all_masternodes
+                                .iter()
+                                .filter(|info| info.masternode.address != mn.address)
+                                .filter_map(|info| {
+                                    info.masternode.collateral_outpoint.as_ref().map(|op| {
+                                        (
+                                            op.clone(),
+                                            info.masternode.address.clone(),
+                                            lock_height,
+                                            info.masternode.tier.collateral(),
+                                        )
+                                    })
+                                })
+                                .collect();
+                            if !entries.is_empty() {
+                                consensus_engine
+                                    .utxo_manager
+                                    .rebuild_collateral_locks(entries);
+                            }
+                        }
                     }
                     Err(e2) => {
                         tracing::warn!(
