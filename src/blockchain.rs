@@ -3883,22 +3883,31 @@ impl Blockchain {
                 total_pool_distributed += distributed;
             }
 
-            let adjusted_reward = total_reward - rounding_dust;
+            // Route integer-division rounding dust to the block producer so that
+            // block_reward == base_reward + fees - treasury exactly.  Previously the
+            // dust was silently burned, causing validators to reject valid blocks
+            // with a spurious "incorrect block_reward" error (e.g. 2-sat off with 3
+            // Free-tier recipients sharing an 8 TIME pool).
+            if rounding_dust > 0 {
+                if let Some(entry) = rewards.first_mut() {
+                    entry.1 += rounding_dust;
+                }
+            }
             tracing::info!(
                 "💰 Block {}: {} TIME — producer {} TIME, pools {} TIME to {} node(s) [{} eligible]{}",
                 next_height,
-                adjusted_reward / 100_000_000,
+                total_reward / 100_000_000,
                 producer_share / 100_000_000,
                 total_pool_distributed / 100_000_000,
                 rewards.len().saturating_sub(1),
                 eligible_pool.len(),
                 if rounding_dust > 0 {
-                    format!(", {} sat rounding dust → treasury", rounding_dust)
+                    format!(", {} sat rounding dust → producer", rounding_dust)
                 } else {
                     String::new()
                 }
             );
-            adjusted_reward
+            total_reward
         };
 
         if rewards.is_empty() {
