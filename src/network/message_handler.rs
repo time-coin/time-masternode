@@ -2924,9 +2924,13 @@ impl MessageHandler {
                             // 2. On-chain MasternodeReg operator_pubkey: explicit registration
                             //    tx for key rotation without spending the collateral again.
                             //
-                            // 3. reward_address == utxo.address (fallback): for legacy UTXOs
-                            //    with no embedded key and no ProTx. Squatters always fail this
-                            //    because they'd be directing rewards to the victim's wallet.
+                            // 3. reward_address == utxo.address (Level 3 / legacy): for UTXOs
+                            //    with no embedded key and no ProTx.  Strictly enforced — the
+                            //    reward_address in the announcement MUST equal the collateral
+                            //    UTXO's output address.  This prevents squatters from registering
+                            //    with a victim's collateral outpoint under their OWN reward address.
+                            //    Even if a squatter passes all other guards, their rewards are
+                            //    forcibly directed to the UTXO owner's address (useless to them).
                             // ────────────────────────────────────────────────────────────────
                             let announcing_key_hex = hex::encode(public_key.as_bytes());
 
@@ -2996,6 +3000,60 @@ impl MessageHandler {
                                     "✅ [{}] Operator key verified for {} collateral {}",
                                     self.direction, peer_ip, outpoint
                                 );
+                            } else {
+                                // Level 3 fallback: no embedded key and no on-chain ProTx.
+                                // The ONLY acceptable proof of ownership is that the reward
+                                // address matches the UTXO output address.
+                                //
+                                // Enforcement: reject announcements where reward_address ≠
+                                // utxo.address.  This ensures squatters — even those who
+                                // get past other guards — can never redirect rewards to their
+                                // own wallet.  The squatter would have to submit the real
+                                // owner's address as their reward_address, gaining nothing.
+                                //
+                                // V4 proof (Level 1 key or Level 2 ProTx) is exempt from
+                                // this check because cryptographic key ownership supersedes
+                                // address matching.
+                                if !utxo.address.is_empty()
+                                    && reward_address != utxo.address
+                                {
+                                    static REWARD_MISMATCH: std::sync::OnceLock<
+                                        dashmap::DashMap<String, std::time::Instant>,
+                                    > = std::sync::OnceLock::new();
+                                    let wm = REWARD_MISMATCH
+                                        .get_or_init(dashmap::DashMap::new);
+                                    if wm
+                                        .get(&peer_ip)
+                                        .map(|t| t.elapsed().as_secs() >= 300)
+                                        .unwrap_or(true)
+                                    {
+                                        wm.insert(
+                                            peer_ip.clone(),
+                                            std::time::Instant::now(),
+                                        );
+                                        warn!(
+                                            "🛡️ [{}] Rejecting {:?} masternode from {}: \
+                                             reward_address {} does not match collateral \
+                                             UTXO output address {} for {} \
+                                             — obtain a V4 proof or use the correct \
+                                             reward address",
+                                            self.direction,
+                                            tier,
+                                            peer_ip,
+                                            reward_address,
+                                            utxo.address,
+                                            outpoint
+                                        );
+                                    }
+                                    if let Some(ai) = &context.ai_system {
+                                        ai.attack_detector
+                                            .record_collateral_spoof_attempt(
+                                                &peer_ip,
+                                                &outpoint.to_string(),
+                                            );
+                                    }
+                                    return Ok(None);
+                                }
                             }
 
                             if utxo_manager.is_collateral_locked(&outpoint) {
