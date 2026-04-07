@@ -32,7 +32,7 @@
 #   --poll SECS            Poll interval in seconds (default: 30)
 #   --fail-threshold N     Consecutive "not active" readings before restart (default: 3)
 #   --restart-cooldown N   Min seconds between restarts (default: 600)
-#   --startup-grace N      Seconds to wait after timed last started (default: 180)
+#   --startup-grace N      Seconds to wait after watchdog launches before monitoring (default: 60)
 #   --dry-run              Log what would happen but do not restart
 #   -h, --help             Show this help
 
@@ -42,7 +42,7 @@ set -uo pipefail
 POLL_INTERVAL=30
 FAIL_THRESHOLD=3
 RESTART_COOLDOWN=600
-STARTUP_GRACE=180
+STARTUP_GRACE=60
 DRY_RUN=0
 NETWORK="mainnet"
 
@@ -103,6 +103,7 @@ log "Using CLI: $CLI_CMD"
 fail_streak=0           # consecutive non-active readings
 last_restart_ts=0       # unix timestamp of last restart we triggered
 total_restarts=0
+watchdog_start_ts=$(date +%s)   # used for one-time startup grace
 
 # ── Check if timed has been running long enough (startup grace) ────────────────
 service_started_ago() {
@@ -130,11 +131,14 @@ while true; do
         continue
     fi
 
-    # 2. Respect startup grace period so we don't fire during initialization.
-    running_for=$(service_started_ago)
-    if [ "$running_for" -lt "$STARTUP_GRACE" ]; then
-        remaining=$(( STARTUP_GRACE - running_for ))
-        log "In startup grace (${running_for}s since start, grace=${STARTUP_GRACE}s, ${remaining}s remaining)"
+    # 2. One-time startup grace so the watchdog doesn't fire immediately after
+    #    being launched while timed is still initializing.
+    #    After this window passes once, detection is immediate; subsequent
+    #    restart cooldown is handled by RESTART_COOLDOWN below.
+    watchdog_age=$(( $(date +%s) - watchdog_start_ts ))
+    if [ "$watchdog_age" -lt "$STARTUP_GRACE" ]; then
+        remaining=$(( STARTUP_GRACE - watchdog_age ))
+        log "Startup grace (watchdog age ${watchdog_age}s, grace=${STARTUP_GRACE}s, ${remaining}s remaining)"
         fail_streak=0
         continue
     fi
