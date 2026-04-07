@@ -467,6 +467,39 @@ impl MasternodeRegistry {
                         if !utxo_address.is_empty()
                             && utxo_address == &masternode.wallet_address
                         {
+                            // Safety: never allow a Free-tier incoming claim to evict a
+                            // paid-tier canonical holder via wallet-address match.
+                            // Anyone can look up the UTXO's on-chain output address and
+                            // copy it into wallet_address to trigger this path.  The
+                            // legitimate owner would register with the correct paid tier;
+                            // a Free-tier claim must use a V4 proof or on-chain
+                            // MasternodeReg tx to displace a paid-tier entry.
+                            let canonical_tier = nodes
+                                .values()
+                                .find(|n| {
+                                    n.masternode
+                                        .address
+                                        .split(':')
+                                        .next()
+                                        .unwrap_or(&n.masternode.address)
+                                        == canonical_ip
+                                })
+                                .map(|n| n.masternode.tier.clone())
+                                .unwrap_or(crate::types::MasternodeTier::Free);
+                            if canonical_tier != crate::types::MasternodeTier::Free
+                                && masternode.tier == crate::types::MasternodeTier::Free
+                            {
+                                tracing::warn!(
+                                    "🛡️ Blocked wallet-match eviction: Free-tier {} tried \
+                                     to displace paid-tier {} for {} — V4 proof or \
+                                     on-chain MasternodeReg required",
+                                    masternode.address,
+                                    canonical,
+                                    outpoint_key,
+                                );
+                                return Err(RegistryError::CollateralAlreadyLocked);
+                            }
+
                             // Legitimate owner proved via UTXO output address — evict squatter
                             tracing::info!(
                                 "✅ Collateral ownership verified via UTXO address for {} \
@@ -787,6 +820,29 @@ impl MasternodeRegistry {
 
         nodes.insert(masternode.address.clone(), info);
         let total_masternodes = nodes.len();
+
+        // Write a canonical anchor for paid-tier nodes on first registration.
+        // Without this, the collateral has no anchor in sled, and a later Free-tier
+        // gossip announcement with the same outpoint could migrate it via the
+        // old_addr_to_remove path (which only checks the in-memory registry, not sled).
+        // The anchor ensures all future claims must pass the canonical-anchor check.
+        if masternode.tier != crate::types::MasternodeTier::Free {
+            if let Some(ref outpoint) = masternode.collateral_outpoint {
+                let outpoint_key =
+                    format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
+                let anchor_key = format!("collateral_anchor:{}", outpoint_key);
+                if self.db.get(anchor_key.as_bytes()).ok().flatten().is_none() {
+                    let _ = self
+                        .db
+                        .insert(anchor_key.as_bytes(), masternode.address.as_bytes());
+                    tracing::debug!(
+                        "🔒 Set collateral anchor {} → {}",
+                        outpoint_key,
+                        masternode.address
+                    );
+                }
+            }
+        }
 
         debug!(
             "✅ Registered masternode {} (total: {}) - NEW - Tier: {:?}, Reward address: {}, Active at timestamp: {}",

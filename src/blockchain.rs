@@ -6403,6 +6403,28 @@ impl Blockchain {
             }
         }
 
+        // Pre-compute the active masternodes from the bitmap ONCE.
+        // Used in both Step 3 (pool distribution) and Step 5 (recipient check).
+        // The bitmap is positional: bit i corresponds to the masternode at sorted
+        // position i in the PRODUCER'S registry at block production time.  When our
+        // registry has diverged (e.g., Free-tier gossip migrations added/moved nodes),
+        // our sorted positions differ from the producer's and the decoded set is wrong.
+        // We detect and handle this gracefully in Steps 3 and 5 below.
+        let active_bitmap_nodes: Vec<crate::masternode_registry::MasternodeInfo> =
+            if !block.header.active_masternodes_bitmap.is_empty() {
+                self.masternode_registry
+                    .get_active_from_bitmap(&block.header.active_masternodes_bitmap)
+                    .await
+            } else {
+                vec![]
+            };
+        let bitmap_active_count: usize = block
+            .header
+            .active_masternodes_bitmap
+            .iter()
+            .map(|b| b.count_ones() as usize)
+            .sum();
+
         // ── Step 3: verify each tier pool was distributed correctly ───────────
         // For each paid tier: the total paid to all recipients of that tier must
         // equal the tier's canonical pool allocation.
@@ -6525,14 +6547,9 @@ impl Blockchain {
                     //
                     // If the bitmap is absent (old block), fall back to gossip `list_by_tier`.
                     let non_producer_tier_nodes: usize =
-                        if !block.header.active_masternodes_bitmap.is_empty() {
-                            let bitmap_nodes = self
-                                .masternode_registry
-                                .get_active_from_bitmap(
-                                    &block.header.active_masternodes_bitmap,
-                                )
-                                .await;
-                            bitmap_nodes
+                        if !active_bitmap_nodes.is_empty() {
+                            // Use pre-computed bitmap decode (avoids redundant async call).
+                            active_bitmap_nodes
                                 .iter()
                                 .filter(|info| {
                                     info.masternode.tier == *tier && {
@@ -6546,6 +6563,9 @@ impl Blockchain {
                                     }
                                 })
                                 .count()
+                        } else if !block.header.active_masternodes_bitmap.is_empty() {
+                            // Bitmap present but decoded to zero nodes (empty registry?).
+                            0
                         } else {
                             // Old block without bitmap — fall back to gossip state.
                             let tier_nodes =
@@ -6564,6 +6584,51 @@ impl Blockchain {
                                 .count()
                         };
                     if non_producer_tier_nodes > 0 {
+                        // Cross-check: if the bitmap is present, verify that at least
+                        // one of the identified tier nodes actually appears as a paid
+                        // reward recipient in the block.  If none do, our positional
+                        // decoding is likely wrong (registry diverged from producer's
+                        // sorted order due to Free-tier gossip churn) — the phantom
+                        // "active" count is an artefact of wrong bit positions.
+                        // Accept the rollup and let Step 4 verify the producer total.
+                        //
+                        // For old blocks (no bitmap) we always hard-fail: the gossip
+                        // fallback is inherently unreliable, so we only relax the check
+                        // when the bitmap drift signal is available.
+                        let drift_detected = !block.header.active_masternodes_bitmap.is_empty() && {
+                            let reward_wallets: std::collections::HashSet<&str> = block
+                                .masternode_rewards
+                                .iter()
+                                .filter(|(_, amt)| *amt > 0)
+                                .map(|(w, _)| w.as_str())
+                                .collect();
+                            !active_bitmap_nodes.iter().any(|info| {
+                                if info.masternode.tier != *tier {
+                                    return false;
+                                }
+                                let w = if !info.reward_address.is_empty() {
+                                    &info.reward_address
+                                } else {
+                                    &info.masternode.wallet_address
+                                };
+                                w != producer_addr
+                                    && w.as_str() != producer_wallet
+                                    && reward_wallets.contains(w.as_str())
+                            })
+                        };
+                        if drift_detected {
+                            tracing::warn!(
+                                "Block {} {:?}-tier: bitmap shows {} active non-producer \
+                                 node(s) but none appear in block rewards — bitmap position \
+                                 drift (registry diverged from producer's), treating pool \
+                                 as rolled up to producer",
+                                block.header.height,
+                                tier,
+                                non_producer_tier_nodes,
+                            );
+                            rolled_up_to_producer += pool;
+                            continue;
+                        }
                         return Err(format!(
                             "Block {} {:?}-tier pool not distributed: {} registered \
                              node(s) received 0 — pool cannot roll up to producer",
@@ -6649,38 +6714,30 @@ impl Blockchain {
         //   a) every positive-amount recipient is in the bitmap (no phantom payments)
         //   b) no registered masternode outside the bitmap received a positive payment
         // Skip if bitmap is empty (genesis block or very early bootstrap blocks).
-        if !block.header.active_masternodes_bitmap.is_empty() {
-            // Count how many nodes the block producer marked as active.
-            // This is the number of set bits in the bitmap.
-            let bitmap_active_count: usize = block
-                .header
-                .active_masternodes_bitmap
-                .iter()
-                .map(|b| b.count_ones() as usize)
-                .sum();
-
-            let active_nodes = self
-                .masternode_registry
-                .get_active_from_bitmap(&block.header.active_masternodes_bitmap)
-                .await;
-
+        //
+        // Also skip when unknown recipients are present (unknown_non_producer_paid > 0).
+        // In that case the per-recipient GOLD_POOL_SATOSHIS cap (Step 2) already limits
+        // individual payouts; stacking the bitmap check on top uses an unreliable
+        // positional mapping and causes false positives when our registry has diverged.
+        if !block.header.active_masternodes_bitmap.is_empty() && unknown_non_producer_paid == 0 {
+            // active_bitmap_nodes and bitmap_active_count are pre-computed above.
             // If our local registry resolved fewer active nodes than the bitmap encodes,
             // our registry is stale — we are missing masternodes that registered after
             // our current chain tip.  In that case the positional bitmap decoding is
             // unreliable (bit positions shift when an unknown node sorts into the middle),
             // so we skip the address-level check.  Block structural integrity (VRF proof,
             // producer signature, consensus votes) is still fully verified above.
-            if active_nodes.len() < bitmap_active_count {
+            if active_bitmap_nodes.len() < bitmap_active_count {
                 tracing::warn!(
                     "Block {} bitmap has {} active nodes but local registry resolved only {} \
                      — registry is stale (catching up), skipping reward injection address check",
                     block.header.height,
                     bitmap_active_count,
-                    active_nodes.len()
+                    active_bitmap_nodes.len()
                 );
             } else {
                 // Build set of wallet addresses that are bitmap-active
-                let active_wallets: std::collections::HashSet<String> = active_nodes
+                let active_wallets: std::collections::HashSet<String> = active_bitmap_nodes
                     .iter()
                     .map(|info| {
                         if !info.reward_address.is_empty() {
@@ -6718,7 +6775,7 @@ impl Blockchain {
                 tracing::debug!(
                     "Block {} bitmap reward check passed: {} active nodes, {} paid recipients",
                     block.header.height,
-                    active_nodes.len(),
+                    active_bitmap_nodes.len(),
                     block
                         .masternode_rewards
                         .iter()
