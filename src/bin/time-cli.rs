@@ -1,8 +1,4 @@
-use bincode;
-use chrono;
 use clap::{Parser, Subcommand};
-use dirs;
-use hex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use timed::http_client::HttpClient;

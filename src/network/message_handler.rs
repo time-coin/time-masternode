@@ -3688,8 +3688,8 @@ impl MessageHandler {
                                     let bare_ip =
                                         peer_ip.split(':').next().unwrap_or(&peer_ip);
                                     let subnet_key = bare_ip
-                                        .rsplitn(2, '.')
-                                        .nth(1)
+                                        .rsplit_once('.')
+                                        .map(|x| x.0)
                                         .unwrap_or(bare_ip)
                                         .to_string();
                                     let tracker_key =

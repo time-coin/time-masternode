@@ -2,10 +2,13 @@
 //!
 //! Phase 2.2: DoS Protection - IP Blacklisting
 //! Tracks violations and automatically bans repeat offenders to prevent resource exhaustion.
+//!
+//! Bans are persisted to sled so they survive daemon restarts. Call
+//! `attach_storage(db)` after construction to enable persistence.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Tracks misbehaving IPs and automatically blacklists repeat offenders
 pub struct IPBlacklist {
@@ -19,6 +22,11 @@ pub struct IPBlacklist {
     whitelist: HashMap<IpAddr, String>,
     /// Banned IPv4 subnets (network_addr, prefix_len, reason) — e.g. 154.217.246.0/24
     subnet_blacklist: Vec<(std::net::Ipv4Addr, u8, String)>,
+    // ── Sled persistence (None = in-memory only) ──────────────────────────
+    db_permanent: Option<sled::Tree>,
+    db_temp: Option<sled::Tree>,
+    db_subnet: Option<sled::Tree>,
+    db_violations: Option<sled::Tree>,
 }
 
 impl IPBlacklist {
@@ -29,6 +37,198 @@ impl IPBlacklist {
             violations: HashMap::new(),
             whitelist: HashMap::new(),
             subnet_blacklist: Vec::new(),
+            db_permanent: None,
+            db_temp: None,
+            db_subnet: None,
+            db_violations: None,
+        }
+    }
+
+    /// Attach a sled database for persistence across restarts.
+    ///
+    /// Opens four named trees in `db`, loads any previously stored bans into
+    /// the in-memory maps (pruning expired temp bans), and enables write-through
+    /// on all future mutations.  Call this once after `new()`.
+    pub fn attach_storage(&mut self, db: &sled::Db) {
+        let open = |name: &str| {
+            db.open_tree(name)
+                .unwrap_or_else(|e| panic!("Failed to open sled tree {}: {}", name, e))
+        };
+
+        self.db_permanent = Some(open("ip_bans_permanent"));
+        self.db_temp = Some(open("ip_bans_temp"));
+        self.db_subnet = Some(open("ip_bans_subnet"));
+        self.db_violations = Some(open("ip_bans_violations"));
+
+        let now_unix = unix_now();
+
+        // ── Load permanent bans ───────────────────────────────────────────
+        if let Some(tree) = &self.db_permanent {
+            for item in tree.iter().flatten() {
+                let (k, v) = item;
+                if let Ok(ip) = std::str::from_utf8(&k)
+                    .ok()
+                    .and_then(|s| s.parse::<IpAddr>().ok())
+                    .ok_or(())
+                {
+                    let reason = String::from_utf8_lossy(&v).into_owned();
+                    self.permanent_blacklist.insert(ip, reason);
+                }
+            }
+            tracing::info!(
+                "🔒 Loaded {} permanent IP ban(s) from sled",
+                self.permanent_blacklist.len()
+            );
+        }
+
+        // ── Load temp bans (skip expired) ────────────────────────────────
+        if let Some(tree) = &self.db_temp {
+            let mut loaded = 0usize;
+            let mut expired = 0usize;
+            for item in tree.iter().flatten() {
+                let (k, v) = item;
+                if let Some(ip) = std::str::from_utf8(&k)
+                    .ok()
+                    .and_then(|s| s.parse::<IpAddr>().ok())
+                {
+                    if let Ok((expiry_unix, reason)) =
+                        bincode::deserialize::<(u64, String)>(&v)
+                    {
+                        if expiry_unix <= now_unix {
+                            // Expired — prune from sled too
+                            let _ = tree.remove(k);
+                            expired += 1;
+                        } else {
+                            let remaining = expiry_unix - now_unix;
+                            let expiry = Instant::now() + Duration::from_secs(remaining);
+                            self.temp_blacklist.insert(ip, (expiry, reason));
+                            loaded += 1;
+                        }
+                    }
+                }
+            }
+            if loaded > 0 || expired > 0 {
+                tracing::info!(
+                    "🔒 Loaded {} active temp ban(s) from sled ({} expired and pruned)",
+                    loaded, expired
+                );
+            }
+        }
+
+        // ── Load subnet bans ─────────────────────────────────────────────
+        if let Some(tree) = &self.db_subnet {
+            for item in tree.iter().flatten() {
+                let (k, v) = item;
+                if let Ok(cidr) = std::str::from_utf8(&k) {
+                    let reason = String::from_utf8_lossy(&v).into_owned();
+                    // Parse CIDR into in-memory format
+                    let (addr_str, prefix_len) = if let Some(pos) = cidr.find('/') {
+                        let bits: u8 = cidr[pos + 1..].parse().unwrap_or(24);
+                        (&cidr[..pos], bits)
+                    } else {
+                        (cidr, 24u8)
+                    };
+                    if let Ok(network) = addr_str.parse::<std::net::Ipv4Addr>() {
+                        // Avoid duplicates (config may have already added some)
+                        let cidr_str = format!("{}/{}", network, prefix_len);
+                        let already = self
+                            .subnet_blacklist
+                            .iter()
+                            .any(|(n, p, _)| format!("{}/{}", n, p) == cidr_str);
+                        if !already {
+                            self.subnet_blacklist
+                                .push((network, prefix_len, reason));
+                        }
+                    }
+                }
+            }
+            tracing::info!(
+                "🔒 Loaded {} subnet ban(s) from sled",
+                self.subnet_blacklist.len()
+            );
+        }
+
+        // ── Load violation counters (prune entries older than 1 hour) ────
+        if let Some(tree) = &self.db_violations {
+            let cutoff = now_unix.saturating_sub(3600);
+            let mut loaded = 0usize;
+            for item in tree.iter().flatten() {
+                let (k, v) = item;
+                if let Some(ip) = std::str::from_utf8(&k)
+                    .ok()
+                    .and_then(|s| s.parse::<IpAddr>().ok())
+                {
+                    if let Ok((count, last_unix)) =
+                        bincode::deserialize::<(u32, u64)>(&v)
+                    {
+                        if last_unix < cutoff {
+                            let _ = tree.remove(k);
+                        } else {
+                            // Reconstruct Instant from delta
+                            let elapsed_secs = now_unix.saturating_sub(last_unix);
+                            let last_instant = Instant::now()
+                                - Duration::from_secs(elapsed_secs.min(3600));
+                            self.violations.insert(ip, (count, last_instant));
+                            loaded += 1;
+                        }
+                    }
+                }
+            }
+            if loaded > 0 {
+                tracing::info!(
+                    "🔒 Loaded {} violation counter(s) from sled",
+                    loaded
+                );
+            }
+        }
+    }
+
+    // ── Private sled helpers ─────────────────────────────────────────────
+
+    fn persist_permanent(&self, ip: IpAddr, reason: &str) {
+        if let Some(tree) = &self.db_permanent {
+            let _ = tree.insert(ip.to_string().as_bytes(), reason.as_bytes());
+        }
+    }
+
+    fn remove_permanent(&self, ip: IpAddr) {
+        if let Some(tree) = &self.db_permanent {
+            let _ = tree.remove(ip.to_string().as_bytes());
+        }
+    }
+
+    fn persist_temp(&self, ip: IpAddr, expiry_unix: u64, reason: &str) {
+        if let Some(tree) = &self.db_temp {
+            if let Ok(bytes) = bincode::serialize(&(expiry_unix, reason.to_string())) {
+                let _ = tree.insert(ip.to_string().as_bytes(), bytes);
+            }
+        }
+    }
+
+    fn remove_temp(&self, ip: IpAddr) {
+        if let Some(tree) = &self.db_temp {
+            let _ = tree.remove(ip.to_string().as_bytes());
+        }
+    }
+
+    fn persist_subnet(&self, cidr: &str, reason: &str) {
+        if let Some(tree) = &self.db_subnet {
+            let _ = tree.insert(cidr.as_bytes(), reason.as_bytes());
+        }
+    }
+
+    fn persist_violation(&self, ip: IpAddr, count: u32) {
+        if let Some(tree) = &self.db_violations {
+            let now_unix = unix_now();
+            if let Ok(bytes) = bincode::serialize(&(count, now_unix)) {
+                let _ = tree.insert(ip.to_string().as_bytes(), bytes);
+            }
+        }
+    }
+
+    fn remove_violation(&self, ip: IpAddr) {
+        if let Some(tree) = &self.db_violations {
+            let _ = tree.remove(ip.to_string().as_bytes());
         }
     }
 
@@ -39,6 +239,9 @@ impl IPBlacklist {
         self.permanent_blacklist.remove(&ip);
         self.temp_blacklist.remove(&ip);
         self.violations.remove(&ip);
+        self.remove_permanent(ip);
+        self.remove_temp(ip);
+        self.remove_violation(ip);
         tracing::debug!("✅ Added {} to whitelist: {}", ip, reason);
     }
 
@@ -62,9 +265,11 @@ impl IPBlacklist {
             (cidr, 24u8)
         };
         if let Ok(network) = addr_str.parse::<std::net::Ipv4Addr>() {
-            tracing::info!("🚫 Banning subnet {}/{}: {}", network, prefix_len, reason);
+            let canonical = format!("{}/{}", network, prefix_len);
+            tracing::info!("🚫 Banning subnet {}: {}", canonical, reason);
             self.subnet_blacklist
                 .push((network, prefix_len, reason.to_string()));
+            self.persist_subnet(&canonical, reason);
         } else {
             tracing::warn!("⚠️  Invalid subnet CIDR '{}', skipping", cidr);
         }
@@ -116,8 +321,9 @@ impl IPBlacklist {
                 let remaining = expiry.duration_since(Instant::now()).as_secs();
                 return Some(format!("Temporarily banned for {}s: {}", remaining, reason));
             } else {
-                // Expired, remove it
+                // Expired, remove from memory and sled
                 self.temp_blacklist.remove(&ip);
+                self.remove_temp(ip);
             }
         }
 
@@ -152,10 +358,14 @@ impl IPBlacklist {
         *count += 1;
         *last_time = now;
 
-        tracing::warn!("⚠️  Violation #{} from {}: {}", count, ip, reason);
+        let count_snap = *count;
+        tracing::warn!("⚠️  Violation #{} from {}: {}", count_snap, ip, reason);
+
+        // Persist updated violation count
+        self.persist_violation(ip, count_snap);
 
         // Auto-ban based on violation count
-        match *count {
+        match count_snap {
             3 => {
                 // 3rd violation: 1 minute ban
                 self.add_temp_ban(ip, Duration::from_secs(60), reason);
@@ -189,26 +399,49 @@ impl IPBlacklist {
     pub fn add_temp_ban(&mut self, ip: IpAddr, duration: Duration, reason: &str) {
         let expiry = Instant::now() + duration;
         self.temp_blacklist.insert(ip, (expiry, reason.to_string()));
+        // Persist: convert to unix timestamp so it survives restarts
+        let expiry_unix = unix_now() + duration.as_secs();
+        self.persist_temp(ip, expiry_unix, reason);
     }
 
     /// Add a permanent ban
     pub fn add_permanent_ban(&mut self, ip: IpAddr, reason: &str) {
         self.permanent_blacklist.insert(ip, reason.to_string());
-        // Remove from temp list if present
         self.temp_blacklist.remove(&ip);
+        self.persist_permanent(ip, reason);
+        self.remove_temp(ip);
     }
 
     /// Clean up expired temporary bans and old violations (call periodically)
     pub fn cleanup(&mut self) {
         let now = Instant::now();
+        let now_unix = unix_now();
 
-        // Remove expired temp bans
-        self.temp_blacklist.retain(|_, (expiry, _)| now < *expiry);
+        // Remove expired temp bans (and prune from sled)
+        let expired_ips: Vec<IpAddr> = self
+            .temp_blacklist
+            .iter()
+            .filter(|(_, (expiry, _))| now >= *expiry)
+            .map(|(ip, _)| *ip)
+            .collect();
+        for ip in &expired_ips {
+            self.temp_blacklist.remove(ip);
+            self.remove_temp(*ip);
+        }
 
-        // Remove violations older than 24 hours
-        self.violations.retain(|_, (_, last_time)| {
-            now.duration_since(*last_time) < Duration::from_secs(86400)
-        });
+        // Remove violations older than 24 hours (and prune from sled)
+        let old_ips: Vec<IpAddr> = self
+            .violations
+            .iter()
+            .filter(|(_, (_, last_time))| now.duration_since(*last_time) >= Duration::from_secs(86400))
+            .map(|(ip, _)| *ip)
+            .collect();
+        for ip in &old_ips {
+            self.violations.remove(ip);
+            self.remove_violation(*ip);
+        }
+
+        let _ = now_unix; // used indirectly via remove_temp/remove_violation
     }
 
     /// Get statistics
@@ -224,6 +457,7 @@ impl IPBlacklist {
 
     /// List all active bans with details.
     /// Returns (permanent_bans, temp_bans_with_remaining_secs, subnet_bans, violations_per_ip)
+    #[allow(clippy::type_complexity)]
     pub fn list_bans(
         &self,
     ) -> (
@@ -271,6 +505,9 @@ impl IPBlacklist {
         let was_banned = self.permanent_blacklist.remove(&ip).is_some()
             | self.temp_blacklist.remove(&ip).is_some();
         self.violations.remove(&ip);
+        self.remove_permanent(ip);
+        self.remove_temp(ip);
+        self.remove_violation(ip);
         was_banned
     }
 
@@ -296,15 +533,19 @@ impl IPBlacklist {
         let (count, _) = self.violations.entry(ip).or_insert((0, now));
         *count += 5; // Severe violations count as 5 regular violations
 
+        let count_snap = *count;
         tracing::error!(
             "🚨 SEVERE violation from {}: {} (effective count: {})",
             ip,
             reason,
-            count
+            count_snap
         );
 
+        // Persist updated count
+        self.persist_violation(ip, count_snap);
+
         // Immediate escalation for severe violations
-        if *count >= 10 {
+        if count_snap >= 10 {
             self.add_permanent_ban(ip, &format!("SEVERE: {}", reason));
             tracing::error!(
                 "🚫 PERMANENTLY BANNED {} for severe violation: {}",
@@ -329,4 +570,13 @@ impl Default for IPBlacklist {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Returns seconds since UNIX_EPOCH (u64). Used to store `Instant`-based expiries
+/// as absolute wall-clock timestamps so they survive daemon restarts.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }

@@ -761,7 +761,7 @@ impl MasternodeRegistry {
                 // Tier-2 eviction (which does not set a canonical anchor).
                 let existing_tier = nodes
                     .get(&old_addr)
-                    .map(|n| n.masternode.tier.clone())
+                    .map(|n| n.masternode.tier)
                     .unwrap_or(crate::types::MasternodeTier::Free);
                 if existing_tier != crate::types::MasternodeTier::Free {
                     tracing::warn!(

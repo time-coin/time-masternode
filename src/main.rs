@@ -945,6 +945,8 @@ async fn main() {
 
     // Initialize blockchain (clone sled handle so governance can share the same DB)
     let gov_storage = block_storage.clone();
+    // Keep a clone for blacklist persistence (wired after network server starts)
+    let blacklist_storage = block_storage.clone();
     let mut blockchain = Blockchain::new(
         block_storage,
         consensus_engine.clone(),
@@ -4456,6 +4458,9 @@ async fn main() {
 
             // Wire up AI system for attack detection enforcement
             server.set_ai_system(ai_system.clone());
+
+            // Enable blacklist persistence — bans now survive daemon restarts
+            server.enable_blacklist_persistence(&blacklist_storage).await;
 
             // Initialize TLS for encrypted P2P connections
             let tls_config = if config.security.enable_tls {

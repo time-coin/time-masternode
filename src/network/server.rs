@@ -197,6 +197,15 @@ impl NetworkServer {
         self.ai_system = Some(ai_system);
     }
 
+    /// Attach a sled database for blacklist persistence across restarts.
+    ///
+    /// Loads previously banned IPs/subnets/violations from sled and enables
+    /// write-through on all future mutations.  Call once after `new_with_blacklist`.
+    pub async fn enable_blacklist_persistence(&self, db: &sled::Db) {
+        self.blacklist.write().await.attach_storage(db);
+        tracing::info!("🔒 Blacklist persistence enabled — bans will survive restarts");
+    }
+
     /// Set the TLS configuration for encrypted connections
     pub fn set_tls_config(&mut self, tls_config: Arc<crate::network::tls::TlsConfig>) {
         self.tls_config = Some(tls_config);
