@@ -495,7 +495,9 @@ impl AttackDetector {
     }
 
     /// Record that a masternode at `addr` disconnected. If ≥5 nodes from the same /24
-    /// subnet disconnect within 30 s, detect SynchronizedCycling and recommend BanSubnet.
+    /// subnet disconnect within 30 s, detect SynchronizedCycling and block the specific
+    /// offending IP. The whole subnet is NOT banned automatically — operators can add
+    /// explicit `bansubnet=` entries in time.conf if they are certain a subnet is hostile.
     pub fn record_synchronized_disconnect(&self, addr: &str) {
         // Extract /24 prefix (first 3 octets, e.g. "154.217.246")
         let subnet: String = addr.split('.').take(3).collect::<Vec<_>>().join(".");
@@ -522,23 +524,31 @@ impl AttackDetector {
         };
 
         if should_ban {
-            let cidr = format!("{}.0/24", subnet);
+            // Block the specific misbehaving IP, NOT the entire subnet.
+            // Banning a whole /24 would collaterally affect legitimate nodes and operators
+            // who share the same cloud provider (e.g. Alibaba, Hetzner).
+            // Operators who are certain a subnet is hostile can still configure
+            // `bansubnet=x.x.x.0/24` explicitly in time.conf.
+            tracing::warn!(
+                "🛡️ Synchronized disconnect storm detected from {}.x/24 (AV3) — blocking {}",
+                subnet,
+                addr
+            );
             self.maybe_add_attack(AttackPattern {
                 attack_type: AttackType::SynchronizedCycling,
-                confidence: 0.90,
+                confidence: 0.85,
                 severity: AttackSeverity::High,
                 indicators: vec![
                     format!(
                         "≥{} nodes from {}.x disconnected within {}s",
                         SYNC_THRESHOLD, subnet, SYNC_WINDOW_SECS
                     ),
-                    "Coordinated synchronized disconnect storm (AV3) — auto-banning subnet"
-                        .to_string(),
+                    format!("Blocking specific offending IP {} (AV3)", addr),
                 ],
                 first_detected: now,
                 last_seen: now,
                 source_ips: vec![addr.to_string()],
-                recommended_action: MitigationAction::BanSubnet(cidr),
+                recommended_action: MitigationAction::BlockPeer(addr.to_string()),
                 mitigation_applied_at: None,
             });
         }
