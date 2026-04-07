@@ -3666,6 +3666,26 @@ impl MessageHandler {
                         .update_daemon_started_at(&peer_ip, started_at)
                         .await;
                 }
+                Err(crate::masternode_registry::RegistryError::CollateralAlreadyLocked) => {
+                    warn!(
+                        "❌ [{}] Collateral hijack attempt from {} for {} — recording violation",
+                        self.direction, peer_ip, outpoint_for_relay
+                    );
+                    if let Some(ai) = &context.ai_system {
+                        ai.attack_detector
+                            .record_collateral_spoof_attempt(&peer_ip, &outpoint_for_relay.to_string());
+                    }
+                    if let Some(blacklist) = &context.blacklist {
+                        let bare_ip = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                        if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
+                            let mut bl = blacklist.write().await;
+                            bl.record_severe_violation(
+                                ban_ip,
+                                &format!("Collateral hijack attempt for {}", outpoint_for_relay),
+                            );
+                        }
+                    }
+                }
                 Err(e) => {
                     warn!(
                         "❌ [{}] Failed to register masternode {}: {}",
@@ -3726,6 +3746,26 @@ impl MessageHandler {
                         .masternode_registry
                         .update_daemon_started_at(&peer_ip, started_at)
                         .await;
+                }
+                Err(crate::masternode_registry::RegistryError::CollateralAlreadyLocked) => {
+                    warn!(
+                        "❌ [{}] Free-tier collateral hijack attempt from {} — recording violation",
+                        self.direction, peer_ip
+                    );
+                    if let Some(ai) = &context.ai_system {
+                        ai.attack_detector
+                            .record_collateral_spoof_attempt(&peer_ip, "free-tier-claim");
+                    }
+                    if let Some(blacklist) = &context.blacklist {
+                        let bare_ip = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                        if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
+                            let mut bl = blacklist.write().await;
+                            bl.record_severe_violation(
+                                ban_ip,
+                                "Free-tier collateral hijack: tried to claim paid-tier collateral",
+                            );
+                        }
+                    }
                 }
                 Err(e) => {
                     warn!(

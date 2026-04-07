@@ -850,12 +850,17 @@ async fn handle_peer(
                                         continue;
                                     }
                                     _ => {
-                                        tracing::warn!("⚠️  {} sent message before handshake - closing connection (not blacklisting)", peer.addr);
+                                        tracing::warn!("⚠️  {} sent message before handshake - closing connection", peer.addr);
                                         if let Some(ref ai) = ai_system {
                                             ai.attack_detector.record_pre_handshake_violation(&ip_str);
                                         }
-                                        // Don't blacklist - could be network timing issue or legitimate peer
-                                        // Just close the connection and let them reconnect
+                                        // Record a direct blacklist violation per occurrence so
+                                        // persistent pre-handshake probers accumulate bans even
+                                        // if they disconnect before the 30s AI enforcement loop.
+                                        {
+                                            let mut bl = blacklist.write().await;
+                                            bl.record_violation(ip, "Sent message before completing handshake");
+                                        }
                                         break;
                                     }
                                 }
