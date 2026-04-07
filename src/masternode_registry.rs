@@ -380,6 +380,17 @@ impl MasternodeRegistry {
         }
     }
 
+    /// AV25: Fast (lock-free) check whether a /24 subnet is already at the Free-tier cap.
+    /// Used by the message handler to drop excess announcements before acquiring registry locks.
+    pub fn is_free_tier_subnet_at_cap(&self, ip: &str) -> bool {
+        const MAX_FREE_TIER_PER_SUBNET: u32 = 5;
+        let subnet = Self::free_tier_subnet(ip);
+        self.free_tier_subnet_counts
+            .get(&subnet)
+            .map(|c| *c >= MAX_FREE_TIER_PER_SUBNET)
+            .unwrap_or(false)
+    }
+
     /// Update the current blockchain height. Called from block production loop
     /// so that newly registered masternodes get an accurate registration_height.
     pub fn update_height(&self, height: u64) {

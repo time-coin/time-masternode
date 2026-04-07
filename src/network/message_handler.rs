@@ -88,6 +88,34 @@ const UTXO_HASH_CACHE_TTL: Duration = Duration::from_secs(600);
 /// when multiple nodes simultaneously hold valid V4 proofs for the same collateral.
 const V4_EVICTION_COOLDOWN_SECS: u64 = 60;
 
+/// AV30: Per-peer tracking of incoming ForkAlert → GetBlocks → rejected-blocks cycles.
+/// Stores (last_getblocks_sent: Instant, rejected_cycles: u32, window_start: Instant).
+/// A "rejected cycle" = we sent GetBlocks in response to a ForkAlert and all returned
+/// blocks were skipped/rejected.  After FORK_ALERT_BAN_THRESHOLD rejected cycles within
+/// FORK_ALERT_WINDOW, the peer is treated as a fork-bombing attacker and banned.
+fn incoming_fork_alert_tracker() -> &'static dashmap::DashMap<String, (Instant, u32, Instant)> {
+    static INSTANCE: std::sync::OnceLock<dashmap::DashMap<String, (Instant, u32, Instant)>> =
+        std::sync::OnceLock::new();
+    INSTANCE.get_or_init(dashmap::DashMap::new)
+}
+/// Minimum gap between GetBlocks responses to the same peer's ForkAlert (AV30).
+const FORK_ALERT_RESPONSE_COOLDOWN: Duration = Duration::from_secs(30);
+/// Window over which rejected fork-alert cycles are counted (AV30).
+const FORK_ALERT_WINDOW: Duration = Duration::from_secs(300);
+/// Rejected cycles within FORK_ALERT_WINDOW before recording a ban violation (AV30).
+const FORK_ALERT_BAN_THRESHOLD: u32 = 5;
+
+/// AV25: Per-/24-subnet rate-limiter for Free-tier MasternodeAnnounce spam.
+/// Stores (last_log_time: Instant, suppressed_count: u32) so we log once per
+/// LOG_INTERVAL for a subnet that is already at cap, instead of once per message.
+fn subnet_announce_limiter() -> &'static dashmap::DashMap<String, (Instant, u32)> {
+    static INSTANCE: std::sync::OnceLock<dashmap::DashMap<String, (Instant, u32)>> =
+        std::sync::OnceLock::new();
+    INSTANCE.get_or_init(dashmap::DashMap::new)
+}
+/// How often to emit a single log line for a subnet that is already at the Free-tier cap.
+const SUBNET_ANNOUNCE_LOG_INTERVAL: Duration = Duration::from_secs(10);
+
 /// Per-outpoint timestamp of the last accepted V4 proof eviction.
 fn v4_eviction_cooldown() -> &'static dashmap::DashMap<String, std::time::Instant> {
     static INSTANCE: std::sync::OnceLock<dashmap::DashMap<String, std::time::Instant>> =
@@ -3889,6 +3917,49 @@ impl MessageHandler {
             }
         } else {
             // Free tier — no collateral verification needed
+
+            // ── AV25: Early subnet-cap drop ──────────────────────────────────
+            // The attacker subnet (154.217.246.x) floods us with 50-100 Free-tier
+            // MasternodeAnnounce messages per second.  Even though the registry
+            // rejects them all at the cap, every message still deserializes, builds
+            // a Masternode struct, acquires the registry map, and logs a WARN.
+            //
+            // This guard does a lock-free atomic read BEFORE any work.  If the /24
+            // subnet is already at the cap AND the peer is not already registered,
+            // we drop the message silently, logging at most once every 10 seconds
+            // per subnet so the log stays readable.
+            if context
+                .masternode_registry
+                .is_free_tier_subnet_at_cap(&peer_ip)
+                && context.masternode_registry.get(&peer_ip).await.is_none()
+            {
+                let subnet_key = {
+                    let ip_only = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                    let parts: Vec<&str> = ip_only.split('.').collect();
+                    if parts.len() >= 3 {
+                        format!("{}.{}.{}", parts[0], parts[1], parts[2])
+                    } else {
+                        ip_only.to_string()
+                    }
+                };
+                let now = Instant::now();
+                let limiter = subnet_announce_limiter();
+                let mut entry = limiter.entry(subnet_key.clone()).or_insert_with(|| {
+                    (now - SUBNET_ANNOUNCE_LOG_INTERVAL - Duration::from_secs(1), 0u32)
+                });
+                entry.1 += 1;
+                if now.duration_since(entry.0) >= SUBNET_ANNOUNCE_LOG_INTERVAL {
+                    warn!(
+                        "🚫 [AV25] Dropping Free-tier announce flood from subnet {}: {} msgs suppressed",
+                        subnet_key, entry.1
+                    );
+                    entry.0 = now;
+                    entry.1 = 0;
+                }
+                return Ok(None);
+            }
+            // ── End AV25 early-drop ──────────────────────────────────────────
+
             let is_new = context.masternode_registry.get(&peer_ip).await.is_none();
 
             let mn = crate::types::Masternode::new_legacy(
@@ -4731,6 +4802,78 @@ impl MessageHandler {
         let we_are_behind = consensus_height > your_height;
 
         if our_hash_differs || we_are_behind {
+            // ── AV30: Fork Alert Spam guard ─────────────────────────────────
+            // A legitimate peer sends a fork alert once when it detects a fork.
+            // A fork-bombing attacker sends them every few seconds, causing us
+            // to repeatedly download and discard their invalid chain — a CPU/
+            // bandwidth DoS that can crash the node via task-spawn accumulation.
+            //
+            // Strategy: maintain a per-peer (last_getblocks_sent, rejected_cycles,
+            // window_start) triple.  If we sent GetBlocks to this peer within
+            // FORK_ALERT_RESPONSE_COOLDOWN and their last response was rejected,
+            // suppress this alert.  After FORK_ALERT_BAN_THRESHOLD rejected cycles
+            // within FORK_ALERT_WINDOW, record a blacklist violation (→ eventual ban).
+            {
+                let now = Instant::now();
+                let tracker = incoming_fork_alert_tracker();
+                let mut entry = tracker.entry(self.peer_ip.clone()).or_insert_with(|| {
+                    (now, 0u32, now)
+                });
+                let (last_sent, rejected_cycles, window_start) = *entry;
+
+                // Reset window if it has expired
+                let in_window = now.duration_since(window_start) < FORK_ALERT_WINDOW;
+                let cycles = if in_window { rejected_cycles } else { 0 };
+
+                if cycles >= FORK_ALERT_BAN_THRESHOLD {
+                    // Peer has been persistently bombing us — record violation
+                    warn!(
+                        "🚫 [AV30] Fork alert spam from {} — {} rejected cycles in {}s, recording violation",
+                        self.peer_ip,
+                        cycles,
+                        FORK_ALERT_WINDOW.as_secs()
+                    );
+                    if let Some(bl) = &context.blacklist {
+                        let bare = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
+                        if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+                            bl.write().await.record_violation(
+                                ip,
+                                &format!("AV30 fork alert spam: {} rejected cycles", cycles),
+                            );
+                        }
+                    }
+                    // Reset counter so ban escalation works correctly
+                    *entry = (last_sent, 0, now);
+                    return Ok(None);
+                }
+
+                // If we already sent GetBlocks recently and it led to a rejection, suppress
+                if in_window
+                    && cycles > 0
+                    && now.duration_since(last_sent) < FORK_ALERT_RESPONSE_COOLDOWN
+                {
+                    debug!(
+                        "⏸️ [AV30] Suppressing duplicate fork alert response to {} ({} rejected cycles)",
+                        self.peer_ip, cycles
+                    );
+                    return Ok(None);
+                }
+
+                // Also suppress if we sent GetBlocks very recently (regardless of rejection)
+                if now.duration_since(last_sent) < FORK_ALERT_RESPONSE_COOLDOWN {
+                    debug!(
+                        "⏸️ [AV30] Fork alert cooldown active for {} (sent GetBlocks {}s ago)",
+                        self.peer_ip,
+                        now.duration_since(last_sent).as_secs()
+                    );
+                    return Ok(None);
+                }
+
+                // Record that we are now sending GetBlocks
+                *entry = (now, cycles, if in_window { window_start } else { now });
+            }
+            // ── End AV30 guard ──────────────────────────────────────────────
+
             warn!(
                 "   ⚠️ We appear to be on minority fork (our height {} vs consensus {})! Requesting consensus chain...",
                 your_height, consensus_height
@@ -5537,6 +5680,28 @@ impl MessageHandler {
                 "⚠️ [{}] All {} blocks skipped from {} (fork detected)",
                 self.direction, block_count, self.peer_ip
             );
+
+            // ── AV30: Record rejected fork-alert cycle ───────────────────────
+            // Increment the rejected-cycle counter so handle_fork_alert() can
+            // suppress further GetBlocks responses until the cooldown expires or
+            // the peer has accumulated enough cycles to trigger a ban violation.
+            {
+                let now = Instant::now();
+                let tracker = incoming_fork_alert_tracker();
+                let mut entry = tracker.entry(self.peer_ip.clone()).or_insert_with(|| {
+                    (now, 0u32, now)
+                });
+                let (last_sent, rejected_cycles, window_start) = *entry;
+                let in_window = now.duration_since(window_start) < FORK_ALERT_WINDOW;
+                let new_cycles = if in_window { rejected_cycles + 1 } else { 1 };
+                let new_window = if in_window { window_start } else { now };
+                *entry = (last_sent, new_cycles, new_window);
+                debug!(
+                    "🔄 [AV30] Recorded rejected fork-alert cycle {}/{} for {}",
+                    new_cycles, FORK_ALERT_BAN_THRESHOLD, self.peer_ip
+                );
+            }
+            // ── End AV30 cycle recording ─────────────────────────────────────
         }
 
         Ok(None)
