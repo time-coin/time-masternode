@@ -26,6 +26,7 @@ pub enum AttackType {
     GossipEvictionStorm,   // Repeated V4 eviction attempts for the same outpoint
     CollateralSpoofing,    // Attempting to claim another node's registered collateral
     SyncLoopFlooding,      // Excessive GetBlocks for same range (sync loop DoS)
+    UtxoLockFlood,         // Peer sends excessive UTXOStateUpdate messages for one TX (DoS)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -401,6 +402,30 @@ impl AttackDetector {
         });
     }
 
+    /// Record that a peer sent too many UTXOStateUpdate messages for a single transaction.
+    /// A legitimate TX with N inputs produces exactly N lock messages; flooding beyond a
+    /// relay limit is a DoS pattern that can starve the tokio async runtime.
+    pub fn record_utxo_lock_flood(&self, addr: &str, txid: &str, count: u32) {
+        let now = Self::now_secs();
+        self.maybe_add_attack(AttackPattern {
+            attack_type: AttackType::UtxoLockFlood,
+            confidence: 0.95,
+            severity: AttackSeverity::High,
+            indicators: vec![
+                format!(
+                    "Peer {} sent {} UTXOStateUpdate messages for TX {} (limit exceeded)",
+                    addr, count, txid
+                ),
+                "UTXO lock flood DoS: starves async runtime and RPC handlers".to_string(),
+            ],
+            first_detected: now,
+            last_seen: now,
+            source_ips: vec![addr.to_string()],
+            recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+            mitigation_applied_at: None,
+        });
+    }
+
     /// Record that a peer sent a protocol message before completing the handshake.
     pub fn record_pre_handshake_violation(&self, addr: &str) {
         let now = Self::now_secs();
@@ -424,7 +449,23 @@ impl AttackDetector {
 
         // Only flag as attack after 3 pre-handshake violations (reduces false positives from
         // transient network issues or NAT traversal probes).
-        if violations >= 3 {
+        // ≥10 violations → BlockPeer (persistent flooder like a port-scanner or probe bot).
+        if violations >= 10 {
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::ResourceExhaustion,
+                confidence: 0.95,
+                severity: AttackSeverity::High,
+                indicators: vec![
+                    format!("{} pre-handshake violations from {} — persistent probe", violations, addr),
+                    "Peer repeatedly sends data before handshake; likely an automated attack".to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        } else if violations >= 3 {
             self.maybe_add_attack(AttackPattern {
                 attack_type: AttackType::ResourceExhaustion,
                 confidence: 0.75,

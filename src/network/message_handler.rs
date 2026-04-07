@@ -5943,10 +5943,11 @@ impl MessageHandler {
                 .utxo_manager
                 .update_state(&outpoint, state.clone());
 
-            // Log important state changes
+            // Individual UTXO lock state changes are debug-only — a single TX with many inputs
+            // would otherwise spam INFO logs and starve the async runtime.
             match state {
                 UTXOState::Locked { txid, .. } => {
-                    tracing::info!(
+                    tracing::debug!(
                         "🔒 [{}] Locked UTXO {} for TX {}",
                         self.direction,
                         outpoint,
@@ -5954,7 +5955,7 @@ impl MessageHandler {
                     );
                 }
                 UTXOState::SpentPending { txid, .. } | UTXOState::SpentFinalized { txid, .. } => {
-                    tracing::info!(
+                    tracing::debug!(
                         "💸 [{}] Marked UTXO {} as spent by TX {}",
                         self.direction,
                         outpoint,

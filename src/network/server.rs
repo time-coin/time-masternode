@@ -630,6 +630,12 @@ async fn handle_peer(
     let mut handshake_done = false;
     let mut is_stable_connection = false;
 
+    // Per-connection UTXO lock flood counter: tracks how many UTXOStateUpdate (Locked)
+    // messages this peer has sent for each TX.  A legitimate TX with N inputs produces
+    // exactly N lock messages — an attacker who sends far more is DoS-flooding us.
+    let mut peer_tx_lock_counts: std::collections::HashMap<[u8; 32], u32> = std::collections::HashMap::new();
+    const MAX_UTXO_LOCKS_PER_TX: u32 = 50;
+
     let magic_bytes = network_type.magic_bytes();
 
     loop {
@@ -940,12 +946,36 @@ async fn handle_peer(
                                         continue;
                                     }
 
+                                    // FLOOD GUARD: count distinct Locked messages per TX from this peer.
+                                    // A legitimate TX with N inputs sends exactly N lock messages.
+                                    // Anything beyond MAX_UTXO_LOCKS_PER_TX is a DoS flood — flag and drop.
+                                    if let UTXOState::Locked { txid, .. } = &state {
+                                        let count = peer_tx_lock_counts.entry(*txid).or_insert(0);
+                                        *count += 1;
+                                        if *count > MAX_UTXO_LOCKS_PER_TX {
+                                            if let Some(ref ai) = ai_system {
+                                                ai.attack_detector.record_utxo_lock_flood(
+                                                    &ip_str,
+                                                    &hex::encode(txid),
+                                                    *count,
+                                                );
+                                            }
+                                            tracing::warn!(
+                                                "🚫 UTXO lock flood from {}: {} locks for TX {} (max {}), dropping",
+                                                peer.addr,
+                                                count,
+                                                hex::encode(txid),
+                                                MAX_UTXO_LOCKS_PER_TX
+                                            );
+                                            continue;
+                                        }
+                                    }
+
                                     tracing::debug!("🔒 PRIORITY: Received UTXO lock update from {}", peer.addr);
                                     consensus.utxo_manager.update_state(outpoint, state.clone());
 
-                                    // Log important locks
                                     if let UTXOState::Locked { txid, .. } = state {
-                                        tracing::info!(
+                                        tracing::debug!(
                                             "🔒 Applied UTXO lock from peer {} for TX {}",
                                             peer.addr,
                                             hex::encode(txid)
