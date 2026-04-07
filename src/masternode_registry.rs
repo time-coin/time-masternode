@@ -496,13 +496,18 @@ impl MasternodeRegistry {
                         if !utxo_address.is_empty()
                             && utxo_address == &masternode.wallet_address
                         {
-                            // Safety: never allow a Free-tier incoming claim to evict a
-                            // paid-tier canonical holder via wallet-address match.
-                            // Anyone can look up the UTXO's on-chain output address and
-                            // copy it into wallet_address to trigger this path.  The
-                            // legitimate owner would register with the correct paid tier;
-                            // a Free-tier claim must use a V4 proof or on-chain
-                            // MasternodeReg tx to displace a paid-tier entry.
+                            // The UTXO output address equals the wallet/reward address, which
+                            // is publicly visible in block rewards. Any node can forge a
+                            // matching wallet_address regardless of what tier they claim.
+                            // Only V4 cryptographic proof (verified upstream in
+                            // message_handler) or an on-chain MasternodeReg tx can
+                            // legitimately displace a paid-tier canonical holder.
+                            //
+                            // Exception: our own daemon is allowed to evict a squatter on
+                            // startup.  In that path the squatter is first removed via
+                            // unregister() (which clears the sled anchor), so typically no
+                            // anchor exists when we re-register ourselves — this guard only
+                            // fires in edge-case races where the anchor survived.
                             let canonical_tier = nodes
                                 .values()
                                 .find(|n| {
@@ -513,20 +518,25 @@ impl MasternodeRegistry {
                                         .unwrap_or(&n.masternode.address)
                                         == canonical_ip
                                 })
-                                .map(|n| n.masternode.tier.clone())
+                                .map(|n| n.masternode.tier)
                                 .unwrap_or(crate::types::MasternodeTier::Free);
-                            if canonical_tier != crate::types::MasternodeTier::Free
-                                && masternode.tier == crate::types::MasternodeTier::Free
-                            {
-                                tracing::warn!(
-                                    "🛡️ Blocked wallet-match eviction: Free-tier {} tried \
-                                     to displace paid-tier {} for {} — V4 proof or \
-                                     on-chain MasternodeReg required",
-                                    masternode.address,
-                                    canonical,
-                                    outpoint_key,
-                                );
-                                return Err(RegistryError::CollateralAlreadyLocked);
+                            if canonical_tier != crate::types::MasternodeTier::Free {
+                                let is_local = local_ip
+                                    .as_deref()
+                                    .map(|l| l == incoming_ip)
+                                    .unwrap_or(false);
+                                if !is_local {
+                                    tracing::warn!(
+                                        "🛡️ Blocked wallet-match eviction of paid-tier {} by {} \
+                                         (claimed tier: {:?}) for {} — V4 proof or on-chain \
+                                         MasternodeReg required",
+                                        canonical,
+                                        masternode.address,
+                                        masternode.tier,
+                                        outpoint_key,
+                                    );
+                                    return Err(RegistryError::CollateralAlreadyLocked);
+                                }
                             }
 
                             // Legitimate owner proved via UTXO output address — evict squatter
