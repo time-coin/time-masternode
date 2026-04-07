@@ -679,14 +679,54 @@ impl UTXOStateManager {
         });
 
         let mut hasher = Sha256::new();
-        for utxo in utxos {
+        for utxo in &utxos {
             hasher.update(utxo.outpoint.txid);
             hasher.update(utxo.outpoint.vout.to_le_bytes());
             hasher.update(utxo.value.to_le_bytes());
             hasher.update(&utxo.script_pubkey);
+            // Include state discriminant so nodes with different UTXO states
+            // detect divergence via hash comparison and trigger reconciliation.
+            // 0=Unspent, 1=Locked, 2=SpentPending, 3=SpentFinalized, 4=Archived
+            let state_disc: u8 = match self.utxo_states.get(&utxo.outpoint).as_deref() {
+                None | Some(UTXOState::Unspent) => 0,
+                Some(UTXOState::Locked { .. }) => 1,
+                Some(UTXOState::SpentPending { .. }) => 2,
+                Some(UTXOState::SpentFinalized { .. }) => 3,
+                Some(UTXOState::Archived { .. }) => 4,
+            };
+            hasher.update([state_disc]);
         }
 
         hasher.finalize().into()
+    }
+
+    /// Apply state updates received from a majority peer during reconciliation.
+    /// Only advances states forward (Unspent → spent), never reverses them,
+    /// to prevent a malicious peer from un-spending a UTXO.
+    pub fn apply_state_updates(&self, updates: Vec<(OutPoint, UTXOState)>) {
+        fn state_ord(s: &UTXOState) -> u8 {
+            match s {
+                UTXOState::Unspent => 0,
+                UTXOState::Locked { .. } => 1,
+                UTXOState::SpentPending { .. } => 2,
+                UTXOState::SpentFinalized { .. } => 3,
+                UTXOState::Archived { .. } => 4,
+            }
+        }
+
+        let mut applied = 0usize;
+        for (outpoint, remote_state) in updates {
+            // Only update if we already track this outpoint (don't invent UTXOs).
+            if let Some(mut entry) = self.utxo_states.get_mut(&outpoint) {
+                if state_ord(&remote_state) > state_ord(entry.value()) {
+                    *entry = remote_state;
+                    applied += 1;
+                }
+            }
+        }
+        if applied > 0 {
+            tracing::info!("🔄 Applied {} UTXO state updates from peer", applied);
+        }
     }
 
     pub async fn get_utxo_diff(&self, remote_utxos: &[UTXO]) -> (Vec<OutPoint>, Vec<UTXO>) {

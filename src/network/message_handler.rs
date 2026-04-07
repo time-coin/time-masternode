@@ -792,13 +792,16 @@ impl MessageHandler {
             // === Other Response Messages (handled by caller) ===
             NetworkMessage::BlockHeightResponse(_)
             | NetworkMessage::BlockHashResponse { .. }
-            | NetworkMessage::UTXOStateResponse(_)
             | NetworkMessage::ConsensusQueryResponse { .. }
             | NetworkMessage::ChainWorkResponse { .. }
             | NetworkMessage::ChainWorkAtResponse { .. }
             | NetworkMessage::PendingTransactionsResponse(_) => {
                 // Response messages - no further action needed in handler
                 Ok(None)
+            }
+
+            NetworkMessage::UTXOStateResponse(states) => {
+                self.handle_utxo_state_response(states.clone(), context).await
             }
 
             // === Payment Request Relay ===
@@ -4469,6 +4472,50 @@ impl MessageHandler {
             );
         }
 
+        // After UTXO set reconciliation, also sync states for our currently-Unspent
+        // UTXOs.  The UTXO diff only detects existence changes; two nodes can agree on
+        // the exact same UTXO set while one thinks a UTXO is Unspent and the other has
+        // it as SpentFinalized — causing balance discrepancies.  Querying the peer for
+        // those states lets us advance any stale Unspent entries to their true state.
+        let unspent_outpoints: Vec<crate::types::OutPoint> = utxo_mgr
+            .utxo_states
+            .iter()
+            .filter(|e| matches!(e.value(), crate::types::UTXOState::Unspent))
+            .map(|e| e.key().clone())
+            .collect();
+
+        if !unspent_outpoints.is_empty() {
+            debug!(
+                "🔍 [{}] Querying {} Unspent UTXO states from {} for cross-node sync",
+                self.direction,
+                unspent_outpoints.len(),
+                self.peer_ip
+            );
+            return Ok(Some(NetworkMessage::UTXOStateQuery(unspent_outpoints)));
+        }
+
+        Ok(None)
+    }
+
+    /// Handle UTXOStateResponse — apply state updates received from a majority peer.
+    /// Only advances states forward (never reverts spent → unspent) to prevent
+    /// a malicious peer from fabricating spendable UTXOs.
+    async fn handle_utxo_state_response(
+        &self,
+        remote_states: Vec<(crate::types::OutPoint, crate::types::UTXOState)>,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        if remote_states.is_empty() {
+            return Ok(None);
+        }
+        let utxo_mgr = &context.blockchain.utxo_manager;
+        debug!(
+            "📥 [{}] Received UTXOStateResponse ({} entries) from {}",
+            self.direction,
+            remote_states.len(),
+            self.peer_ip
+        );
+        utxo_mgr.apply_state_updates(remote_states);
         Ok(None)
     }
 
