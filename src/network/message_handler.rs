@@ -5254,7 +5254,9 @@ impl MessageHandler {
                     if e.contains("unique reward recipient")
                         || e.contains("reward-hijacking")
                         || e.contains("reward_hijack")
-                        || e.contains("under-subscribed genesis") =>
+                        || e.contains("under-subscribed genesis")
+                        || e.contains("unknown recipient")
+                        || e.contains("exceeds max tier pool") =>
                 {
                     // Block 1 specifically: node may have bootstrapped before enough peers
                     // connected, giving itself a single-payout block 1. This is a reset
