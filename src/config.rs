@@ -96,6 +96,10 @@ pub struct NetworkConfig {
     /// IPs to permanently blacklist (will not connect to or accept connections from)
     #[serde(default)]
     pub blacklisted_peers: Vec<String>,
+    /// IPv4 subnets to ban in CIDR notation, e.g. "154.217.246.0/24"
+    /// All IPs in the subnet are rejected at the TCP level. Key in time.conf: bansubnet=
+    #[serde(default)]
+    pub blacklisted_subnets: Vec<String>,
     /// IPs to whitelist (exempt from rate limiting and bans)
     /// Typically used for trusted masternodes or infrastructure nodes
     #[serde(default)]
@@ -573,6 +577,7 @@ impl Config {
                 enable_peer_discovery: true,
                 bootstrap_peers: vec![],
                 blacklisted_peers: vec![],
+                blacklisted_subnets: vec![],
                 whitelisted_peers: vec![],
                 whitelist_only: false,
             },
@@ -899,6 +904,9 @@ impl Config {
             }
             if let Some(v) = entries.get("ban") {
                 config.network.blacklisted_peers = v.clone();
+            }
+            if let Some(v) = entries.get("bansubnet") {
+                config.network.blacklisted_subnets = v.clone();
             }
             if let Some(v) = entries.get("whitelist") {
                 config.network.whitelisted_peers = v.clone();

@@ -108,6 +108,7 @@ impl NetworkServer {
             local_ip,
             vec![],
             vec![],
+            vec![],
             network_type,
         )
         .await
@@ -127,6 +128,7 @@ impl NetworkServer {
         peer_state: Arc<PeerStateManager>,
         local_ip: Option<String>,
         blacklisted_peers: Vec<String>,
+        blacklisted_subnets: Vec<String>,
         whitelisted_peers: Vec<String>,
         network_type: crate::network_type::NetworkType,
     ) -> Result<Self, std::io::Error> {
@@ -142,6 +144,11 @@ impl NetworkServer {
             } else {
                 tracing::warn!("⚠️  Invalid IP in blacklisted_peers: {}", peer);
             }
+        }
+
+        // Initialize subnet bans from config
+        for subnet in &blacklisted_subnets {
+            blacklist.add_subnet_ban(subnet, "Configured in bansubnet");
         }
 
         // Initialize whitelist with configured IPs (BEFORE server starts accepting connections)

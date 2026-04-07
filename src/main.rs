@@ -4444,6 +4444,7 @@ async fn main() {
         peer_state.clone(),
         local_ip.clone(),
         config.network.blacklisted_peers.clone(),
+        config.network.blacklisted_subnets.clone(),
         combined_whitelist,
         network_type,
     )

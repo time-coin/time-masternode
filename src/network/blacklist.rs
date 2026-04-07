@@ -17,6 +17,8 @@ pub struct IPBlacklist {
     violations: HashMap<IpAddr, (u32, Instant)>,
     /// Whitelisted IPs (exempt from all bans and rate limits) - typically masternodes
     whitelist: HashMap<IpAddr, String>,
+    /// Banned IPv4 subnets (network_addr, prefix_len, reason) — e.g. 154.217.246.0/24
+    subnet_blacklist: Vec<(std::net::Ipv4Addr, u8, String)>,
 }
 
 impl IPBlacklist {
@@ -26,6 +28,7 @@ impl IPBlacklist {
             temp_blacklist: HashMap::new(),
             violations: HashMap::new(),
             whitelist: HashMap::new(),
+            subnet_blacklist: Vec::new(),
         }
     }
 
@@ -49,12 +52,62 @@ impl IPBlacklist {
         self.whitelist.len()
     }
 
+    /// Ban an entire IPv4 subnet in CIDR notation (e.g. "154.217.246.0/24").
+    /// Also accepts a bare /24 prefix like "154.217.246" (prefix_len defaults to 24).
+    pub fn add_subnet_ban(&mut self, cidr: &str, reason: &str) {
+        let (addr_str, prefix_len) = if let Some(pos) = cidr.find('/') {
+            let bits: u8 = cidr[pos + 1..].parse().unwrap_or(24);
+            (&cidr[..pos], bits)
+        } else {
+            (cidr, 24u8)
+        };
+        if let Ok(network) = addr_str.parse::<std::net::Ipv4Addr>() {
+            tracing::info!("🚫 Banning subnet {}/{}: {}", network, prefix_len, reason);
+            self.subnet_blacklist
+                .push((network, prefix_len, reason.to_string()));
+        } else {
+            tracing::warn!("⚠️  Invalid subnet CIDR '{}', skipping", cidr);
+        }
+    }
+
+    /// Returns true if `ip` falls within any banned subnet.
+    fn in_banned_subnet(&self, ip: IpAddr) -> Option<String> {
+        if let IpAddr::V4(v4) = ip {
+            let ip_bits = u32::from(v4);
+            for (network, prefix_len, reason) in &self.subnet_blacklist {
+                let mask = if *prefix_len == 0 {
+                    0u32
+                } else {
+                    !0u32 << (32 - *prefix_len as u32)
+                };
+                let net_bits = u32::from(*network);
+                if (ip_bits & mask) == (net_bits & mask) {
+                    return Some(format!(
+                        "Subnet banned ({}/{}): {}",
+                        network, prefix_len, reason
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    /// Number of configured subnet bans
+    pub fn subnet_ban_count(&self) -> usize {
+        self.subnet_blacklist.len()
+    }
+
     /// Check if an IP is currently blacklisted
     /// SECURITY: Blacklist takes precedence over whitelist
     pub fn is_blacklisted(&mut self, ip: IpAddr) -> Option<String> {
         // Check permanent blacklist FIRST (even for whitelisted IPs)
         if let Some(reason) = self.permanent_blacklist.get(&ip) {
             return Some(format!("Permanently banned: {}", reason));
+        }
+
+        // Check subnet blacklist
+        if let Some(reason) = self.in_banned_subnet(ip) {
+            return Some(reason);
         }
 
         // Check temporary blacklist and clean up expired entries

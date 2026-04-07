@@ -3544,11 +3544,105 @@ impl MessageHandler {
                                 // spend the UTXO again if the squatter held the lock.
                                 let _ = utxo_manager.unlock_collateral(&outpoint);
                             } else {
-                                warn!(
-                                    "🚨 [{}] Registry conflict: {} already holds {} — \
-                                     no valid V4 proof from {}, rejecting",
-                                    self.direction, registry_squatter, outpoint, peer_ip
-                                );
+                                let outpoint_key = outpoint.to_string();
+
+                                // Rate-limit the WARN to once per 5 minutes per (peer_ip).
+                                // Without this, a Sybil subnet floods 200+ identical lines/second.
+                                static CONFLICT_WARN: std::sync::OnceLock<
+                                    dashmap::DashMap<String, std::time::Instant>,
+                                > = std::sync::OnceLock::new();
+                                let wm = CONFLICT_WARN.get_or_init(dashmap::DashMap::new);
+                                if wm
+                                    .get(&peer_ip)
+                                    .map(|t| t.elapsed().as_secs() >= 300)
+                                    .unwrap_or(true)
+                                {
+                                    wm.insert(peer_ip.clone(), std::time::Instant::now());
+                                    warn!(
+                                        "🚨 [{}] Registry conflict: {} already holds {} — \
+                                         no valid V4 proof from {}, rejecting",
+                                        self.direction, registry_squatter, outpoint_key, peer_ip
+                                    );
+                                }
+
+                                // Record a violation so the peer gets banned after repeated attempts.
+                                if let Some(blacklist) = &context.blacklist {
+                                    let bare_ip =
+                                        peer_ip.split(':').next().unwrap_or(&peer_ip);
+                                    if let Ok(ban_ip) =
+                                        bare_ip.parse::<std::net::IpAddr>()
+                                    {
+                                        let mut bl = blacklist.write().await;
+                                        bl.record_violation(
+                                            ban_ip,
+                                            "Registry conflict: claimed collateral without proof",
+                                        );
+                                    }
+                                }
+
+                                // Coordinated Sybil detection: if ≥5 unique IPs from the same
+                                // /24 subnet have claimed the same outpoint within 60 seconds,
+                                // treat it as a coordinated attack and subnet-ban them all.
+                                {
+                                    // subnet_key = "w.x.y" (first 3 octets of peer IPv4)
+                                    let bare_ip =
+                                        peer_ip.split(':').next().unwrap_or(&peer_ip);
+                                    let subnet_key = bare_ip
+                                        .rsplitn(2, '.')
+                                        .nth(1)
+                                        .unwrap_or(bare_ip)
+                                        .to_string();
+                                    let tracker_key =
+                                        format!("{}|{}", subnet_key, outpoint_key);
+
+                                    // Static: outpoint+subnet → Vec<(ip, timestamp)>
+                                    static SYBIL_TRACKER: std::sync::OnceLock<
+                                        dashmap::DashMap<
+                                            String,
+                                            Vec<(String, std::time::Instant)>,
+                                        >,
+                                    > = std::sync::OnceLock::new();
+                                    let tracker =
+                                        SYBIL_TRACKER.get_or_init(dashmap::DashMap::new);
+
+                                    let mut entry =
+                                        tracker.entry(tracker_key.clone()).or_default();
+                                    let now = std::time::Instant::now();
+                                    // Evict stale entries (>60s)
+                                    entry.retain(|(_, ts)| ts.elapsed().as_secs() < 60);
+                                    // Add this IP if not already present in the window
+                                    if !entry.iter().any(|(ip, _)| ip == bare_ip) {
+                                        entry.push((bare_ip.to_string(), now));
+                                    }
+                                    let unique_count = entry.len();
+                                    drop(entry);
+
+                                    if unique_count >= 5 {
+                                        if let Some(blacklist) = &context.blacklist {
+                                            let cidr =
+                                                format!("{}.0/24", subnet_key);
+                                            let mut bl = blacklist.write().await;
+                                            if bl.subnet_ban_count() < 256 {
+                                                bl.add_subnet_ban(
+                                                    &cidr,
+                                                    &format!(
+                                                        "Sybil attack: {} IPs from {} \
+                                                         all claiming {} without proof",
+                                                        unique_count, cidr, outpoint_key
+                                                    ),
+                                                );
+                                                warn!(
+                                                    "🚫 [AI] Auto-banned subnet {} — \
+                                                     {} coordinated hijack attempts on {}",
+                                                    cidr, unique_count, outpoint_key
+                                                );
+                                            }
+                                        }
+                                        // Clear the tracker for this key to avoid re-triggering
+                                        tracker.remove(&tracker_key);
+                                    }
+                                }
+
                                 return Ok(None);
                             }
                         }
