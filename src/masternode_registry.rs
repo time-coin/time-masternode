@@ -532,6 +532,54 @@ impl MasternodeRegistry {
                             // unregister() (which clears the sled anchor), so typically no
                             // anchor exists when we re-register ourselves — this guard only
                             // fires in edge-case races where the anchor survived.
+
+                            // Dual-claimant stalemate guard (AV20): if the canonical holder's
+                            // wallet address ALSO matches the UTXO address, both nodes control
+                            // the same key (duplicate masternode.conf / hardware migration).
+                            // First registrant keeps the anchor; block the eviction to prevent
+                            // endless oscillation where each node evicts the other every gossip round.
+                            let canonical_wallet_matches = nodes
+                                .values()
+                                .find(|n| {
+                                    n.masternode
+                                        .address
+                                        .split(':')
+                                        .next()
+                                        .unwrap_or(&n.masternode.address)
+                                        == canonical_ip
+                                })
+                                .map(|n| &n.masternode.wallet_address == utxo_address)
+                                .unwrap_or(false);
+                            if canonical_wallet_matches {
+                                let is_local = local_ip
+                                    .as_deref()
+                                    .map(|l| l == incoming_ip)
+                                    .unwrap_or(false);
+                                if !is_local {
+                                    let spam_key =
+                                        format!("stalemate_warn:{}:{}", outpoint_key, incoming_ip);
+                                    let last_warned = self
+                                        .collateral_migration_times
+                                        .get(&spam_key)
+                                        .map(|v| *v)
+                                        .unwrap_or(0);
+                                    if now.saturating_sub(last_warned) >= 300 {
+                                        self.collateral_migration_times
+                                            .insert(spam_key, now);
+                                        tracing::warn!(
+                                            "🛡️ Dual-claimant stalemate: both {} and {} hold wallet \
+                                             matching UTXO {} — canonical {} keeps registration \
+                                             (use on-chain MasternodeReg to migrate)",
+                                            canonical,
+                                            masternode.address,
+                                            outpoint_key,
+                                            canonical,
+                                        );
+                                    }
+                                    return Err(RegistryError::CollateralAlreadyLocked);
+                                }
+                            }
+
                             let canonical_tier = nodes
                                 .values()
                                 .find(|n| {

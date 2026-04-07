@@ -592,7 +592,7 @@ impl PeerConnectionRegistry {
                     tracing::warn!(
                         "🔔 UPDATE REQUIRED: {} peer(s) appear to be running outdated software \
                         and cannot participate in genesis verification or fork resolution: {}. \
-                        Please upgrade to timed v{} — https://github.com/TimeCoinsOfficial/time-masternode",
+                        Please upgrade to timed v{} — https://github.com/time-coin/time-masternode",
                         old_code_peers.len(),
                         old_code_peers.join(", "),
                         env!("CARGO_PKG_VERSION"),
@@ -1145,6 +1145,22 @@ impl PeerConnectionRegistry {
         let ip_only = extract_ip(peer_ip);
         let writers = self.peer_writers.read().await;
         writers.get(ip_only).cloned()
+    }
+
+    /// Forcibly close the write channel for a peer.
+    ///
+    /// Drops the sender half of the peer's write channel, causing the write
+    /// loop in server.rs / client.rs to receive an error on the next send and
+    /// close the TCP connection cleanly.  Also removes the peer from the
+    /// connections map.  Use for zombie peers that should not reconnect.
+    pub async fn kick_peer(&self, peer_ip: &str) {
+        let ip_only = extract_ip(peer_ip);
+        {
+            let mut writers = self.peer_writers.write().await;
+            writers.remove(ip_only);
+        }
+        self.remove(ip_only);
+        tracing::info!("🦵 Kicked zombie peer {} (writer channel closed)", ip_only);
     }
 
     pub async fn register_response_handler(&self, peer_ip: &str, tx: ResponseSender) {

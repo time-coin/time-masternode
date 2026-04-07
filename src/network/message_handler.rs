@@ -43,6 +43,19 @@ fn chain_tip_getblocks_rate_limit() -> &'static dashmap::DashMap<String, Instant
     INSTANCE.get_or_init(dashmap::DashMap::new)
 }
 
+/// Tracks when each peer first fell ≥200 blocks behind our chain height.
+/// Entry is removed when the peer catches up.  After ZOMBIE_TIMEOUT the peer
+/// is kicked (writer channel closed + removed from registry) so it cannot
+/// occupy a connection slot indefinitely.
+fn zombie_peer_tracker() -> &'static dashmap::DashMap<String, Instant> {
+    static INSTANCE: std::sync::OnceLock<dashmap::DashMap<String, Instant>> =
+        std::sync::OnceLock::new();
+    INSTANCE.get_or_init(dashmap::DashMap::new)
+}
+
+/// How long a peer may remain ≥200 blocks behind before being kicked.
+const ZOMBIE_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Cached UTXO state hash received from a peer.
 struct PeerUtxoHashEntry {
     hash: [u8; 32],
@@ -4843,8 +4856,12 @@ impl MessageHandler {
                     "✅ [{}] Peer {} on same chain at height {}",
                     self.direction, self.peer_ip, peer_height
                 );
+                // Peer caught up — clear zombie timer if any
+                zombie_peer_tracker().remove(&self.peer_ip);
             }
         } else if peer_height > our_height {
+            // Peer is ahead — clear zombie timer (they're clearly syncing)
+            zombie_peer_tracker().remove(&self.peer_ip);
             // Peer is ahead — accept blocks from compatible peers at any gap.
             // Block validation (reward structure, VRF, etc.) is the real safety gate:
             // if a peer sends invalid blocks they get banned. The old "reject if gap 6-10
@@ -4975,6 +4992,42 @@ impl MessageHandler {
                 "📉 [{}] Peer {} behind at height {} (we have {})",
                 self.direction, self.peer_ip, peer_height, our_height
             );
+
+            // Zombie peer check: if a peer has been ≥200 blocks behind for
+            // longer than ZOMBIE_TIMEOUT, it is stuck and will never catch up
+            // on its own.  Kick it to free the connection slot.
+            if height_diff >= 200 {
+                let now = Instant::now();
+                let since = zombie_peer_tracker()
+                    .entry(self.peer_ip.clone())
+                    .or_insert(now);
+                if now.duration_since(*since) >= ZOMBIE_TIMEOUT {
+                    warn!(
+                        "🧟 [{}] Kicking zombie peer {} — {} blocks behind for >{:.0}s",
+                        self.direction,
+                        self.peer_ip,
+                        height_diff,
+                        ZOMBIE_TIMEOUT.as_secs_f32(),
+                    );
+                    zombie_peer_tracker().remove(&self.peer_ip);
+                    context
+                        .peer_registry
+                        .mark_incompatible(
+                            &self.peer_ip,
+                            &format!(
+                                "zombie: {} blocks behind for >{:.0}s",
+                                height_diff,
+                                ZOMBIE_TIMEOUT.as_secs_f32()
+                            ),
+                            false,
+                        )
+                        .await;
+                    context.peer_registry.kick_peer(&self.peer_ip).await;
+                }
+            } else {
+                // Peer made progress — clear any zombie timer
+                zombie_peer_tracker().remove(&self.peer_ip);
+            }
         }
 
         Ok(None)

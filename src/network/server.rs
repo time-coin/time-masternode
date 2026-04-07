@@ -710,7 +710,7 @@ async fn handle_peer(
                                             tracing::warn!(
                                                 "⚠️ Peer {} is running outdated software \
                                                 (commit {}, we are at commit {}). \
-                                                Please upgrade: https://github.com/TimeCoinsOfficial/time-masternode",
+                                                Please upgrade: https://github.com/time-coin/time-masternode",
                                                 peer.addr, commit_count, our_commits
                                             );
                                         }
