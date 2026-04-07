@@ -30,9 +30,10 @@
 # Options:
 #   --testnet              Use testnet RPC port (24101)
 #   --poll SECS            Poll interval in seconds (default: 5)
-#   --fail-threshold N     Consecutive "not active" readings before restart (default: 3)
+#   --fail-threshold N     Consecutive "not active" readings before restart (default: 2)
 #   --restart-cooldown N   Min seconds between restarts (default: 60)
 #   --startup-grace N      Seconds to wait after watchdog launches before monitoring (default: 3)
+#   --rpc-timeout N        Seconds to wait for time-cli RPC response (default: 8)
 #   --dry-run              Log what would happen but do not restart
 #   -h, --help             Show this help
 
@@ -40,9 +41,10 @@ set -uo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 POLL_INTERVAL=5
-FAIL_THRESHOLD=3
+FAIL_THRESHOLD=2
 RESTART_COOLDOWN=60
 STARTUP_GRACE=3
+RPC_TIMEOUT=8      # seconds to wait for time-cli before treating as failure
 DRY_RUN=0
 NETWORK="mainnet"
 
@@ -60,6 +62,7 @@ while [[ $# -gt 0 ]]; do
         --fail-threshold)     FAIL_THRESHOLD="$2"; shift 2 ;;
         --restart-cooldown)   RESTART_COOLDOWN="$2"; shift 2 ;;
         --startup-grace)      STARTUP_GRACE="$2"; shift 2 ;;
+        --rpc-timeout)        RPC_TIMEOUT="$2"; shift 2 ;;
         --dry-run)            DRY_RUN=1; shift ;;
         -h|--help)            usage ;;
         *) echo "Unknown option: $1"; usage ;;
@@ -96,7 +99,7 @@ fi
 CLI_CMD="$CLI"
 [ "$NETWORK" = "testnet" ] && CLI_CMD="$CLI --testnet"
 
-log "Starting ($NETWORK) | poll=${POLL_INTERVAL}s fail-threshold=${FAIL_THRESHOLD} cooldown=${RESTART_COOLDOWN}s grace=${STARTUP_GRACE}s dry-run=${DRY_RUN}"
+log "Starting ($NETWORK) | poll=${POLL_INTERVAL}s fail-threshold=${FAIL_THRESHOLD} cooldown=${RESTART_COOLDOWN}s grace=${STARTUP_GRACE}s rpc-timeout=${RPC_TIMEOUT}s dry-run=${DRY_RUN}"
 log "Using CLI: $CLI_CMD"
 
 # ── State ──────────────────────────────────────────────────────────────────────
@@ -143,8 +146,9 @@ while true; do
         continue
     fi
 
-    # 3. Query masternodestatus.
-    status_json=$($CLI_CMD masternodestatus 2>/dev/null) || status_json=""
+    # 3. Query masternodestatus — with hard timeout so a dead RPC socket
+    #    doesn't stall each check for 60+ seconds.
+    status_json=$(timeout "$RPC_TIMEOUT" $CLI_CMD masternodestatus 2>/dev/null) || status_json=""
     if [ -z "$status_json" ]; then
         logw "RPC call failed (streak: $((fail_streak + 1))/$FAIL_THRESHOLD)"
         fail_streak=$(( fail_streak + 1 ))
