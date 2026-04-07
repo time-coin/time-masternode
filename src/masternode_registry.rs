@@ -253,6 +253,35 @@ impl MasternodeRegistry {
             tracing::info!("📂 Loaded {} masternode(s) from disk", nodes.len());
         }
 
+        // Migration: write canonical anchors for any existing paid-tier node that
+        // doesn't have one yet.  Prior versions only wrote anchors via on-chain
+        // MasternodeReg txs; without an in-sled anchor a Free-tier gossip claim can
+        // bypass the canonical-anchor check and migrate the entry.
+        let mut anchors_written = 0usize;
+        for info in nodes.values() {
+            if info.masternode.tier == crate::types::MasternodeTier::Free {
+                continue;
+            }
+            if let Some(ref outpoint) = info.masternode.collateral_outpoint {
+                let outpoint_key =
+                    format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
+                let anchor_key = format!("collateral_anchor:{}", outpoint_key);
+                if db.get(anchor_key.as_bytes()).ok().flatten().is_none() {
+                    let _ = db.insert(
+                        anchor_key.as_bytes(),
+                        info.masternode.address.as_bytes(),
+                    );
+                    anchors_written += 1;
+                }
+            }
+        }
+        if anchors_written > 0 {
+            tracing::info!(
+                "🔒 Wrote {} missing canonical anchor(s) for existing paid-tier node(s)",
+                anchors_written
+            );
+        }
+
         Self {
             masternodes: Arc::new(RwLock::new(nodes)),
             local_masternode_address: Arc::new(RwLock::new(None)),
