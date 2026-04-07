@@ -4,9 +4,10 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
+| 1.4.x   | :white_check_mark: |
+| 1.3.x   | :white_check_mark: |
 | 1.2.x   | :white_check_mark: |
-| 1.1.x   | :white_check_mark: |
-| < 1.1   | :x:                |
+| < 1.2   | :x:                |
 
 ## Reporting a Vulnerability
 
@@ -58,11 +59,15 @@ TimeCoin implements several security measures:
    - `.cookie` file for CLI tool authentication
 
 3. **Network Security**
-   - IP blacklisting for malicious peers
+   - IP blacklisting for malicious peers (auto-ban after 3/5/10 violations)
    - Per-peer, per-message-type rate limiting
-   - Peer reputation scoring
-   - Whitelist for trusted nodes
+   - Per-/24 subnet connection rate limiter (>20 connections/min dropped before TLS)
+   - `bansubnet=` config option for static CIDR-level bans
+   - Peer reputation scoring via AI attack detector
+   - Whitelist for trusted nodes (bypass connection limits and rate limiting)
    - Message timestamp validation (5-minute window)
+   - Pre-handshake 10-second timeout (prevents ghost connection OOM)
+   - Outbound PHASE3 loop checks live blacklist before TCP connect (no wasted TLS to banned IPs)
 
 4. **Consensus Security**
    - TimeVote 51% stake-weighted finality
@@ -163,6 +168,7 @@ TimeCoin implements several security measures:
 - Network partition attacks
 - Double-spend attempts
 - VRF grinding attacks
+- Coordinated Sybil subnet flooding (live since April 2026; auto-mitigated by AI detector)
 
 ## Threat Analysis
 
@@ -271,4 +277,4 @@ We appreciate the security research community and will acknowledge researchers w
 
 ---
 
-*This security policy is subject to updates. Last updated: March 2026*
+*This security policy is subject to updates. Last updated: April 2026*

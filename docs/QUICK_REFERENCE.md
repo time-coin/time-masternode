@@ -99,9 +99,12 @@ Max message:   4 MB
 Max peers:     50 (configurable outbound)
 MAX_INBOUND:   100 (overload redirect at 70%)
 FULL_MESH_THRESHOLD: 50 masternodes (full-mesh below, pyramid above)
+MAX_SUBNET_CONNECTS_PER_MIN: 20  # per /24 prefix; exceeded → drop before TLS
+PRE_HANDSHAKE_TIMEOUT_SECS:  10  # ghost connection OOM protection
 Port:          24000 (mainnet), 24100 (testnet)
 Storage:       Sled embedded database
 Bootstrap:     Configured in time.conf (addnode=)
+bansubnet:     Static CIDR bans configurable in time.conf (bansubnet=x.x.x.0/24)
 ```
 
 ---
@@ -142,6 +145,13 @@ Free:   0 TIME          → sampling weight 1, no governance
 Bronze: 1,000 TIME      → sampling weight 10,   governance weight 1   (exact collateral)
 Silver: 10,000 TIME     → sampling weight 100,  governance weight 10  (exact collateral)
 Gold:   100,000 TIME    → sampling weight 1,000 governance weight 100 (exact collateral)
+```
+
+Registry Security:
+```yaml
+MIGRATION_COOLDOWN_SECS:  300   # min seconds between IP migrations per outpoint (was 60)
+CYCLING_LOCKOUT_SECS:     600   # lockout if back-and-forth cycling A→B→A detected
+EVICTION_STORM_COOLDOWN:  60    # V4 eviction storm rate-limit window
 ```
 
 ---

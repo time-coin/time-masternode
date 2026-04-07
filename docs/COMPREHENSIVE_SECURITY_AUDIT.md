@@ -1058,8 +1058,8 @@ Connection from 188.166.243.108:60880 ended: Frame too large: 2823396163 bytes (
 
 ---
 
-### 14.7 ⚠️ ONGOING — V4 Eviction Oscillation (Free-tier Re-squatting)
-**Status:** **PARTIALLY MITIGATED** — requires further hardening
+### 14.7 ✅ FIXED — V4 Eviction Oscillation / IP Cycling (Free-tier Re-squatting)
+**Status:** **FIXED in v1.4.34** (commits `1b9bf31`, `a028b52`, `651799c`)
 
 **Attack:** After a legitimate node uses a V4 collateral proof to evict a free-tier squatter, the squatter immediately re-registers via "free-tier IP migration" from a different IP in the same Sybil subnet. This creates an oscillation loop:
 
@@ -1078,11 +1078,90 @@ Connection from 188.166.243.108:60880 ended: Frame too large: 2823396163 bytes (
 
 **Current Mitigation:** Subnet ban of `154.217.246.0/24` (auto-triggered or manually via `bansubnet=`) stops the migration at the TCP level. With v1.4.34, these IPs accumulate violations faster and reach permanent ban sooner.
 
-**Remaining Gap:** The oscillation can still occur if the attacking subnet is not yet banned and the eviction storm cooldown prevents the legitimate owner from immediately reclaiming. The cooldown is necessary to prevent legitimate V4 eviction storms, creating tension.
+**Fixes Applied (v1.4.34):**
+- ✅ **`MIGRATION_COOLDOWN_SECS` raised 60s → 300s** — reduces cycling frequency by 5×; attacker can no longer flip on every block slot
+- ✅ **Back-and-forth cycling detection** — new `collateral_migration_from` field tracks the source IP of the last accepted migration per outpoint. If the incoming IP matches the previous-from IP within `CYCLING_LOCKOUT_SECS = 600`, the migration is rejected as AV3.
+- ✅ **`record_synchronized_disconnect()`** — if ≥5 masternodes from the same /24 disconnect within 30s, the specific offending IP is blocked (not the whole subnet, to avoid collateral damage to legitimate cloud-hosted nodes)
 
-**Recommendation:**
-- Implement a **post-eviction re-registration delay** per outpoint: after a V4-proof eviction, the evicted IP should be barred from re-claiming the same outpoint for N minutes (without a new V4 proof)
-- This is distinct from the V4 eviction storm cooldown (which rate-limits *legitimate* nodes)
+**Code References:**
+- `src/masternode_registry.rs` — `MIGRATION_COOLDOWN_SECS = 300`; `collateral_migration_from` field; cycling detection before `collateral_migration_times.insert()`
+- `src/ai/attack_detector.rs` — `record_synchronized_disconnect()`; `SynchronizedCycling` attack type
+- `src/network/server.rs` — `record_synchronized_disconnect()` called in `handle_peer` cleanup after `mark_inactive_on_disconnect`
+
+---
+
+### 14.8 ✅ FIXED — Ghost Connection OOM / Distributed SNI Flood
+**Status:** **FIXED in v1.4.34** (commits `2778693`, `1affdfc`, `a028b52`)
+
+**Attack:** A coordinated botnet sends ~10 TLS connections per second from distributed IPs. Each connection presents the victim node's own IP address as the TLS SNI hostname (e.g., `35302e32382e3130342e3530` = hex-encoded ASCII `50.28.104.50`). Each connection completes TLS successfully (rustls warns but proceeds) then never sends a Handshake message. The 10-second pre-handshake timeout holds every connection as a live tokio future.
+
+**Crash Mechanism:** 10 connections/sec × 10s hold = ~100 concurrent futures × ~200KB TLS state = ~20MB RAM consumed every 10 seconds — growing until the kernel OOM-killer fires (~12 minutes).
+
+**Compound effect (three vectors firing simultaneously):**
+1. SNI ghost flood consuming ~20MB/10s
+2. PHASE3 outbound loop wasting 15 tokio tasks on banned IPs every 30s (see 14.9)
+3. Coordinated disconnect storm: 7–10 nodes from `154.217.246.x` disconnecting simultaneously every ~60s, triggering reconnect storms
+
+**Observed:** All nodes (Michigan, Arizona) crashing every ~12 minutes. Watchdog restarted each node 8–9 times per session.
+
+**Fixes Applied:**
+- ✅ **`timed.service` memory limits** — `MemoryMax=3G`, `MemoryHigh=2G`, `LimitNPROC=8192`. Hard ceiling prevents OOM from killing other system processes; systemd restarts if limit is breached
+- ✅ **Per-/24 subnet accept rate limiter** — >20 connections/min from any single /24 prefix are dropped before TLS. Implemented as `DashMap<String, VecDeque<Instant>>` in the TCP accept loop, before `can_accept_inbound()`. Non-whitelisted IPs only — trusted nodes bypass the limit.
+- ✅ **`record_tls_failure()` AI hook** — rate-limit rejections feed the AI attack detector; ≥5 from same IP in 60s → `BlockPeer`
+- ✅ **Watchdog RPC timeout** — `mn-watchdog.sh` wraps all `time-cli` calls with `timeout "$RPC_TIMEOUT"` (default 8s), preventing 60s stalls when the daemon is dead. `FAIL_THRESHOLD` default changed 1→3 to avoid restart thrashing on transient RPC errors.
+
+**Code References:**
+- `src/network/server.rs` — `subnet_accept_rate: Arc<DashMap<String, VecDeque<Instant>>>` in `run()`; subnet prefix check with `MAX_SUBNET_CONNECTS_PER_MIN = 20`
+- `src/ai/attack_detector.rs` — `record_tls_failure()`; `TlsFlood` attack type; `tls_failure_times` sliding-window field
+- `scripts/mn-watchdog.sh` — `--rpc-timeout` flag; `FAIL_THRESHOLD` default
+- `timed.service` — `MemoryMax`, `MemoryHigh`, `LimitNPROC`
+
+---
+
+### 14.9 ✅ FIXED — PHASE3 Reconnect Loop to Banned Peers
+**Status:** **FIXED in v1.4.34** (commit `a028b52`)
+
+**Attack:** The PHASE3 outbound connection loop (`client.rs`) iterates all registered masternodes and peers every 30 seconds. The `should_skip()` closure only checked the static config `blacklisted_peers` set — it did **not** check `res.ip_blacklist`, the live `Arc<RwLock<IPBlacklist>>` that holds subnet bans applied by the AI enforcement loop. As a result, the PHASE3 loop opened full TCP + TLS handshakes to all ~15 IPs on the banned `154.217.246.0/24` subnet on every 30-second cycle, consuming tokio tasks and TLS memory:
+
+```
+[PHASE3-MN] Connected to peer: 154.217.246.34:24000
+[PHASE3-MN] REJECTING message from blacklisted peer 154.217.246.34: Subnet banned
+```
+
+During the ghost connection OOM this contributed ~15 extra concurrent futures every 30 seconds.
+
+**Fix Applied:**
+- ✅ Both PHASE3-MN and PHASE3-PEER loops check `ip_blacklist.write().await.is_blacklisted()` before `mark_connecting`. Banned IPs are skipped at zero cost — no socket opened, no TLS round-trip, no tokio task spawned.
+
+**Code References:**
+- `src/network/client.rs` — PHASE3-MN loop (~line 438); PHASE3-PEER loop (~line 519); `ip_blacklist.write().await.is_blacklisted()` check before `mark_connecting`
+
+---
+
+### 14.10 ✅ FIXED — IP Cycling / Collateral Migration Back-and-Forth
+**Status:** **FIXED in v1.4.34** (commit `a028b52`)
+
+**Attack:** Four attacker-controlled collateral outpoints were cycling between IP pairs on an exact 60-second cadence — matching the old `MIGRATION_COOLDOWN_SECS = 60`. Each cycle triggered UTXOManager stale-collateral unlocks, sled registry writes, and peer gossip re-broadcasts. With 4 outpoints cycling synchronously the registry received sustained write pressure and legitimate nodes flickered between active/inactive reward eligibility states.
+
+**Observed IP pairs:**
+| Outpoint prefix | Pair |
+|-----------------|------|
+| `50911bd...` | `154.217.246.34` ↔ `124.70.167.62` |
+| `f52a81...`  | `154.217.246.111` ↔ `154.217.246.86` |
+| `926b2f...`  | `133.18.180.117` ↔ `43.119.35.195` |
+| `95f1b8...`  | `69.167.169.81` ↔ `47.82.236.153` |
+
+**Fixes Applied:**
+- ✅ **Cooldown raised 60s → 300s** — each cycling event now costs the attacker 5× longer; the 4-outpoint synchronized cycle now fires at most every 5 minutes instead of every minute
+- ✅ **Back-and-forth detection (600s lockout)** — `collateral_migration_from` field tracks last-from IP per outpoint; incoming migration rejected with `InvalidCollateral` if it matches the previous-from IP within 600 seconds
+- ✅ **Subnet disconnect detection** — coordinated simultaneous disconnects from the same /24 trigger `BlockPeer` for the specific offending IP
+
+**Note on subnet-wide bans:** The synchronized disconnect detector emits `BlockPeer` for the specific IP, not `BanSubnet` for the whole /24. This is intentional — cloud providers like Alibaba Cloud host both attacker and legitimate nodes on the same prefix. Operators who are certain a subnet is wholly hostile can add explicit `bansubnet=x.x.x.0/24` entries to `time.conf`.
+
+**Code References:**
+- `src/masternode_registry.rs` — `MIGRATION_COOLDOWN_SECS = 300`; `collateral_migration_from: Arc<DashMap<String, String>>`; cycling detection block before `collateral_migration_times.insert()`
+- `src/ai/attack_detector.rs` — `record_synchronized_disconnect()`; `subnet_disconnects` sliding-window field; `SynchronizedCycling` → `BlockPeer`
+- `src/network/server.rs` — `record_synchronized_disconnect()` call in `handle_peer` cleanup (gated on `handshake_done`)
 
 ---
 
@@ -1445,10 +1524,12 @@ address, sets `context.utxo_manager` and `context.peer_manager`, and delegates t
 
 ---
 
-**Document Version:** 1.2  
-**Last Updated:** April 2026  
-**Changes from v1.1:**
-- Added AV-6 through AV-12: seven live mainnet attack vectors discovered and fixed April 2026
-- All fixes shipped and verified on mainnet
+**Document Version:** 1.3
+**Last Updated:** April 7, 2026
+**Changes from v1.2:**
+- Updated 14.7 (V4 Eviction Oscillation) status from ⚠️ ONGOING to ✅ FIXED
+- Added 14.8: Ghost Connection OOM / Distributed SNI Flood (AV22) — fixed in v1.4.34
+- Added 14.9: PHASE3 Reconnect Loop to Banned Peers (AV23) — fixed in v1.4.34
+- Added 14.10: IP Cycling / Collateral Migration Back-and-Forth (AV24) — fixed in v1.4.34
 
 **Next Review:** Quarterly or after major protocol changes
