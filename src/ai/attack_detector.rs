@@ -27,6 +27,8 @@ pub enum AttackType {
     CollateralSpoofing,    // Attempting to claim another node's registered collateral
     SyncLoopFlooding,      // Excessive GetBlocks for same range (sync loop DoS)
     UtxoLockFlood,         // Peer sends excessive UTXOStateUpdate messages for one TX (DoS)
+    SynchronizedCycling,   // Coordinated synchronized disconnect/reconnect storm from a subnet
+    TlsFlood,              // High-rate TLS handshake flood from distributed IPs
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +63,7 @@ pub enum MitigationAction {
     AlertOperator,
     EmergencySync,
     HaltProduction,
+    BanSubnet(String),     // Ban an entire /24 (or custom CIDR) subnet
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +96,12 @@ pub struct AttackDetector {
     transaction_history: Arc<RwLock<HashMap<String, TransactionTracker>>>,
     detected_attacks: Arc<RwLock<Vec<AttackPattern>>>,
     time_window: Duration,
+    /// Per-/24 subnet disconnect timestamps for SynchronizedCycling detection.
+    /// Key: subnet prefix (e.g. "154.217.246"), Value: deque of disconnect Unix timestamps.
+    subnet_disconnects: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
+    /// Per-IP TLS failure timestamps for TlsFlood detection.
+    /// Key: IP address, Value: deque of failure Unix timestamps.
+    tls_failure_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
 }
 
 impl AttackDetector {
@@ -104,6 +113,8 @@ impl AttackDetector {
             transaction_history: Arc::new(RwLock::new(HashMap::new())),
             detected_attacks: Arc::new(RwLock::new(detected_attacks)),
             time_window: Duration::from_secs(300),
+            subnet_disconnects: Arc::new(RwLock::new(HashMap::new())),
+            tls_failure_times: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -478,6 +489,99 @@ impl AttackDetector {
                 last_seen: now,
                 source_ips: vec![addr.to_string()],
                 recommended_action: MitigationAction::RateLimitPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        }
+    }
+
+    /// Record that a masternode at `addr` disconnected. If ≥5 nodes from the same /24
+    /// subnet disconnect within 30 s, detect SynchronizedCycling and recommend BanSubnet.
+    pub fn record_synchronized_disconnect(&self, addr: &str) {
+        // Extract /24 prefix (first 3 octets, e.g. "154.217.246")
+        let subnet: String = addr.split('.').take(3).collect::<Vec<_>>().join(".");
+        // Skip IPv6 addresses or anything that didn't parse as three octets
+        if subnet.len() < 5 || subnet.contains(':') {
+            return;
+        }
+        let now = Self::now_secs();
+        const SYNC_WINDOW_SECS: u64 = 30;
+        const SYNC_THRESHOLD: usize = 5;
+
+        let should_ban = {
+            let mut map = self.subnet_disconnects.write();
+            let timestamps = map.entry(subnet.clone()).or_default();
+            while timestamps
+                .front()
+                .map(|t| now.saturating_sub(*t) > SYNC_WINDOW_SECS)
+                .unwrap_or(false)
+            {
+                timestamps.pop_front();
+            }
+            timestamps.push_back(now);
+            timestamps.len() >= SYNC_THRESHOLD
+        };
+
+        if should_ban {
+            let cidr = format!("{}.0/24", subnet);
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::SynchronizedCycling,
+                confidence: 0.90,
+                severity: AttackSeverity::High,
+                indicators: vec![
+                    format!(
+                        "≥{} nodes from {}.x disconnected within {}s",
+                        SYNC_THRESHOLD, subnet, SYNC_WINDOW_SECS
+                    ),
+                    "Coordinated synchronized disconnect storm (AV3) — auto-banning subnet"
+                        .to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::BanSubnet(cidr),
+                mitigation_applied_at: None,
+            });
+        }
+    }
+
+    /// Record a TLS handshake failure from `addr`. If ≥5 failures from the same IP
+    /// occur within 60 s, detect TlsFlood and recommend BlockPeer.
+    pub fn record_tls_failure(&self, addr: &str) {
+        let now = Self::now_secs();
+        const TLS_FLOOD_WINDOW_SECS: u64 = 60;
+        const TLS_FLOOD_THRESHOLD: usize = 5;
+
+        let should_block = {
+            let mut map = self.tls_failure_times.write();
+            let timestamps = map.entry(addr.to_string()).or_default();
+            while timestamps
+                .front()
+                .map(|t| now.saturating_sub(*t) > TLS_FLOOD_WINDOW_SECS)
+                .unwrap_or(false)
+            {
+                timestamps.pop_front();
+            }
+            timestamps.push_back(now);
+            timestamps.len() >= TLS_FLOOD_THRESHOLD
+        };
+
+        if should_block {
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::TlsFlood,
+                confidence: 0.88,
+                severity: AttackSeverity::High,
+                indicators: vec![
+                    format!(
+                        "≥{} TLS failures from {} within {}s",
+                        TLS_FLOOD_THRESHOLD, addr, TLS_FLOOD_WINDOW_SECS
+                    ),
+                    "TLS handshake flood (AV13) — high-rate connection attempts before protocol"
+                        .to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::BlockPeer(addr.to_string()),
                 mitigation_applied_at: None,
             });
         }

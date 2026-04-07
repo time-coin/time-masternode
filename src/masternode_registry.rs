@@ -179,6 +179,10 @@ pub struct MasternodeRegistry {
     /// Prevents rapid flip-flop when two peers gossip the same collateral with different IPs.
     /// Key: "<txid>:<vout>", Value: Unix timestamp of the last accepted migration.
     collateral_migration_times: Arc<DashMap<String, u64>>,
+    /// Per-outpoint: the source IP of the most recent accepted migration.
+    /// Used to detect back-and-forth IP cycling attacks (AV3).
+    /// Key: "<txid>:<vout>", Value: the IP the collateral migrated FROM last time.
+    collateral_migration_from: Arc<DashMap<String, String>>,
     /// Per-outpoint timestamp of the most recent V4-proof eviction.
     /// Any free-tier IP migration targeting the same outpoint is blocked for
     /// POST_EVICTION_LOCKOUT_SECS (600 s) after a V4 eviction, closing the
@@ -304,6 +308,7 @@ impl MasternodeRegistry {
             pending_collateral_locks: Arc::new(parking_lot::Mutex::new(Vec::new())),
             collateral_miss_counts: Arc::new(DashMap::new()),
             collateral_migration_times: Arc::new(DashMap::new()),
+            collateral_migration_from: Arc::new(DashMap::new()),
             post_eviction_lockout: Arc::new(DashMap::new()),
             utxo_manager: Arc::new(RwLock::new(None)),
         }
@@ -770,8 +775,9 @@ impl MasternodeRegistry {
                     }
                 }
 
-                // Cooldown: refuse to migrate the same outpoint more than once per 60 s.
-                const MIGRATION_COOLDOWN_SECS: u64 = 60;
+                // Cooldown: refuse to migrate the same outpoint more than once per 300 s.
+                // Raised from 60 s to 300 s to reduce IP churn / cycling attack frequency (AV3).
+                const MIGRATION_COOLDOWN_SECS: u64 = 300;
                 if let Some(last_migrated) = self.collateral_migration_times.get(&outpoint_key) {
                     let elapsed = now.saturating_sub(*last_migrated);
                     if elapsed < MIGRATION_COOLDOWN_SECS {
@@ -788,6 +794,48 @@ impl MasternodeRegistry {
                         return Err(RegistryError::InvalidCollateral);
                     }
                 }
+
+                // Back-and-forth IP cycling detection (AV3): if the incoming IP matches
+                // the IP this outpoint just migrated FROM, reject it as a cycling attack.
+                // With a 300 s cooldown, legitimate operators can still change IPs;
+                // attackers who flip A→B→A every ~300 s are blocked for 10 minutes.
+                {
+                    const CYCLING_LOCKOUT_SECS: u64 = 600;
+                    let incoming_ip = masternode
+                        .address
+                        .split(':')
+                        .next()
+                        .unwrap_or(&masternode.address);
+                    if let Some(prev_from) = self.collateral_migration_from.get(&outpoint_key) {
+                        if prev_from.as_str() == incoming_ip {
+                            if let Some(last_migrated) =
+                                self.collateral_migration_times.get(&outpoint_key)
+                            {
+                                if now.saturating_sub(*last_migrated) < CYCLING_LOCKOUT_SECS {
+                                    tracing::warn!(
+                                        "🛡️ IP cycling rejected (AV3): {} tried to move {} \
+                                         back to {} (came from there {}s ago, lockout {}s)",
+                                        masternode.address,
+                                        outpoint,
+                                        incoming_ip,
+                                        now.saturating_sub(*last_migrated),
+                                        CYCLING_LOCKOUT_SECS,
+                                    );
+                                    return Err(RegistryError::InvalidCollateral);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Record the source IP before updating the migration timestamp so that
+                // the next migration attempt can be checked for back-tracking.
+                {
+                    let old_ip = old_addr.split(':').next().unwrap_or(&old_addr).to_string();
+                    self.collateral_migration_from
+                        .insert(outpoint_key.clone(), old_ip);
+                }
+
                 self.collateral_migration_times
                     .insert(outpoint_key.clone(), now);
 
@@ -3360,6 +3408,7 @@ impl Clone for MasternodeRegistry {
             pending_collateral_locks: self.pending_collateral_locks.clone(),
             collateral_miss_counts: self.collateral_miss_counts.clone(),
             collateral_migration_times: self.collateral_migration_times.clone(),
+            collateral_migration_from: self.collateral_migration_from.clone(),
             post_eviction_lockout: self.post_eviction_lockout.clone(),
             utxo_manager: self.utxo_manager.clone(),
         }

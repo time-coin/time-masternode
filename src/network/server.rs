@@ -15,7 +15,7 @@ use crate::network::rate_limiter::RateLimiter;
 use crate::types::{OutPoint, UTXOState};
 use crate::utxo_manager::UTXOStateManager;
 use dashmap::DashMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 
 use std::sync::Arc;
@@ -314,6 +314,18 @@ impl NetworkServer {
                                     attack.severity
                                 );
                             }
+                            crate::ai::MitigationAction::BanSubnet(subnet_str) => {
+                                blacklist.add_subnet_ban(
+                                    subnet_str,
+                                    &format!("AI-detected: {:?}", attack.attack_type),
+                                );
+                                tracing::warn!(
+                                    "🚫 AI: Auto-banned subnet {} ({:?}, confidence={:.0}%)",
+                                    subnet_str,
+                                    attack.attack_type,
+                                    attack.confidence * 100.0
+                                );
+                            }
                             _ => {} // Monitor, EmergencySync, HaltProduction — log only
                         }
                     }
@@ -323,6 +335,13 @@ impl NetworkServer {
         }
 
         // Note: Deduplication filter handles its own cleanup with automatic rotation
+
+        // Per-/24 subnet connection rate limiter: throttles inbound floods before TLS.
+        // Key: first-three-octet prefix (e.g. "50.28.104"), Value: accept timestamps.
+        // Caps any single /24 at MAX_SUBNET_CONNECTS_PER_MIN new connections per minute,
+        // preventing distributed SNI floods and botnet cycling attacks.
+        let subnet_accept_rate: Arc<DashMap<String, VecDeque<Instant>>> =
+            Arc::new(DashMap::new());
 
         loop {
             let (stream, addr) = self.listener.accept().await?;
@@ -368,6 +387,46 @@ impl NetworkServer {
 
             // Phase 2.1: Check connection limits BEFORE accepting
             // Phase 3: Whitelisted masternodes bypass regular connection limits
+            // Phase 4: Per-/24 subnet rate limit (non-whitelisted only)
+            if !is_whitelisted {
+                const MAX_SUBNET_CONNECTS_PER_MIN: usize = 20;
+                let subnet = {
+                    let parts: Vec<&str> = ip_str.splitn(4, '.').collect();
+                    if parts.len() >= 3 {
+                        format!("{}.{}.{}", parts[0], parts[1], parts[2])
+                    } else {
+                        ip_str.clone()
+                    }
+                };
+                let now_instant = Instant::now();
+                let reject = {
+                    let mut entry = subnet_accept_rate
+                        .entry(subnet.clone())
+                        .or_default();
+                    while entry
+                        .front()
+                        .map(|t: &Instant| now_instant.duration_since(*t).as_secs() >= 60)
+                        .unwrap_or(false)
+                    {
+                        entry.pop_front();
+                    }
+                    entry.push_back(now_instant);
+                    entry.len() > MAX_SUBNET_CONNECTS_PER_MIN
+                };
+                if reject {
+                    tracing::debug!(
+                        "🚫 Subnet rate limit: {}/24 exceeded {} conn/min, dropping",
+                        subnet,
+                        MAX_SUBNET_CONNECTS_PER_MIN
+                    );
+                    if let Some(ai) = &self.ai_system {
+                        ai.attack_detector.record_tls_failure(&ip_str);
+                    }
+                    drop(stream);
+                    continue;
+                }
+            }
+
             if let Err(reason) = self
                 .connection_manager
                 .can_accept_inbound(&ip_str, is_whitelisted)
@@ -2442,6 +2501,12 @@ async fn handle_peer(
             .await
         {
             tracing::debug!("Note: {} is not a registered masternode ({})", ip_str, e);
+        }
+        // Notify AI detector of masternode disconnect for synchronized cycling detection (AV3).
+        // If ≥5 nodes from the same /24 subnet disconnect within 30s, the AI will recommend
+        // BanSubnet, which the enforcement loop applies on its next 30s tick.
+        if let Some(ref ai) = ai_system {
+            ai.attack_detector.record_synchronized_disconnect(&ip_str);
         }
     }
 

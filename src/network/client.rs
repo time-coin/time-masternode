@@ -433,6 +433,19 @@ impl NetworkClient {
                             );
                             continue;
                         }
+                        // Skip IPs that are currently blacklisted — avoids full TCP+TLS
+                        // round-trip to banned subnets, which wastes tokio tasks + memory.
+                        if let Some(ref bl) = res.ip_blacklist {
+                            if let Ok(parsed_ip) = mn_ip.parse::<std::net::IpAddr>() {
+                                if bl.write().await.is_blacklisted(parsed_ip).is_some() {
+                                    tracing::debug!(
+                                        "⏭️  [PHASE3-MN] Skipping {} (blacklisted)",
+                                        mn_ip
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
                         if !connection_manager.mark_connecting(mn_ip) {
                             continue;
                         }
@@ -501,6 +514,18 @@ impl NetworkClient {
                                 advice.reasoning
                             );
                             continue;
+                        }
+                        // Skip IPs that are currently blacklisted (including banned subnets)
+                        if let Some(ref bl) = res.ip_blacklist {
+                            if let Ok(parsed_ip) = ip.parse::<std::net::IpAddr>() {
+                                if bl.write().await.is_blacklisted(parsed_ip).is_some() {
+                                    tracing::debug!(
+                                        "⏭️  [PHASE3-PEER] Skipping {} (blacklisted)",
+                                        ip
+                                    );
+                                    continue;
+                                }
+                            }
                         }
                         if !connection_manager.mark_connecting(ip) {
                             continue;
