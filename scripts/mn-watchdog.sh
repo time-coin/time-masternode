@@ -29,22 +29,22 @@
 #
 # Options:
 #   --testnet              Use testnet RPC port (24101)
-#   --poll SECS            Poll interval in seconds (default: 5)
+#   --poll SECS            Poll interval in seconds (default: 3)
 #   --fail-threshold N     Consecutive "not active" readings before restart (default: 2)
 #   --restart-cooldown N   Min seconds between restarts (default: 60)
 #   --startup-grace N      Seconds to wait after watchdog launches before monitoring (default: 3)
-#   --rpc-timeout N        Seconds to wait for time-cli RPC response (default: 8)
+#   --rpc-timeout N        Seconds to wait for time-cli RPC response (default: 3)
 #   --dry-run              Log what would happen but do not restart
 #   -h, --help             Show this help
 
 set -uo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-POLL_INTERVAL=5
+POLL_INTERVAL=3
 FAIL_THRESHOLD=2
 RESTART_COOLDOWN=60
 STARTUP_GRACE=3
-RPC_TIMEOUT=8      # seconds to wait for time-cli before treating as failure
+RPC_TIMEOUT=3      # seconds to wait for time-cli before treating as failure
 DRY_RUN=0
 NETWORK="mainnet"
 
@@ -129,7 +129,27 @@ while true; do
 
     # 1. Daemon must be running.
     if ! systemctl is-active --quiet timed 2>/dev/null; then
-        logw "timed is not active — skipping (systemd will handle restart if configured)"
+        # timed is dead (OOM killed, segfault, etc.) — restart it directly.
+        # Don't rely on systemd's Restart= policy; the watchdog owns recovery.
+        now=$(date +%s)
+        since_last=$(( now - last_restart_ts ))
+        if [ "$since_last" -ge "$RESTART_COOLDOWN" ]; then
+            total_restarts=$(( total_restarts + 1 ))
+            if [ "$DRY_RUN" -eq 1 ]; then
+                log "DRY-RUN: timed is not active — would restart (restart #${total_restarts})"
+            else
+                log "💀 timed is not active — restarting (restart #${total_restarts})"
+                if systemctl restart timed; then
+                    log "✅ systemctl restart timed succeeded"
+                else
+                    loge "systemctl restart timed FAILED (exit $?)"
+                fi
+            fi
+            last_restart_ts=$now
+        else
+            remaining=$(( RESTART_COOLDOWN - since_last ))
+            logw "timed is not active — restart cooldown active (${remaining}s remaining)"
+        fi
         fail_streak=0
         continue
     fi
