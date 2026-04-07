@@ -30,7 +30,7 @@
 # Options:
 #   --testnet              Use testnet RPC port (24101)
 #   --poll SECS            Poll interval in seconds (default: 5)
-#   --fail-threshold N     Consecutive "not active" readings before restart (default: 1)
+#   --fail-threshold N     Consecutive "not active" readings before restart (default: 3)
 #   --restart-cooldown N   Min seconds between restarts (default: 60)
 #   --startup-grace N      Seconds to wait after watchdog launches before monitoring (default: 3)
 #   --dry-run              Log what would happen but do not restart
@@ -40,7 +40,7 @@ set -uo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 POLL_INTERVAL=5
-FAIL_THRESHOLD=1
+FAIL_THRESHOLD=3
 RESTART_COOLDOWN=60
 STARTUP_GRACE=3
 DRY_RUN=0

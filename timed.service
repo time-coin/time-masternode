@@ -21,6 +21,11 @@ RestartSec=10s
 
 # Resource limits
 LimitNOFILE=65536
+LimitNPROC=8192
+# Cap memory at 3GB — OOM killer will target timed before other processes,
+# producing a clean crash+restart rather than a system-wide OOM stall.
+MemoryMax=3G
+MemoryHigh=2G
 Nice=-5
 
 # Security hardening
