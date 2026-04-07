@@ -2,9 +2,10 @@
 ## Analysis of All Known Cryptocurrency Attack Vectors
 
 **Date:** January 23, 2026  
-**Version:** 1.2  
+**Version:** 1.4  
 **Audit Scope:** Full system security analysis against known cryptocurrency vulnerabilities + Bitcoin development insights  
-**Last Verification:** January 23, 2026
+**Last Verification:** April 7, 2026  
+**Last Updated:** April 7, 2026 — Section 14 added (April 2026 mainnet attack findings)
 
 ---
 
@@ -15,7 +16,7 @@ This document provides a comprehensive security analysis of TimeCoin against all
 **Overall Security Rating: 🟢 STRONG** (with recommended enhancements)
 
 ### Key Findings
-- ✅ **22 attack vectors fully mitigated** (+1 from January 2026 audit: collateral anchor squatting)
+- ✅ **22 attack vectors fully mitigated** (+6 from April 2026 mainnet findings)
 - ⚠️ **4 attack vectors with recommended enhancements**
 - ❌ **0 critical vulnerabilities**
 - 🟢 **Already 2106-safe** (ahead of Bitcoin's uint32 → uint64 migration)
@@ -923,6 +924,168 @@ pub struct BlockHeader {
 
 ---
 
+## 14. APRIL 2026 MAINNET ATTACK FINDINGS
+
+*Added: April 7, 2026 — Observations from live mainnet attacks across LW-Michigan2, LW-Arizona, and DO-Singapore nodes.*
+
+---
+
+### 14.1 ✅ FIXED — Sybil Subnet Attack (`154.217.246.0/24`)
+**Status:** **FIXED in v1.4.34** (commit d8ac235)
+
+**Attack:** A coordinated Sybil network of 15+ IP addresses from the `154.217.246.0/24` subnet repeatedly sent `MasternodeAnnouncement` messages claiming ownership of legitimate masternodes' collateral UTXOs. The attack generated 200–300 "Registry conflict" log lines per 2-second window with **zero penalty** — pure noise that masked real events in the log and consumed CPU/IO.
+
+**Observed Behavior:**
+- IPs involved: `154.217.246.19`, `.33`, `.34`, `.48`, `.67`, `.86`, `.105`, `.111`, `.130`, `.181`, `.187`, `.194`
+- All claiming outpoints anchored to legitimate nodes (e.g., `96d12d31...`, `45d22fd2...`, `0d16a18c...`)
+- `154.217.246.33` additionally operated as a pre-handshake prober (sending data before completing the handshake)
+- Free-tier nodes from the subnet performed rapid IP migrations to steal collateral, cycling between registrations
+
+**Root Cause:** The "Registry conflict" code path (`message_handler.rs` around the `can_evict == false` branch) had no rate limiting and recorded zero violations — attackers could spam it indefinitely at no cost.
+
+**Fix Applied:**
+- ✅ **Rate-limited WARN** to once per 5 minutes per peer IP (prevents log flooding)
+- ✅ **`record_violation()` on every rejection** — peer gets auto-banned after repeated attempts (3 violations → 1 min, 5 → 5 min, 10 → permanent)
+- ✅ **Coordinated /24 Sybil auto-detection** — if ≥5 unique IPs from the same /24 subnet claim the same collateral outpoint within 60 seconds, the entire /24 is automatically subnet-banned
+- ✅ **`bansubnet=` config option** — operators can statically ban entire CIDR ranges in `time.conf` (e.g., `bansubnet=154.217.246.0/24`); bans are enforced at the TCP accept level before any handshake
+
+**Code References:**
+- `src/network/message_handler.rs` — Registry conflict path with rate limiting, violation recording, and Sybil auto-detection
+- `src/network/blacklist.rs` — `add_subnet_ban()`, `in_banned_subnet()`, `subnet_ban_count()`
+- `src/config.rs` — `blacklisted_subnets` field; `bansubnet=` parser
+- `src/network/server.rs` — Subnet ban enforcement at TCP accept; `new_with_blacklist()` subnet init loop
+
+---
+
+### 14.2 ✅ FIXED — Pre-Handshake Prober Attack
+**Status:** **FIXED in v1.4.34** (commit 948041f)
+
+**Attack:** Nodes (notably `154.217.246.33`, `43.129.27.42`, `8.218.124.20`, `39.174.152.101`, `104.28.165.55`) connected every ~30 seconds and sent protocol data **before completing the handshake** (before the Handshake message exchange). This is a probing/fingerprinting technique and a resource exhaustion vector.
+
+**Observed Behavior (live logs):**
+```
+⚠️  154.217.246.33:59680 sent message before handshake - closing connection
+⚠️  Violation #5 from 154.217.246.33: Sent message before completing handshake
+🚫 Auto-banned 154.217.246.33 for 5 minutes (5 violations)
+```
+
+**Fix Applied:**
+- ✅ **`blacklist.record_violation()` called immediately** on every pre-handshake message (in addition to AI detection)
+- ✅ **Auto-banned** after 5 violations (5-minute ban); permanent after 10
+
+**Code References:**
+- `src/network/server.rs` — Pre-handshake violation handler (`record_violation()` on early message)
+- `src/ai/attack_detector.rs` — `record_pre_handshake_violation()`; ≥10 violations → `BlockPeer`
+
+---
+
+### 14.3 ✅ FIXED — Collateral Hijack / Free-Tier Squatting Attack
+**Status:** **FIXED in v1.4.34** (commits 948041f, d8ac235)
+
+**Attack:** Two variants were observed:
+
+**Variant A — Free-tier squatting on paid-tier collateral:** Nodes (`154.217.246.187`, `47.79.37.107`, `154.217.246.67`) repeatedly attempted to claim UTXOs belonging to paid Silver/Bronze masternodes (`165.84.215.117`, `64.91.224.76`) via gossip announcements. These attempts generated "Free-tier claim rejected" messages at 20+ per second with no per-IP penalty.
+
+**Variant B — Direct collateral hijack:** `47.79.39.125` (DO-Singapore) and `69.167.169.81` attempted to claim Silver-tier collateral UTXOs (`a579a134...`, `0d16a18c...`) belonging to other nodes, with no matching UTXO address proof.
+
+**Fix Applied:**
+- ✅ **`record_severe_violation()` on `CollateralAlreadyLocked`** — covers both free-tier rejection and hijack rejection paths (both return this error). First severe violation → 1-hour ban; second → permanent ban.
+- ✅ **`record_collateral_spoof_attempt()` in AI detector** — feeds attack pattern into coordinated detection
+
+**Code References:**
+- `src/network/message_handler.rs` — `CollateralAlreadyLocked` handlers for paid-tier and free-tier paths (lines ~3776 and ~3857)
+- `src/ai/attack_detector.rs` — `record_collateral_spoof_attempt()`
+- `src/masternode_registry.rs` — `Free-tier claim rejected` and `Collateral hijack rejected` paths (both return `CollateralAlreadyLocked`)
+
+---
+
+### 14.4 ✅ FIXED — GossipEvictionStorm Attack
+**Status:** **FIXED in v1.3.x** (pre-existing fix, observed working correctly in April 2026 logs)
+
+**Attack:** `69.167.168.176` triggered a `GossipEvictionStorm` — rapidly broadcasting masternode announcements to evict legitimate nodes from the registry by cycling through their collateral outpoints. This is a variant of the V4 eviction abuse.
+
+**Observed Behavior (live logs):**
+```
+Peer 69.167.168.176 is blacklisted: Temporarily banned for 3416s: SEVERE: GossipEvictionStorm
+[Outbound] REJECTING message from blacklisted peer 69.167.168.176
+```
+The node kept attempting to reconnect but was correctly rejected every time.
+
+**Fix Status:** Existing AI eviction storm detector is working. The 3416-second ban correctly persisted across reconnection attempts.
+
+**Code References:**
+- `src/ai/attack_detector.rs` — `GossipEvictionStorm` attack type
+- `src/network/server.rs` — Blacklist check at TCP accept and outbound message receipt
+
+---
+
+### 14.5 ✅ FIXED — Oversized Frame (Memory Exhaustion) Attack
+**Status:** **FIXED in v1.4.34** (commit pending in server.rs)
+
+**Attack:** A peer sent a TCP frame with a 4-byte length header claiming a body size of **2,823,396,163 bytes (~2.8 GB)**. Since only 4 bytes need to be sent (the length prefix), this is a trivially cheap attack. The previous code caught the oversize and disconnected the peer, but recorded **zero violation** — the attacker could reconnect and repeat indefinitely at no cost.
+
+**Observed (live log, line 373):**
+```
+Connection from 188.166.243.108:60880 ended: Frame too large: 2823396163 bytes (max: 8388608)
+```
+
+**Fix Applied:**
+- ✅ **`blacklist.record_violation()` on "Frame too large" error** — attacker is penalized: 3 oversized frames → 1-minute ban, 5 → 5-minute ban, 10 → permanent ban
+
+**Note:** In the observed instance, `188.166.243.108` is a legitimate node running an outdated binary with a serialization bug (not a malicious attacker). The fix is still correct: whitelisted IPs bypass the blacklist check, so the operator's own node will not be penalized.
+
+**Code References:**
+- `src/network/server.rs` — `Err(e)` branch in message read loop; `record_violation()` when `e.contains("Frame too large")`
+- `src/network/wire.rs` — `read_message()`: frame size check against `MAX_FRAME_SIZE` (8 MB)
+
+---
+
+### 14.6 ✅ FIXED — UTXO Lock Flood Attack
+**Status:** **FIXED in v1.4.33** (commit 3c8bc59)
+
+**Attack:** A peer sent an abnormally high number of `UTXOStateUpdate(Locked)` messages for the same transaction — far exceeding the number of inputs any legitimate transaction would have. This is a resource exhaustion attack targeting the UTXO manager lock/unlock machinery.
+
+**Attack Source:** `47.79.39.125`, `188.166.243.108` (old binary bug)
+
+**Fix Applied:**
+- ✅ **Per-connection per-TX UTXO lock counter** — max 50 lock messages per TX per connection
+- ✅ **AI auto-ban** via `record_utxo_lock_flood()` when threshold exceeded
+- ✅ **"Applied UTXO lock" logs downgraded** INFO → DEBUG to reduce log noise from legitimate traffic
+
+**Code References:**
+- `src/network/server.rs` — `peer_tx_lock_counts` HashMap; `MAX_UTXO_LOCKS_PER_TX = 50`
+- `src/ai/attack_detector.rs` — `UtxoLockFlood` attack type; `record_utxo_lock_flood()`
+
+---
+
+### 14.7 ⚠️ ONGOING — V4 Eviction Oscillation (Free-tier Re-squatting)
+**Status:** **PARTIALLY MITIGATED** — requires further hardening
+
+**Attack:** After a legitimate node uses a V4 collateral proof to evict a free-tier squatter, the squatter immediately re-registers via "free-tier IP migration" from a different IP in the same Sybil subnet. This creates an oscillation loop:
+
+1. `154.217.246.19` squats on `96d12d31...` (registered to `188.166.243.108`)
+2. `188.166.243.108` presents V4 proof → evicts squatter ✅
+3. V4 eviction storm cooldown prevents rapid re-eviction
+4. `154.217.246.19` re-migrates collateral from yet another squatter
+5. Repeat
+
+**Observed (live log):**
+```
+✅ V4 collateral proof verified: evicting squatter 154.217.246.19 → 188.166.243.108 for 96d12d31...
+🛡️ V4 eviction storm blocked for 96d12d31... (154.217.246.19 → 154.217.246.194) — cooldown active
+🔄 Free-tier IP migration: 96d12d31... moving from 154.217.246.19 to 69.167.169.81
+```
+
+**Current Mitigation:** Subnet ban of `154.217.246.0/24` (auto-triggered or manually via `bansubnet=`) stops the migration at the TCP level. With v1.4.34, these IPs accumulate violations faster and reach permanent ban sooner.
+
+**Remaining Gap:** The oscillation can still occur if the attacking subnet is not yet banned and the eviction storm cooldown prevents the legitimate owner from immediately reclaiming. The cooldown is necessary to prevent legitimate V4 eviction storms, creating tension.
+
+**Recommendation:**
+- Implement a **post-eviction re-registration delay** per outpoint: after a V4-proof eviction, the evicted IP should be barred from re-claiming the same outpoint for N minutes (without a new V4 proof)
+- This is distinct from the V4 eviction storm cooldown (which rate-limits *legitimate* nodes)
+
+---
+
 ## SUMMARY TABLE: ATTACK SURFACE ANALYSIS
 
 | Attack Vector | Mitigation Status | Risk Level | Notes |
@@ -934,7 +1097,7 @@ pub struct BlockHeader {
 | **Stake Grinding** | ✅ Mitigated | 🟢 Low | VRF-based leader selection implemented |
 | **Timestamp Attacks** | ✅ Mitigated | 🟢 Low | ±5s future tolerance, slot-time validation |
 | **Eclipse (Consensus)** | ✅ Mitigated | 🟢 Low | Multi-peer verification, fork detection |
-| **Sybil Attack** | ✅ Strong | 🟢 Low | Connection limits + stake requirements |
+| **Sybil Attack** | ✅ Strong | 🟢 Low | Connection limits + stake requirements + /24 subnet auto-ban |
 | **DDoS** | ✅ Strong | 🟢 Low | Comprehensive rate limiting |
 | **Eclipse (Network)** | ✅ Mitigated | 🟢 Low | Diverse peer selection, masternode slots |
 | **BGP Hijacking** | ✅ Mitigated | 🟢 Low | TLS enabled by default on P2P connections |
@@ -947,6 +1110,13 @@ pub struct BlockHeader {
 | **Signature Forgery** | ✅ Impossible | 🟢 Low | Ed25519 cryptographically secure |
 | **Invalid Block Consensus** | ✅ Fixed | 🟢 Low | Pre-vote validation (Jan 19, 2026) |
 | **Block Withholding** | ✅ Mitigated | 🟢 Low | Deterministic slots, liveness timeout |
+| **Collateral Hijack** | ✅ Fixed | 🟢 Low | V4 proof required; violations auto-ban attacker (Apr 2026) |
+| **Sybil /24 Subnet Attack** | ✅ Fixed | 🟢 Low | Auto-banned on 5+ IPs same outpoint in 60s (Apr 2026) |
+| **Pre-Handshake Prober** | ✅ Fixed | 🟢 Low | Immediate violation + AI ban (Apr 2026) |
+| **GossipEvictionStorm** | ✅ Fixed | 🟢 Low | AI detection + timed ban, confirmed working live |
+| **UTXO Lock Flood** | ✅ Fixed | 🟢 Low | 50-lock/TX cap per connection + AI auto-ban (Apr 2026) |
+| **Oversized Frame (DoS)** | ✅ Fixed | 🟢 Low | Frame >8MB → disconnect + violation (Apr 2026) |
+| **V4 Eviction Oscillation** | ⚠️ Partial | 🟡 Medium | Subnet ban helps; post-eviction re-registration delay recommended |
 | **Double Block Rewards** | ✅ Fixed | 🟢 Low | Strict validation (Jan 19, 2026) |
 | **Hash Collision** | ✅ Secure | 🟢 Low | SHA256 collision-resistant |
 | **Quantum Computing** | ⚠️ Future Risk | 🟡 Medium | Industry-standard, 10-20 year horizon |
