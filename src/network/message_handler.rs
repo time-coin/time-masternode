@@ -3152,11 +3152,20 @@ impl MessageHandler {
                                         } else if claimant_matches_utxo
                                             && !squatter_matches_utxo
                                         {
-                                            // Tier 2: address-match beats address-mismatch squatter.
-                                            // SAFETY: never evict the local node via Tier 2 — a remote
-                                            // peer that knows the UTXO's on-chain address could spoof
-                                            // reward_address to match it and displace us.  Require Tier 1
-                                            // (V4 cryptographic proof) to displace the local node.
+                                            // Tier 2: address-match beats address-mismatch squatter,
+                                            // but ONLY for Free-tier squatters.
+                                            //
+                                            // SAFETY 1: never evict the local node via Tier 2 — a
+                                            // remote peer that knows the UTXO's on-chain address could
+                                            // spoof reward_address to match it and displace us.
+                                            //
+                                            // SAFETY 2: never evict any paid-tier squatter via Tier 2.
+                                            // The UTXO output address is publicly visible on-chain; any
+                                            // node can copy it into reward_address.  Additionally, when
+                                            // a paid-tier node changes collateral (e.g. Bronze → Silver),
+                                            // the old outpoint briefly stays in the UTXOManager with a
+                                            // mismatched reward_address — Tier 2 must not steal it.
+                                            // Only V4 cryptographic proof can displace a paid-tier node.
                                             let is_local_squatter = context
                                                 .node_masternode_address
                                                 .as_deref()
@@ -3171,16 +3180,41 @@ impl MessageHandler {
                                                 );
                                                 false
                                             } else {
-                                                info!(
-                                                    "✅ [{}] Address-match eviction: {} has \
-                                                     reward_address == utxo.address for {} — \
-                                                     evicting squatter {} (mismatched address)",
-                                                    self.direction,
-                                                    peer_ip,
-                                                    outpoint,
-                                                    squatter_ip
-                                                );
-                                                true
+                                                let squatter_tier = context
+                                                    .masternode_registry
+                                                    .get(&squatter_ip)
+                                                    .await
+                                                    .map(|info| info.masternode.tier)
+                                                    .unwrap_or(
+                                                        crate::types::MasternodeTier::Free,
+                                                    );
+                                                if squatter_tier
+                                                    != crate::types::MasternodeTier::Free
+                                                {
+                                                    warn!(
+                                                        "🛡️ [{}] Blocked Tier 2 eviction of \
+                                                         paid-tier squatter {}: {} tried to \
+                                                         claim {} via reward_address match — \
+                                                         V4 proof required",
+                                                        self.direction,
+                                                        squatter_ip,
+                                                        peer_ip,
+                                                        outpoint
+                                                    );
+                                                    false
+                                                } else {
+                                                    info!(
+                                                        "✅ [{}] Address-match eviction: {} has \
+                                                         reward_address == utxo.address for {} — \
+                                                         evicting Free-tier squatter {} \
+                                                         (mismatched address)",
+                                                        self.direction,
+                                                        peer_ip,
+                                                        outpoint,
+                                                        squatter_ip
+                                                    );
+                                                    true
+                                                }
                                             }
                                         } else {
                                             false
@@ -3381,8 +3415,11 @@ impl MessageHandler {
                                     }
                                 }
                             } else if claimant_matches_utxo && !squatter_matches_utxo {
-                                // SAFETY: never evict the local node via Tier 2 — see comment
+                                // SAFETY 1: never evict the local node via Tier 2 — see comment
                                 // in the UTXOManager-locked path above.
+                                // SAFETY 2: never evict a paid-tier squatter via Tier 2 — same
+                                // rationale: UTXO output address is public; only V4 proof can
+                                // displace a paid-tier canonical holder.
                                 let is_local_squatter = context
                                     .node_masternode_address
                                     .as_deref()
@@ -3397,13 +3434,33 @@ impl MessageHandler {
                                     );
                                     false
                                 } else {
-                                    info!(
-                                        "✅ [{}] Address-match eviction (registry): {} has \
-                                         reward_address == utxo.address for {} — evicting \
-                                         squatter {} (UTXOManager lock absent, mismatched address)",
-                                        self.direction, peer_ip, outpoint, registry_squatter
-                                    );
-                                    true
+                                    let squatter_tier = context
+                                        .masternode_registry
+                                        .get(&registry_squatter)
+                                        .await
+                                        .map(|info| info.masternode.tier)
+                                        .unwrap_or(crate::types::MasternodeTier::Free);
+                                    if squatter_tier != crate::types::MasternodeTier::Free {
+                                        warn!(
+                                            "🛡️ [{}] Blocked Tier 2 eviction of paid-tier \
+                                             squatter {} (registry): {} tried to claim {} via \
+                                             reward_address match — V4 proof required",
+                                            self.direction,
+                                            registry_squatter,
+                                            peer_ip,
+                                            outpoint
+                                        );
+                                        false
+                                    } else {
+                                        info!(
+                                            "✅ [{}] Address-match eviction (registry): {} has \
+                                             reward_address == utxo.address for {} — evicting \
+                                             Free-tier squatter {} \
+                                             (UTXOManager lock absent, mismatched address)",
+                                            self.direction, peer_ip, outpoint, registry_squatter
+                                        );
+                                        true
+                                    }
                                 }
                             } else {
                                 false
