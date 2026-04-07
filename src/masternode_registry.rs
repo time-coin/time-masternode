@@ -179,6 +179,12 @@ pub struct MasternodeRegistry {
     /// Prevents rapid flip-flop when two peers gossip the same collateral with different IPs.
     /// Key: "<txid>:<vout>", Value: Unix timestamp of the last accepted migration.
     collateral_migration_times: Arc<DashMap<String, u64>>,
+    /// Per-outpoint timestamp of the most recent V4-proof eviction.
+    /// Any free-tier IP migration targeting the same outpoint is blocked for
+    /// POST_EVICTION_LOCKOUT_SECS (600 s) after a V4 eviction, closing the
+    /// re-squatting oscillation loop (Attack Vector 14).
+    /// Key: "<txid>:<vout>", Value: Unix timestamp of the eviction.
+    post_eviction_lockout: Arc<DashMap<String, u64>>,
     /// Optional reference to the UTXO manager, used for collateral ownership verification.
     utxo_manager: Arc<RwLock<Option<Arc<crate::utxo_manager::UTXOStateManager>>>>,
 }
@@ -298,6 +304,7 @@ impl MasternodeRegistry {
             pending_collateral_locks: Arc::new(parking_lot::Mutex::new(Vec::new())),
             collateral_miss_counts: Arc::new(DashMap::new()),
             collateral_migration_times: Arc::new(DashMap::new()),
+            post_eviction_lockout: Arc::new(DashMap::new()),
             utxo_manager: Arc::new(RwLock::new(None)),
         }
     }
@@ -310,6 +317,23 @@ impl MasternodeRegistry {
     ) {
         *self.utxo_manager.write().await = Some(utxo_manager);
     }
+
+    /// Record that a V4-proof eviction just occurred for `outpoint_key`
+    /// (formatted as `"<txid_hex>:<vout>"`).
+    ///
+    /// Any free-tier IP migration targeting the same outpoint is blocked for
+    /// 10 minutes after this call, preventing the evicted squatter (or a
+    /// confederate) from immediately re-squatting under a different IP.
+    pub fn record_v4_eviction(&self, outpoint_key: &str) {
+        let now = Self::now();
+        self.post_eviction_lockout
+            .insert(outpoint_key.to_string(), now);
+        tracing::debug!(
+            "Post-eviction lockout armed for {} (10 min)",
+            outpoint_key
+        );
+    }
+
 
     fn now() -> u64 {
         SystemTime::now()
@@ -674,6 +698,28 @@ impl MasternodeRegistry {
                         outpoint
                     );
                     return Err(RegistryError::InvalidCollateral);
+                }
+
+                // Post-eviction lockout: if a V4-proof eviction recently removed a squatter
+                // from this outpoint, block ALL free-tier re-migrations to it for 10 minutes.
+                // This closes the oscillation loop (AV14) where an attacker immediately
+                // re-squats under a confederate IP after being evicted by the legitimate owner.
+                const POST_EVICTION_LOCKOUT_SECS: u64 = 600;
+                if let Some(evicted_at) = self.post_eviction_lockout.get(&outpoint_key) {
+                    let elapsed = now.saturating_sub(*evicted_at);
+                    if elapsed < POST_EVICTION_LOCKOUT_SECS {
+                        let remaining = POST_EVICTION_LOCKOUT_SECS - elapsed;
+                        tracing::warn!(
+                            "🛡️ Post-eviction lockout: {} tried to re-squat {} \
+                             via free-tier migration {}s after V4 eviction \
+                             ({}s remaining — use V4 proof to override)",
+                            masternode.address,
+                            outpoint,
+                            elapsed,
+                            remaining
+                        );
+                        return Err(RegistryError::InvalidCollateral);
+                    }
                 }
 
                 // Cooldown: refuse to migrate the same outpoint more than once per 60 s.
@@ -3266,6 +3312,7 @@ impl Clone for MasternodeRegistry {
             pending_collateral_locks: self.pending_collateral_locks.clone(),
             collateral_miss_counts: self.collateral_miss_counts.clone(),
             collateral_migration_times: self.collateral_migration_times.clone(),
+            post_eviction_lockout: self.post_eviction_lockout.clone(),
             utxo_manager: self.utxo_manager.clone(),
         }
     }

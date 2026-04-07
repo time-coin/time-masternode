@@ -3284,6 +3284,17 @@ impl MessageHandler {
                                                     outpoint.to_string(),
                                                     std::time::Instant::now(),
                                                 );
+                                                // Arm the post-eviction lockout so the squatter
+                                                // cannot immediately re-squat via free-tier migration
+                                                // (Attack Vector 14 — V4 eviction oscillation).
+                                                let eviction_key = format!(
+                                                    "{}:{}",
+                                                    hex::encode(outpoint.txid),
+                                                    outpoint.vout
+                                                );
+                                                context
+                                                    .masternode_registry
+                                                    .record_v4_eviction(&eviction_key);
                                                 info!(
                                                     "✅ [{}] V4 collateral proof verified: evicting \
                                                      squatter {} and registering legitimate owner {} \
@@ -3530,6 +3541,15 @@ impl MessageHandler {
                                         outpoint.to_string(),
                                         std::time::Instant::now(),
                                     );
+                                    // Arm post-eviction lockout (AV14).
+                                    let eviction_key = format!(
+                                        "{}:{}",
+                                        hex::encode(outpoint.txid),
+                                        outpoint.vout
+                                    );
+                                    context
+                                        .masternode_registry
+                                        .record_v4_eviction(&eviction_key);
                                     info!(
                                         "✅ [{}] V4 proof evicts registry squatter {} for {} \
                                          (UTXOManager lock was absent — registry-only eviction)",
