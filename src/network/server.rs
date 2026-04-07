@@ -592,6 +592,13 @@ async fn handle_peer(
             }
             Err(e) => {
                 tracing::warn!("🚫 TLS handshake failed for {}: {}", peer.addr, e);
+                // Charge a violation so repeat offenders accumulate bans.
+                // Without this, an attacker can flood TLS connections at zero cost —
+                // each attempt consumes a tokio task + TLS negotiation with no penalty.
+                blacklist
+                    .write()
+                    .await
+                    .record_violation(ip, &format!("TLS handshake failed: {}", e));
                 return Ok(());
             }
         }
@@ -644,6 +651,11 @@ async fn handle_peer(
     const MAX_UTXO_LOCKS_PER_TX: u32 = 50;
 
     let magic_bytes = network_type.magic_bytes();
+
+    // A connection that completes TLS but never sends a Handshake message holds an open
+    // tokio task and a connection slot indefinitely.  Fire a violation and close after 10s.
+    let handshake_timeout = tokio::time::sleep(tokio::time::Duration::from_secs(10));
+    tokio::pin!(handshake_timeout);
 
     loop {
         tokio::select! {
@@ -2393,6 +2405,21 @@ async fn handle_peer(
                     }
                     Err(_) => break,
                 }
+            }
+
+            // Close connections that complete TLS but never send a Handshake message.
+            // The guard disables this arm after the handshake succeeds so there is no
+            // ongoing per-iteration overhead once the connection is fully established.
+            _ = &mut handshake_timeout, if !handshake_done => {
+                tracing::warn!(
+                    "⏰ Pre-handshake timeout from {} — no handshake received within 10s, closing",
+                    peer.addr
+                );
+                blacklist.write().await.record_violation(
+                    ip,
+                    "Pre-handshake timeout: no handshake message within 10s",
+                );
+                break;
             }
         }
     }

@@ -5995,6 +5995,97 @@ impl Blockchain {
         }
     }
 
+    /// Compute the total transaction fees for a block by resolving each input UTXO's
+    /// value from the blockchain and subtracting total outputs.
+    ///
+    /// Returns `Some(fees)` when all UTXOs are resolved, `None` when any UTXO cannot
+    /// be located (transient sync gap or index miss).  Callers determine the policy:
+    /// - `validate_block_rewards()`: skip the reward check entirely (safe — coinbase
+    ///   consistency already bounds the value)
+    /// - `validate_proposal_rewards()`: fall back to a header-derived upper bound so
+    ///   that honest proposals with fee-bearing transactions are not falsely rejected
+    async fn compute_block_fees(&self, block: &Block) -> Option<u64> {
+        let mut total_fees = 0u64;
+        for tx in block.transactions.iter().skip(2) {
+            let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+            let mut input_sum: u64 = 0;
+            for input in &tx.inputs {
+                let spent_txid = input.previous_output.txid;
+                let spent_vout = input.previous_output.vout;
+
+                // Try tx_index first for O(1) lookup.
+                // CRITICAL: verify src_tx.txid() == spent_txid — stale index entries
+                // (left by incomplete rollbacks) may point to the wrong transaction.
+                let mut found = false;
+                if let Some(ref txi) = self.tx_index {
+                    if let Some(loc) = txi.get_location(&spent_txid) {
+                        if let Ok(src_block) = self.get_block(loc.block_height) {
+                            if let Some(src_tx) = src_block.transactions.get(loc.tx_index) {
+                                if src_tx.txid() == spent_txid {
+                                    if let Some(output) = src_tx.outputs.get(spent_vout as usize) {
+                                        input_sum += output.value;
+                                        found = true;
+                                    }
+                                }
+                                // txid mismatch → stale entry; fall through to linear search
+                            }
+                        }
+                    }
+                }
+
+                // Fallback: linear search through recent blocks
+                if !found {
+                    let search_limit = block.header.height.min(1000);
+                    for search_height in
+                        (0..block.header.height).rev().take(search_limit as usize)
+                    {
+                        if let Ok(search_block) = self.get_block(search_height) {
+                            for search_tx in &search_block.transactions {
+                                if search_tx.txid() == spent_txid {
+                                    if let Some(output) =
+                                        search_tx.outputs.get(spent_vout as usize)
+                                    {
+                                        input_sum += output.value;
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if found {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if !found {
+                    tracing::debug!(
+                        "UTXO not found for fee computation: tx {} input {}:{} — skipping fee check for block {}",
+                        hex::encode(&tx.txid()[..8]),
+                        hex::encode(&spent_txid[..8]),
+                        spent_vout,
+                        block.header.height,
+                    );
+                    return None;
+                }
+            }
+
+            if input_sum >= output_sum {
+                total_fees += input_sum - output_sum;
+            } else {
+                tracing::debug!(
+                    "Transaction {} in block {} has outputs ({}) exceeding inputs ({}) — skipping fee check",
+                    hex::encode(&tx.txid()[..8]),
+                    block.header.height,
+                    output_sum,
+                    input_sum,
+                );
+                return None;
+            }
+        }
+        Some(total_fees)
+    }
+
     /// Validate block rewards are correct and not double-counted.
     /// Also verifies the 35/65 split and per-tier pool distribution through
     /// consensus: each node independently re-derives expected rewards from chain data.
@@ -6036,96 +6127,12 @@ impl Blockchain {
         }
 
         // CRITICAL: Validate the block_reward is correct (base reward + fees from THIS block's txs)
-        // Calculate fees from the current block's user transactions (indices 2+)
-        // This mirrors the block producer's logic in produce_block_at_height()
-        let mut calculated_fees = 0u64;
-        for tx in block.transactions.iter().skip(2) {
-            // Calculate output sum
-            let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
-
-            // Calculate input sum by looking up each spent UTXO value from blockchain
-            let mut input_sum: u64 = 0;
-            let mut all_found = true;
-            for input in &tx.inputs {
-                let spent_txid = input.previous_output.txid;
-                let spent_vout = input.previous_output.vout;
-
-                // Try tx_index first for O(1) lookup.
-                // CRITICAL: Always verify src_tx.txid() == spent_txid after the lookup.
-                // Stale tx_index entries (left by incomplete rollbacks) may point to a
-                // different transaction at the same block/index position, which would
-                // return the wrong output value and cause fee validation to fail.
-                let mut found = false;
-                if let Some(ref txi) = self.tx_index {
-                    if let Some(loc) = txi.get_location(&spent_txid) {
-                        if let Ok(src_block) = self.get_block(loc.block_height) {
-                            if let Some(src_tx) = src_block.transactions.get(loc.tx_index) {
-                                if src_tx.txid() == spent_txid {
-                                    if let Some(output) = src_tx.outputs.get(spent_vout as usize) {
-                                        input_sum += output.value;
-                                        found = true;
-                                    }
-                                }
-                                // txid mismatch → stale entry; fall through to linear search
-                            }
-                        }
-                    }
-                }
-
-                // Fallback: linear search through recent blocks
-                if !found {
-                    let search_limit = block.header.height.min(1000);
-                    for search_height in (0..block.header.height).rev().take(search_limit as usize)
-                    {
-                        if let Ok(search_block) = self.get_block(search_height) {
-                            for search_tx in &search_block.transactions {
-                                if search_tx.txid() == spent_txid {
-                                    if let Some(output) = search_tx.outputs.get(spent_vout as usize)
-                                    {
-                                        input_sum += output.value;
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            if found {
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if !found {
-                    tracing::debug!(
-                        "Could not find UTXO for fee validation in tx {} (tx {}, vout {}), skipping fee check",
-                        hex::encode(&tx.txid()[..8]),
-                        hex::encode(&spent_txid[..8]),
-                        spent_vout
-                    );
-                    all_found = false;
-                    break;
-                }
-            }
-
-            if !all_found {
-                // Can't validate fees without all UTXO data - skip
-                return Ok(());
-            }
-
-            // Fee for this transaction = inputs - outputs
-            if input_sum >= output_sum {
-                calculated_fees += input_sum - output_sum;
-            } else {
-                tracing::debug!(
-                    "Transaction {} in block {} has outputs ({}) exceeding inputs ({}), skipping fee validation",
-                    hex::encode(&tx.txid()[..8]),
-                    block.header.height,
-                    output_sum,
-                    input_sum
-                );
-                return Ok(());
-            }
-        }
+        // Delegate to the shared helper; skip the reward check if any UTXO is unavailable
+        // (the coinbase consistency check above already bounds the coinbase amount).
+        let calculated_fees = match self.compute_block_fees(block).await {
+            Some(fees) => fees,
+            None => return Ok(()), // UTXO data unavailable — skip downstream fee checks
+        };
 
         // Verify block_reward matches base reward + calculated fees - treasury allocation
         let treasury_share = constants::blockchain::TREASURY_POOL_SATOSHIS;
@@ -6951,9 +6958,28 @@ impl Blockchain {
             }
         }
 
-        // Run the pool distribution check with 0 fees as a baseline.
-        // If the check fails, record a violation and reject.
-        if let Err(e) = self.validate_pool_distribution(block, 0).await {
+        // Compute fees from the block's transactions using UTXO lookups, exactly the same
+        // way validate_block_rewards() does.  If any UTXO is missing (transient sync gap),
+        // fall back to deriving the fee ceiling from the committed block_reward field:
+        //   fees = block_reward + treasury − base_reward
+        // This is safe: an inflated total_fees would make block_reward inconsistent, which
+        // validate_block_rewards() catches at add_block() time.  The proposal check is a
+        // best-effort pre-vote gate — using 0 here was falsely rejecting every honest
+        // block that contained fee-bearing transactions, causing 20s stalls at each block.
+        let calculated_fees = match self.compute_block_fees(block).await {
+            Some(fees) => fees,
+            None => {
+                use crate::constants::blockchain::{BLOCK_REWARD_SATOSHIS, TREASURY_POOL_SATOSHIS};
+                // fees = block_reward − (base_reward − treasury)
+                block
+                    .header
+                    .block_reward
+                    .saturating_add(TREASURY_POOL_SATOSHIS)
+                    .saturating_sub(BLOCK_REWARD_SATOSHIS)
+            }
+        };
+
+        if let Err(e) = self.validate_pool_distribution(block, calculated_fees).await {
             if !producer_addr.is_empty() {
                 self.record_reward_violation(producer_addr).await;
             }

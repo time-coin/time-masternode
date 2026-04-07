@@ -1041,6 +1041,7 @@ mod tests {
             value: 1000,
             script_pubkey: vec![1, 2, 3],
             address: format!("test_address_{}", seed),
+            masternode_key: None,
         }
     }
 

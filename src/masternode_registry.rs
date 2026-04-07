@@ -3459,6 +3459,7 @@ mod tests {
             value: amount,
             script_pubkey: vec![1, 2, 3],
             address: format!("test_address_{}", index),
+            masternode_key: None,
         };
         manager.add_utxo(utxo).await.unwrap();
     }
