@@ -5,6 +5,9 @@
 # is de-registered (evicted by an attacker, network partition, or crash),
 # automatically runs `systemctl restart timed` so the daemon re-registers.
 #
+# "Not a masternode" status is treated as de-registration only when
+# masternode=1 is present in time.conf; if not configured it is skipped.
+#
 # Design:
 #   - Polls `masternodestatus` every POLL_INTERVAL seconds
 #   - Requires FAIL_THRESHOLD consecutive "not active" readings before
@@ -156,12 +159,24 @@ while true; do
             [ "$fail_streak" -gt 0 ] && log "Masternode active again — clearing failure streak"
             fail_streak=0
         elif [ "$mn_status" = "Not a masternode" ]; then
-            # Daemon reports it is not configured as a masternode at all.
-            # This normally means masternode=0 in time.conf; we do NOT
-            # restart in that case — the operator may have intentionally
-            # disabled masternode mode.
-            logw "Node reports 'Not a masternode' — not a de-registration event; check time.conf"
-            fail_streak=0
+            # The daemon says it is not registered.  This can mean either:
+            #   (a) masternode=0 in time.conf  → operator intentionally disabled; don't restart
+            #   (b) masternode=1 but the node was de-registered by an attack → must restart
+            # Distinguish by checking the config file directly.
+            conf_file=""
+            if [ "$NETWORK" = "testnet" ]; then
+                conf_file="${HOME}/.timecoin/testnet/time.conf"
+            else
+                conf_file="${HOME}/.timecoin/time.conf"
+            fi
+            # Accept both "masternode=1" and "masternode = 1" (with spaces)
+            if grep -qsE '^\s*masternode\s*=\s*1' "$conf_file" 2>/dev/null; then
+                logw "Node de-registered (config has masternode=1 but status='Not a masternode') — treating as de-registration, streak: $((fail_streak + 1))/$FAIL_THRESHOLD"
+                fail_streak=$(( fail_streak + 1 ))
+            else
+                logw "Node reports 'Not a masternode' and masternode is not enabled in config — not a de-registration event; check time.conf"
+                fail_streak=0
+            fi
         else
             # Registered but is_active=false, or unrecognized status.
             logw "Masternode NOT active (status=${mn_status:-unknown} is_active=${is_active:-unknown}) — streak: $((fail_streak + 1))/$FAIL_THRESHOLD"
