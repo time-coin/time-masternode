@@ -185,6 +185,24 @@ enum Commands {
     #[command(next_help_heading = "Network")]
     GetPeerInfo,
 
+    /// List all banned IPs (permanent and temporary) with reasons
+    #[command(next_help_heading = "Network")]
+    GetBlacklist,
+
+    /// Remove an IP from the ban list and clear its violations
+    #[command(next_help_heading = "Network")]
+    Unban {
+        /// IP address to unban (e.g. 154.217.246.86)
+        ip: String,
+    },
+
+    /// Add an IP to the whitelist (exempt from bans and rate limits; must be a registered network peer)
+    #[command(next_help_heading = "Network")]
+    AddWhitelist {
+        /// IP address to whitelist (e.g. 69.167.168.176)
+        ip: String,
+    },
+
     // ============================================================
     // WALLET COMMANDS
     // ============================================================
@@ -937,6 +955,9 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::GetBlockHash { height } => ("getblockhash", json!([height])),
         Commands::GetNetworkInfo => ("getnetworkinfo", json!([])),
         Commands::GetPeerInfo => ("getpeerinfo", json!([])),
+        Commands::GetBlacklist => ("getblacklist", json!([])),
+        Commands::Unban { ip } => ("unban", json!([ip])),
+        Commands::AddWhitelist { ip } => ("addwhitelist", json!([ip])),
         Commands::GetTxOutSetInfo => ("gettxoutsetinfo", json!([])),
         Commands::GetTxOut { txid, vout } => ("gettxout", json!([txid, vout])),
         Commands::GetTransaction { txid } => ("gettransaction", json!([txid])),
@@ -1469,6 +1490,67 @@ fn print_human_readable(
                 }
                 println!("\nTotal Peers: {}", peers.len());
             }
+        }
+        Commands::GetBlacklist => {
+            let summary = result.get("summary");
+            if let Some(s) = summary {
+                let perm = s.get("permanent_bans").and_then(|v| v.as_u64()).unwrap_or(0);
+                let temp = s.get("temporary_bans").and_then(|v| v.as_u64()).unwrap_or(0);
+                let viol = s.get("active_violations").and_then(|v| v.as_u64()).unwrap_or(0);
+                let wl   = s.get("whitelisted").and_then(|v| v.as_u64()).unwrap_or(0);
+                println!("=== Blacklist Summary ===");
+                println!("Permanent bans:   {}", perm);
+                println!("Temporary bans:   {}", temp);
+                println!("Active violators: {}", viol);
+                println!("Whitelisted:      {}", wl);
+            }
+            if let Some(perms) = result.get("permanent").and_then(|v| v.as_array()) {
+                if !perms.is_empty() {
+                    println!("\n--- Permanent Bans ---");
+                    for entry in perms {
+                        let ip     = entry.get("ip").and_then(|v| v.as_str()).unwrap_or("");
+                        let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                        println!("  {:<20}  {}", ip, reason);
+                    }
+                }
+            }
+            if let Some(temps) = result.get("temporary").and_then(|v| v.as_array()) {
+                if !temps.is_empty() {
+                    println!("\n--- Temporary Bans ---");
+                    for entry in temps {
+                        let ip   = entry.get("ip").and_then(|v| v.as_str()).unwrap_or("");
+                        let secs = entry.get("remaining_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                        println!("  {:<20}  {}s remaining  {}", ip, secs, reason);
+                    }
+                }
+            }
+            if let Some(subnets) = result.get("subnets").and_then(|v| v.as_array()) {
+                if !subnets.is_empty() {
+                    println!("\n--- Subnet Bans ---");
+                    for entry in subnets {
+                        let cidr   = entry.get("subnet").and_then(|v| v.as_str()).unwrap_or("");
+                        let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                        println!("  {:<20}  {}", cidr, reason);
+                    }
+                }
+            }
+            if let Some(viols) = result.get("violations").and_then(|v| v.as_array()) {
+                if !viols.is_empty() {
+                    println!("\n--- Top Violation Counts ---");
+                    for entry in viols.iter().take(20) {
+                        let ip    = entry.get("ip").and_then(|v| v.as_str()).unwrap_or("");
+                        let count = entry.get("violations").and_then(|v| v.as_u64()).unwrap_or(0);
+                        println!("  {:<20}  {} violation(s)", ip, count);
+                    }
+                }
+            }
+        }
+        Commands::Unban { .. } | Commands::AddWhitelist { .. } => {
+            let msg = result.get("message").and_then(|v| v.as_str())
+                .or_else(|| result.get("result").and_then(|v| v.as_str()))
+                .unwrap_or("Done");
+            println!("{}", msg);
         }
         Commands::Uptime => {
             let seconds = result.as_u64().unwrap_or(0);

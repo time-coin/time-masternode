@@ -222,6 +222,58 @@ impl IPBlacklist {
         )
     }
 
+    /// List all active bans with details.
+    /// Returns (permanent_bans, temp_bans_with_remaining_secs, subnet_bans, violations_per_ip)
+    pub fn list_bans(
+        &self,
+    ) -> (
+        Vec<(String, String)>,                 // (ip, reason)
+        Vec<(String, u64, String)>,            // (ip, remaining_secs, reason)
+        Vec<(String, String)>,                 // (cidr, reason)
+        Vec<(String, u32)>,                    // (ip, violation_count)
+    ) {
+        let now = Instant::now();
+
+        let permanent: Vec<(String, String)> = self
+            .permanent_blacklist
+            .iter()
+            .map(|(ip, reason)| (ip.to_string(), reason.clone()))
+            .collect();
+
+        let temporary: Vec<(String, u64, String)> = self
+            .temp_blacklist
+            .iter()
+            .filter(|(_, (expiry, _))| now < *expiry)
+            .map(|(ip, (expiry, reason))| {
+                let remaining = expiry.duration_since(now).as_secs();
+                (ip.to_string(), remaining, reason.clone())
+            })
+            .collect();
+
+        let subnets: Vec<(String, String)> = self
+            .subnet_blacklist
+            .iter()
+            .map(|(net, prefix, reason)| (format!("{}/{}", net, prefix), reason.clone()))
+            .collect();
+
+        let violations: Vec<(String, u32)> = self
+            .violations
+            .iter()
+            .map(|(ip, (count, _))| (ip.to_string(), *count))
+            .collect();
+
+        (permanent, temporary, subnets, violations)
+    }
+
+    /// Remove an IP from permanent and temporary bans, and clear its violations.
+    /// Returns true if the IP was actually banned (and is now cleared).
+    pub fn unban(&mut self, ip: IpAddr) -> bool {
+        let was_banned = self.permanent_blacklist.remove(&ip).is_some()
+            | self.temp_blacklist.remove(&ip).is_some();
+        self.violations.remove(&ip);
+        was_banned
+    }
+
     /// Record a SEVERE violation (corrupted blocks, invalid chain data, reorg attacks)
     /// These are treated more harshly - immediate 1-hour ban on first offense,
     /// permanent ban on second offense

@@ -213,6 +213,7 @@ impl RpcHandler {
             "addwhitelist" => self.add_whitelist(&params_array).await,
             "removewhitelist" => self.remove_whitelist(&params_array).await,
             "getblacklist" => self.get_blacklist().await,
+            "unban" => self.unban(&params_array).await,
             "listreceivedbyaddress" => self.list_received_by_address(&params_array).await,
             "listtransactions" => self.list_transactions(&params_array).await,
             "listtransactionsmulti" => self.list_transactions_multi(&params_array).await,
@@ -3996,14 +3997,66 @@ impl RpcHandler {
     /// Get blacklist statistics
     async fn get_blacklist(&self) -> Result<Value, RpcError> {
         let bl = self.blacklist.read().await;
-        let (permanent, temporary, violations, whitelist) = bl.stats();
+        let (permanent, temporary, subnets, violations) = bl.list_bans();
+        let (perm_count, temp_count, viol_count, wl_count) = bl.stats();
+
+        let permanent_list: Vec<Value> = permanent
+            .into_iter()
+            .map(|(ip, reason)| json!({"ip": ip, "reason": reason}))
+            .collect();
+
+        let temporary_list: Vec<Value> = temporary
+            .into_iter()
+            .map(|(ip, secs, reason)| json!({"ip": ip, "remaining_secs": secs, "reason": reason}))
+            .collect();
+
+        let subnet_list: Vec<Value> = subnets
+            .into_iter()
+            .map(|(cidr, reason)| json!({"subnet": cidr, "reason": reason}))
+            .collect();
+
+        let violations_list: Vec<Value> = {
+            let mut v = violations;
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            v.into_iter()
+                .map(|(ip, count)| json!({"ip": ip, "violations": count}))
+                .collect()
+        };
 
         Ok(json!({
-            "permanent_bans": permanent,
-            "temporary_bans": temporary,
-            "active_violations": violations,
-            "whitelisted": whitelist
+            "summary": {
+                "permanent_bans": perm_count,
+                "temporary_bans": temp_count,
+                "active_violations": viol_count,
+                "whitelisted": wl_count
+            },
+            "permanent": permanent_list,
+            "temporary": temporary_list,
+            "subnets": subnet_list,
+            "violations": violations_list
         }))
+    }
+
+    async fn unban(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let ip_str = params.first().and_then(|v| v.as_str()).ok_or(RpcError {
+            code: -32602,
+            message: "IP address parameter required".to_string(),
+        })?;
+
+        let ip_addr = ip_str.parse::<std::net::IpAddr>().map_err(|_| RpcError {
+            code: -32602,
+            message: format!("Invalid IP address: {}", ip_str),
+        })?;
+
+        let mut bl = self.blacklist.write().await;
+        let was_banned = bl.unban(ip_addr);
+
+        if was_banned {
+            tracing::info!("🔓 RPC: Unbanned {}", ip_addr);
+            Ok(json!({"result": "success", "ip": ip_str, "message": "IP removed from ban list and violations cleared"}))
+        } else {
+            Ok(json!({"result": "not_banned", "ip": ip_str, "message": "IP was not in the ban list (violations cleared anyway)"}))
+        }
     }
 
     async fn get_best_block_hash(&self) -> Result<Value, RpcError> {
