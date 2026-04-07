@@ -19,7 +19,7 @@ use crate::utxo_manager::UTXOStateManager;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 /// Global rate limiter for fork alert sending, keyed by peer IP.
@@ -258,6 +258,10 @@ pub struct MessageHandler {
     peer_ip: String,
     direction: ConnectionDirection,
     recent_requests: Arc<RwLock<Vec<GetBlocksRequest>>>,
+    /// AV28: sliding window for unregistered-voter vote rejection counts.
+    /// Tracks (count, window_start). When count reaches 10 within 60 s, one
+    /// violation is recorded against the peer and the counter resets.
+    unregistered_vote_window: Arc<Mutex<(u32, Instant)>>,
 }
 
 impl MessageHandler {
@@ -267,6 +271,7 @@ impl MessageHandler {
             peer_ip,
             direction,
             recent_requests: Arc::new(RwLock::new(Vec::new())),
+            unregistered_vote_window: Arc::new(Mutex::new((0, Instant::now()))),
         }
     }
 
@@ -321,7 +326,11 @@ impl MessageHandler {
     }
 
     /// Verify a vote signature (PREPARE or PRECOMMIT)
-    /// Returns Ok(true) if valid, Ok(false) if invalid/rejected
+    /// Returns Ok(true) if valid, Ok(false) if invalid/rejected.
+    ///
+    /// Security: records violations against the sending peer for AV27 (forged
+    /// signatures) and AV28 (unregistered voter spam), so the blacklist escalation
+    /// ladder can ban repeat offenders.
     async fn verify_vote_signature(
         &self,
         registry: &MasternodeRegistry,
@@ -329,6 +338,7 @@ impl MessageHandler {
         voter_id: &str,
         vote_type: &[u8], // b"PREPARE" or b"PRECOMMIT"
         signature: &[u8],
+        context: &MessageContext,
     ) -> Result<bool, ()> {
         if signature.is_empty() {
             warn!(
@@ -337,6 +347,8 @@ impl MessageHandler {
                 String::from_utf8_lossy(vote_type),
                 voter_id
             );
+            // AV27: unsigned vote is never legitimate; record immediately
+            self.record_vote_violation(context, "unsigned vote (AV27)").await;
             return Ok(false);
         }
 
@@ -347,6 +359,9 @@ impl MessageHandler {
                 String::from_utf8_lossy(vote_type),
                 voter_id
             );
+            // AV28: rate-limit — votes may be legitimately relayed for recently-
+            // deregistered nodes; only penalise after 10 rejections in 60 s.
+            self.record_unregistered_vote(context).await;
             return Ok(false);
         };
 
@@ -369,6 +384,8 @@ impl MessageHandler {
                     voter_id,
                     signature.len()
                 );
+                // AV27: wrong-length signature is always malformed; record immediately
+                self.record_vote_violation(context, "invalid vote signature length (AV27)").await;
                 return Ok(false); // Reject
             }
         };
@@ -382,10 +399,55 @@ impl MessageHandler {
                 voter_id,
                 e
             );
+            // AV27: forged Ed25519 signature; record immediately
+            self.record_vote_violation(context, "invalid vote signature (AV27)").await;
             return Ok(false); // Reject
         }
 
         Ok(true) // Valid signature
+    }
+
+    /// AV27: record a vote violation against the sending peer immediately.
+    /// Uses the blacklist escalation ladder: 3 → 1-min ban, 5 → 5-min ban,
+    /// 10 → permanent ban.
+    async fn record_vote_violation(&self, context: &MessageContext, reason: &str) {
+        if let Some(blacklist) = &context.blacklist {
+            if let Ok(ip) = self.peer_ip.parse::<IpAddr>() {
+                blacklist.write().await.record_violation(ip, reason);
+            }
+        }
+    }
+
+    /// AV28: sliding-window rate-limit for unregistered-voter rejections.
+    /// Records one violation after 10 rejections within a 60-second window,
+    /// then resets the counter. Higher threshold than AV27 because a trusted
+    /// relay peer may briefly forward votes from a recently-deregistered node.
+    async fn record_unregistered_vote(&self, context: &MessageContext) {
+        const THRESHOLD: u32 = 10;
+        const WINDOW_SECS: u64 = 60;
+
+        let should_record = {
+            let mut window = self.unregistered_vote_window.lock().await;
+            let now = Instant::now();
+            if now.duration_since(window.1) > Duration::from_secs(WINDOW_SECS) {
+                *window = (1, now);
+                false
+            } else {
+                window.0 += 1;
+                if window.0 >= THRESHOLD {
+                    window.0 = 0;
+                    window.1 = now;
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+
+        if should_record {
+            self.record_vote_violation(context, "unregistered voter spam (AV28: 10+ per 60s)")
+                .await;
+        }
     }
 
     /// Handle a network message and optionally return a response message
@@ -1577,6 +1639,7 @@ impl MessageHandler {
                 &voter_id,
                 b"PREPARE",
                 &signature,
+                context,
             )
             .await
             .unwrap_or(false)
@@ -1691,6 +1754,7 @@ impl MessageHandler {
                 &voter_id,
                 b"PRECOMMIT",
                 &signature,
+                context,
             )
             .await
             .unwrap_or(false)
