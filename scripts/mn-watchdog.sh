@@ -32,7 +32,7 @@
 #   --poll SECS            Poll interval in seconds (default: 30)
 #   --fail-threshold N     Consecutive "not active" readings before restart (default: 3)
 #   --restart-cooldown N   Min seconds between restarts (default: 600)
-#   --startup-grace N      Seconds to wait after watchdog launches before monitoring (default: 60)
+#   --startup-grace N      Seconds to wait after watchdog launches before monitoring (default: 3)
 #   --dry-run              Log what would happen but do not restart
 #   -h, --help             Show this help
 
@@ -42,7 +42,7 @@ set -uo pipefail
 POLL_INTERVAL=30
 FAIL_THRESHOLD=3
 RESTART_COOLDOWN=600
-STARTUP_GRACE=60
+STARTUP_GRACE=3
 DRY_RUN=0
 NETWORK="mainnet"
 
