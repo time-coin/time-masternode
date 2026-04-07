@@ -674,6 +674,14 @@ async fn handle_peer(
                         } else {
                             tracing::debug!("🔌 Connection from {} ended before handshake: {}", peer.addr, e);
                         }
+                        // Sending a frame with an oversized length header is a trivial
+                        // 4-byte denial-of-service: penalise so repeat offenders get banned.
+                        if e.contains("Frame too large") {
+                            blacklist.write().await.record_violation(
+                                ip,
+                                &format!("Oversized frame header: {}", e),
+                            );
+                        }
                         break;
                     }
                     Ok(Some(msg)) => {
