@@ -189,6 +189,14 @@ pub struct MasternodeRegistry {
     /// re-squatting oscillation loop (Attack Vector 14).
     /// Key: "<txid>:<vout>", Value: Unix timestamp of the eviction.
     post_eviction_lockout: Arc<DashMap<String, u64>>,
+    /// Per-outpoint migration history within a sliding window (AV26 pool rotation defense).
+    /// Key: "<txid>:<vout>", Value: (migration_count, window_start_unix_secs)
+    /// Rejects outpoints that migrate more than MAX_MIGRATIONS_PER_WINDOW times in 30 minutes.
+    collateral_migration_counts: Arc<DashMap<String, (u32, u64)>>,
+    /// Per-/24-subnet count of currently registered Free-tier masternodes (AV25 flooding defense).
+    /// Key: "A.B.C" (first three octets of the IP), Value: current registered count.
+    /// Limits attacker subnets from flooding the registry with many Free-tier nodes.
+    free_tier_subnet_counts: Arc<DashMap<String, u32>>,
     /// Optional reference to the UTXO manager, used for collateral ownership verification.
     utxo_manager: Arc<RwLock<Option<Arc<crate::utxo_manager::UTXOStateManager>>>>,
 }
@@ -292,6 +300,16 @@ impl MasternodeRegistry {
             );
         }
 
+        // Populate AV25 Free-tier subnet counts from the nodes loaded from disk
+        // so the cap is immediately enforced even before new registrations arrive.
+        let free_tier_subnet_counts: DashMap<String, u32> = DashMap::new();
+        for info in nodes.values() {
+            if info.masternode.tier == crate::types::MasternodeTier::Free {
+                let subnet = Self::free_tier_subnet(&info.masternode.address);
+                *free_tier_subnet_counts.entry(subnet).or_insert(0) += 1;
+            }
+        }
+
         Self {
             masternodes: Arc::new(RwLock::new(nodes)),
             local_masternode_address: Arc::new(RwLock::new(None)),
@@ -310,6 +328,8 @@ impl MasternodeRegistry {
             collateral_migration_times: Arc::new(DashMap::new()),
             collateral_migration_from: Arc::new(DashMap::new()),
             post_eviction_lockout: Arc::new(DashMap::new()),
+            collateral_migration_counts: Arc::new(DashMap::new()),
+            free_tier_subnet_counts: Arc::new(free_tier_subnet_counts),
             utxo_manager: Arc::new(RwLock::new(None)),
         }
     }
@@ -345,6 +365,19 @@ impl MasternodeRegistry {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs()
+    }
+
+    /// Extract the /24 subnet prefix from an IP string.
+    /// Handles "IP:port" format (strips port first).
+    /// Returns "A.B.C" for valid IPv4 addresses; falls back to the raw IP.
+    fn free_tier_subnet(ip: &str) -> String {
+        let ip_only = ip.split(':').next().unwrap_or(ip);
+        let parts: Vec<&str> = ip_only.split('.').collect();
+        if parts.len() >= 3 {
+            format!("{}.{}.{}", parts[0], parts[1], parts[2])
+        } else {
+            ip_only.to_string()
+        }
     }
 
     /// Update the current blockchain height. Called from block production loop
@@ -828,6 +861,40 @@ impl MasternodeRegistry {
                     }
                 }
 
+                // AV26: Pool rotation detection — limit migration frequency per outpoint.
+                // Attackers cycle A→B→C→D→A to evade the simple back-and-forth check.
+                // We reject if this outpoint has migrated >= 3 times within the last 30 min.
+                {
+                    const MAX_MIGRATIONS_PER_WINDOW: u32 = 3;
+                    const MIGRATION_WINDOW_SECS: u64 = 1800; // 30 minutes
+                    let (count, window_start) = self
+                        .collateral_migration_counts
+                        .get(&outpoint_key)
+                        .map(|v| *v)
+                        .unwrap_or((0, now));
+                    let elapsed = now.saturating_sub(window_start);
+                    let (effective_count, effective_start) = if elapsed >= MIGRATION_WINDOW_SECS {
+                        (0, now) // Window expired — reset
+                    } else {
+                        (count, window_start)
+                    };
+                    if effective_count >= MAX_MIGRATIONS_PER_WINDOW {
+                        tracing::warn!(
+                            "🛡️ [AV26] Migration flood rejected: {} tried to move {} \
+                             ({} migrations in {}s, max {} per {}s window)",
+                            masternode.address,
+                            outpoint,
+                            effective_count,
+                            elapsed,
+                            MAX_MIGRATIONS_PER_WINDOW,
+                            MIGRATION_WINDOW_SECS,
+                        );
+                        return Err(RegistryError::InvalidCollateral);
+                    }
+                    self.collateral_migration_counts
+                        .insert(outpoint_key.clone(), (effective_count + 1, effective_start));
+                }
+
                 // Record the source IP before updating the migration timestamp so that
                 // the next migration attempt can be checked for back-tracking.
                 {
@@ -971,6 +1038,28 @@ impl MasternodeRegistry {
             return Ok(());
         }
 
+        // AV25: Per-/24 subnet cap for Free-tier nodes.
+        // Attackers flood the registry from one subnet; cap each /24 at 5 Free-tier nodes.
+        // Paid tiers are not capped — they have on-chain collateral as proof-of-stake.
+        const MAX_FREE_TIER_PER_SUBNET: u32 = 5;
+        if masternode.tier == crate::types::MasternodeTier::Free {
+            let subnet = Self::free_tier_subnet(&masternode.address);
+            let count = self
+                .free_tier_subnet_counts
+                .get(&subnet)
+                .map(|c| *c)
+                .unwrap_or(0);
+            if count >= MAX_FREE_TIER_PER_SUBNET {
+                tracing::warn!(
+                    "🚫 [AV25] Free-tier registration rejected: /24 {} already has {} nodes (max {})",
+                    subnet,
+                    count,
+                    MAX_FREE_TIER_PER_SUBNET
+                );
+                return Err(RegistryError::InvalidCollateral);
+            }
+        }
+
         let current_h = self
             .current_height
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -1001,6 +1090,12 @@ impl MasternodeRegistry {
 
         nodes.insert(masternode.address.clone(), info);
         let total_masternodes = nodes.len();
+
+        // AV25: Track Free-tier subnet count for the registration cap.
+        if masternode.tier == crate::types::MasternodeTier::Free {
+            let subnet = Self::free_tier_subnet(&masternode.address);
+            *self.free_tier_subnet_counts.entry(subnet).or_insert(0) += 1;
+        }
 
         // Write a canonical anchor for paid-tier nodes on first registration.
         // Without this, the collateral has no anchor in sled, and a later Free-tier
@@ -1132,6 +1227,12 @@ impl MasternodeRegistry {
             // disconnect so they cannot inflate the quorum weight denominator while absent.
             masternodes.remove(address);
             drop(masternodes);
+
+            // AV25: Decrement the per-subnet Free-tier count when the node is removed.
+            let subnet = Self::free_tier_subnet(address);
+            if let Some(mut c) = self.free_tier_subnet_counts.get_mut(&subnet) {
+                *c = c.saturating_sub(1);
+            }
 
             warn!(
                 "🔌 Masternode {} removed on disconnect (transient Free-tier node)",
@@ -3410,6 +3511,8 @@ impl Clone for MasternodeRegistry {
             collateral_migration_times: self.collateral_migration_times.clone(),
             collateral_migration_from: self.collateral_migration_from.clone(),
             post_eviction_lockout: self.post_eviction_lockout.clone(),
+            collateral_migration_counts: self.collateral_migration_counts.clone(),
+            free_tier_subnet_counts: self.free_tier_subnet_counts.clone(),
             utxo_manager: self.utxo_manager.clone(),
         }
     }

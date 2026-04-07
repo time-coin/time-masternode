@@ -4784,6 +4784,8 @@ async fn main() {
             );
             // Share AISystem's reconnection AI so connection learning data is unified
             network_client.set_reconnection_ai(ai_system.reconnection_ai.clone());
+            // Share attack detector so outbound disconnects are tracked for AV3 detection
+            network_client.set_attack_detector(ai_system.attack_detector.clone());
             if let Some(ref tls) = tls_config {
                 network_client.set_tls_config(tls.clone());
             }

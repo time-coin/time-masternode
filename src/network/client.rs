@@ -46,6 +46,8 @@ pub struct NetworkClient {
     tls_config: Option<Arc<TlsConfig>>,
     /// Network type (mainnet/testnet)
     network_type: NetworkType,
+    /// Attack detector for recording coordinated disconnect events (outbound side of AV3).
+    attack_detector: Option<Arc<crate::ai::attack_detector::AttackDetector>>,
 }
 
 impl NetworkClient {
@@ -94,6 +96,7 @@ impl NetworkClient {
             reconnection_ai,
             tls_config: None,
             network_type,
+            attack_detector: None,
         }
     }
 
@@ -106,6 +109,14 @@ impl NetworkClient {
     /// Set TLS configuration for encrypted peer connections
     pub fn set_tls_config(&mut self, tls_config: Arc<TlsConfig>) {
         self.tls_config = Some(tls_config);
+    }
+
+    /// Set the attack detector so outbound disconnects are recorded for AV3 detection.
+    pub fn set_attack_detector(
+        &mut self,
+        ad: Arc<crate::ai::attack_detector::AttackDetector>,
+    ) {
+        self.attack_detector = Some(ad);
     }
 
     pub async fn start(&self) {
@@ -131,6 +142,7 @@ impl NetworkClient {
             ip_blacklist: self.ip_blacklist.clone(),
             tls_config: self.tls_config.clone(),
             network_type: self.network_type,
+            attack_detector: self.attack_detector.clone(),
         };
 
         tokio::spawn(async move {
@@ -412,6 +424,25 @@ impl NetworkClient {
                     let total_mn = all_masternodes.len();
                     let mut reconnected = 0usize;
 
+                    // AV25: Pre-count currently-connected nodes per /24 subnet so we can
+                    // cap how many Free-tier nodes we reconnect from each attacking subnet.
+                    const MAX_FREE_TIER_RECONNECT_PER_SUBNET: usize = 3;
+                    let mut subnet_active_counts: std::collections::HashMap<String, usize> =
+                        std::collections::HashMap::new();
+                    for mn_info in &all_masternodes {
+                        let addr = &mn_info.masternode.address;
+                        if connection_manager.is_connected(addr) || peer_registry.is_connected(addr) {
+                            let ip = addr.split(':').next().unwrap_or(addr);
+                            let parts: Vec<&str> = ip.split('.').collect();
+                            let subnet = if parts.len() >= 3 {
+                                format!("{}.{}.{}", parts[0], parts[1], parts[2])
+                            } else {
+                                ip.to_string()
+                            };
+                            *subnet_active_counts.entry(subnet).or_insert(0) += 1;
+                        }
+                    }
+
                     for mn_info in &all_masternodes {
                         let mn_ip = &mn_info.masternode.address;
                         if should_skip(mn_ip) {
@@ -446,6 +477,27 @@ impl NetworkClient {
                                 }
                             }
                         }
+                        // AV25: Per-/24 subnet cap for Free-tier reconnections.
+                        // Stops PHASE3 from maintaining dozens of connections to one attacker subnet.
+                        if mn_info.masternode.tier == MasternodeTier::Free {
+                            let ip = mn_ip.split(':').next().unwrap_or(mn_ip);
+                            let parts: Vec<&str> = ip.split('.').collect();
+                            let subnet = if parts.len() >= 3 {
+                                format!("{}.{}.{}", parts[0], parts[1], parts[2])
+                            } else {
+                                ip.to_string()
+                            };
+                            let active = subnet_active_counts.get(&subnet).copied().unwrap_or(0);
+                            if active >= MAX_FREE_TIER_RECONNECT_PER_SUBNET {
+                                tracing::debug!(
+                                    "⏭️  [PHASE3-MN] Skipping {} (AV25: {} already active from /24 {})",
+                                    mn_ip,
+                                    active,
+                                    subnet
+                                );
+                                continue;
+                            }
+                        }
                         if !connection_manager.mark_connecting(mn_ip) {
                             continue;
                         }
@@ -456,6 +508,17 @@ impl NetworkClient {
                         );
                         res.spawn(mn_ip.clone(), true);
                         reconnected += 1;
+                        // AV25: count this new outbound connection against the subnet cap.
+                        if mn_info.masternode.tier == MasternodeTier::Free {
+                            let ip = mn_ip.split(':').next().unwrap_or(mn_ip);
+                            let parts: Vec<&str> = ip.split('.').collect();
+                            let subnet = if parts.len() >= 3 {
+                                format!("{}.{}.{}", parts[0], parts[1], parts[2])
+                            } else {
+                                ip.to_string()
+                            };
+                            *subnet_active_counts.entry(subnet).or_insert(0) += 1;
+                        }
                         sleep(Duration::from_millis(100)).await;
                     }
 
@@ -576,6 +639,7 @@ struct ConnectionResources {
     ip_blacklist: Option<Arc<RwLock<IPBlacklist>>>,
     tls_config: Option<Arc<TlsConfig>>,
     network_type: NetworkType,
+    attack_detector: Option<Arc<crate::ai::attack_detector::AttackDetector>>,
 }
 
 impl ConnectionResources {
@@ -633,6 +697,16 @@ impl ConnectionResources {
             }
 
             res.connection_manager.mark_disconnected(&ip);
+
+            // AV3/Coordinated disconnect: record this outbound disconnect so the
+            // synchronized-cycling detector fires for PHASE3-MN connections too.
+            // The inbound side is wired in server.rs::handle_peer.
+            if is_masternode {
+                if let Some(ref ad) = res.attack_detector {
+                    let ip_str = ip.split(':').next().unwrap_or(&ip);
+                    ad.record_synchronized_disconnect(ip_str);
+                }
+            }
 
             // Mark inactive on disconnect (only if no live inbound connection replaced it)
             if is_masternode && !res.peer_registry.is_connected(&ip) {
