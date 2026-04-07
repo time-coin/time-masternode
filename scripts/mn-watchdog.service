@@ -1,0 +1,21 @@
+[Unit]
+Description=TIME Coin Masternode Registration Watchdog
+Documentation=https://github.com/TimeCoinsOfficial/time-masternode
+After=timed.service
+BindsTo=timed.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mn-watchdog
+Restart=always
+RestartSec=10
+
+# Run as root so it can call `systemctl restart timed`
+User=root
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mn-watchdog
+
+[Install]
+WantedBy=multi-user.target
