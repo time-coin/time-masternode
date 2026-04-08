@@ -565,7 +565,7 @@ async fn handle_peer(
     mut notifier: broadcast::Receiver<NetworkMessage>,
     utxo_mgr: Arc<UTXOStateManager>,
     consensus: Arc<ConsensusEngine>,
-    rate_limiter: Arc<RwLock<RateLimiter>>,
+    _rate_limiter: Arc<RwLock<RateLimiter>>,
     blacklist: Arc<RwLock<IPBlacklist>>,
     masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
     blockchain: Arc<crate::blockchain::Blockchain>,
@@ -594,6 +594,12 @@ async fn handle_peer(
         .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
 
     let ip_str = ip.to_string();
+
+    // Per-connection rate limiter: each peer gets its own instance, eliminating
+    // the write-lock contention that the shared NetworkServer RateLimiter caused
+    // under load (50+ peers × multiple msg/s = constant write-lock contention).
+    // The shared `rate_limiter` parameter is intentionally shadowed here.
+    let rate_limiter = Arc::new(RwLock::new(RateLimiter::new()));
 
     // Get WebSocket tx event sender for real-time wallet notifications
     let ws_tx_event_sender = peer_registry.get_tx_event_sender().await;
@@ -643,11 +649,27 @@ async fn handle_peer(
                 tokio::spawn(async move {
                     use tokio::io::AsyncWriteExt;
                     let mut stream = tls_stream;
+                    let mut gate_count: u32 = 0;
+                    let mut gate_window = tokio::time::Instant::now();
+                    const GATE_SOFT: u32 = 200; // drop without forwarding (>200 msgs/s)
+                    const GATE_HARD: u32 = 500; // send error to trigger violation + disconnect (>500 msgs/s)
                     loop {
                         tokio::select! {
                             result = crate::network::wire::read_message(&mut stream) => {
                                 let is_eof = matches!(&result, Ok(None));
                                 let is_err = result.is_err();
+                                // Pre-channel flood gate: count raw messages per second.
+                                if gate_window.elapsed() >= std::time::Duration::from_secs(1) {
+                                    gate_count = 0;
+                                    gate_window = tokio::time::Instant::now();
+                                }
+                                gate_count += 1;
+                                if gate_count > GATE_HARD {
+                                    let _ = msg_read_tx.send(Err("Message flood detected: pre-channel gate triggered".to_string()));
+                                    break;
+                                } else if gate_count > GATE_SOFT {
+                                    continue; // silently drop this message
+                                }
                                 if msg_read_tx.send(result).is_err() {
                                     break; // receiver dropped
                                 }
@@ -694,10 +716,28 @@ async fn handle_peer(
         let peer_addr = peer.addr.clone();
         tokio::spawn(async move {
             let mut reader = r;
+            let mut gate_count: u32 = 0;
+            let mut gate_window = tokio::time::Instant::now();
+            const GATE_SOFT: u32 = 200; // drop without forwarding (>200 msgs/s)
+            const GATE_HARD: u32 = 500; // send error to trigger violation + disconnect (>500 msgs/s)
             loop {
                 let result = crate::network::wire::read_message(&mut reader).await;
                 let is_eof = matches!(&result, Ok(None));
                 let is_err = result.is_err();
+                // Pre-channel flood gate: count raw messages per second.
+                if gate_window.elapsed() >= std::time::Duration::from_secs(1) {
+                    gate_count = 0;
+                    gate_window = tokio::time::Instant::now();
+                }
+                gate_count += 1;
+                if gate_count > GATE_HARD {
+                    let _ = msg_read_tx.send(Err(
+                        "Message flood detected: pre-channel gate triggered".to_string(),
+                    ));
+                    break;
+                } else if gate_count > GATE_SOFT {
+                    continue; // silently drop this message
+                }
                 if msg_read_tx.send(result).is_err() {
                     break;
                 }
@@ -735,6 +775,8 @@ async fn handle_peer(
     let mut peer_tx_lock_counts: std::collections::HashMap<[u8; 32], u32> =
         std::collections::HashMap::new();
     const MAX_UTXO_LOCKS_PER_TX: u32 = 50;
+
+    let mut ping_excess_streak: u32 = 0;
 
     let magic_bytes = network_type.magic_bytes();
 
@@ -779,6 +821,12 @@ async fn handle_peer(
                                 ip,
                                 &format!("Oversized frame header: {}", e),
                             );
+                        } else if e.contains("Message flood detected") {
+                            tracing::warn!("🌊 Message flood from {} — pre-channel gate triggered, recording violation", peer.addr);
+                            blacklist.write().await.record_violation(ip, "Message flood: sustained >500 msgs/s");
+                            if let Some(ai) = &ai_system {
+                                ai.attack_detector.record_message_flood(&ip_str);
+                            }
                         }
                         break;
                     }
@@ -1004,20 +1052,6 @@ async fn handle_peer(
 
                                     drop(limiter);
                                     drop(blacklist_guard);
-                                }};
-                            }
-
-                            // Soft rate limit: drop excess messages silently without recording
-                            // blacklist violations. Used for benign high-frequency messages like
-                            // ping/pong where bursts occur during normal reconnection churn.
-                            macro_rules! check_rate_limit_soft {
-                                ($msg_type:expr) => {{
-                                    let mut limiter = rate_limiter.write().await;
-                                    if !limiter.check($msg_type, &ip_str) {
-                                        tracing::debug!("⚡ Soft rate limit: dropping excess {} from {}", $msg_type, peer.addr);
-                                        continue;
-                                    }
-                                    drop(limiter);
                                 }};
                             }
 
@@ -1903,12 +1937,42 @@ async fn handle_peer(
                                 }
                                 // Health Check Messages
                                 NetworkMessage::Ping { .. } | NetworkMessage::Pong { .. } => {
-                                    match &msg {
-                                        NetworkMessage::Ping { .. } => check_rate_limit_soft!("ping"),
-                                        _ => check_rate_limit_soft!("pong"),
+                                    let rate_ok = {
+                                        let mut limiter = rate_limiter.write().await;
+                                        let msg_type = if matches!(&msg, NetworkMessage::Ping { .. }) { "ping" } else { "pong" };
+                                        limiter.check(msg_type, &ip_str)
+                                    };
+                                    if !rate_ok {
+                                        if matches!(&msg, NetworkMessage::Ping { .. }) {
+                                            ping_excess_streak += 1;
+                                            tracing::debug!(
+                                                "⚡ Ping rate limit exceeded from {} (excess streak: {})",
+                                                peer.addr, ping_excess_streak
+                                            );
+                                            if ping_excess_streak >= 3 {
+                                                tracing::warn!(
+                                                    "🌊 Ping flood from {} (excess streak {}): recording violation",
+                                                    peer.addr, ping_excess_streak
+                                                );
+                                                let should_ban = blacklist.write().await.record_violation(
+                                                    ip,
+                                                    "Ping flood: sustained excess pings"
+                                                );
+                                                if let Some(ai) = &ai_system {
+                                                    ai.attack_detector.record_ping_flood(&ip_str);
+                                                }
+                                                if should_ban {
+                                                    tracing::warn!("🚫 Disconnecting {} due to ping flood violations", peer.addr);
+                                                    break;
+                                                }
+                                                ping_excess_streak = 0;
+                                            }
+                                        }
+                                        continue;
                                     }
+                                    ping_excess_streak = 0;
 
-                                    // Use unified message handler
+                                    // Route through unified message handler
                                     let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
                                     let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
                                     let context = MessageContext::minimal(

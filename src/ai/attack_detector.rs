@@ -29,6 +29,8 @@ pub enum AttackType {
     UtxoLockFlood,       // Peer sends excessive UTXOStateUpdate messages for one TX (DoS)
     SynchronizedCycling, // Coordinated synchronized disconnect/reconnect storm from a subnet
     TlsFlood,            // High-rate TLS handshake flood from distributed IPs
+    PingFlood,           // Sustained ping-rate-limit excess from one peer — tokio RPC starvation
+    MessageFlood,        // Raw pre-channel message flood (>500 msgs/s before deserialization)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +104,10 @@ pub struct AttackDetector {
     /// Per-IP TLS failure timestamps for TlsFlood detection.
     /// Key: IP address, Value: deque of failure Unix timestamps.
     tls_failure_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
+    /// Per-peer ping excess timestamps for PingFlood detection.
+    ping_flood_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
+    /// Per-peer raw message flood timestamps for MessageFlood detection.
+    message_flood_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
 }
 
 impl AttackDetector {
@@ -115,6 +121,8 @@ impl AttackDetector {
             time_window: Duration::from_secs(300),
             subnet_disconnects: Arc::new(RwLock::new(HashMap::new())),
             tls_failure_times: Arc::new(RwLock::new(HashMap::new())),
+            ping_flood_times: Arc::new(RwLock::new(HashMap::new())),
+            message_flood_times: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -604,6 +612,90 @@ impl AttackDetector {
                     ),
                     "TLS handshake flood (AV13) — high-rate connection attempts before protocol"
                         .to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        }
+    }
+
+    /// Record a sustained ping rate-limit exceedance from `addr`.
+    /// ≥3 excess events within 10 s → PingFlood → BlockPeer.
+    pub fn record_ping_flood(&self, addr: &str) {
+        let now = Self::now_secs();
+        const PING_FLOOD_WINDOW_SECS: u64 = 10;
+        const PING_FLOOD_THRESHOLD: usize = 3;
+
+        let should_block = {
+            let mut map = self.ping_flood_times.write();
+            let timestamps = map.entry(addr.to_string()).or_default();
+            while timestamps
+                .front()
+                .map(|t| now.saturating_sub(*t) > PING_FLOOD_WINDOW_SECS)
+                .unwrap_or(false)
+            {
+                timestamps.pop_front();
+            }
+            timestamps.push_back(now);
+            timestamps.len() >= PING_FLOOD_THRESHOLD
+        };
+
+        if should_block {
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::PingFlood,
+                confidence: 0.90,
+                severity: AttackSeverity::High,
+                indicators: vec![
+                    format!(
+                        "≥{} ping rate-limit exceedances from {} within {}s",
+                        PING_FLOOD_THRESHOLD, addr, PING_FLOOD_WINDOW_SECS
+                    ),
+                    "Sustained ping storm — starves tokio RPC thread, triggering watchdog false-restarts".to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        }
+    }
+
+    /// Record a raw pre-channel message flood event from `addr` (>500 msgs/s sustained).
+    /// ≥2 flood events within 60 s → MessageFlood → BlockPeer.
+    pub fn record_message_flood(&self, addr: &str) {
+        let now = Self::now_secs();
+        const MSG_FLOOD_WINDOW_SECS: u64 = 60;
+        const MSG_FLOOD_THRESHOLD: usize = 2;
+
+        let should_block = {
+            let mut map = self.message_flood_times.write();
+            let timestamps = map.entry(addr.to_string()).or_default();
+            while timestamps
+                .front()
+                .map(|t| now.saturating_sub(*t) > MSG_FLOOD_WINDOW_SECS)
+                .unwrap_or(false)
+            {
+                timestamps.pop_front();
+            }
+            timestamps.push_back(now);
+            timestamps.len() >= MSG_FLOOD_THRESHOLD
+        };
+
+        if should_block {
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::MessageFlood,
+                confidence: 0.95,
+                severity: AttackSeverity::Critical,
+                indicators: vec![
+                    format!(
+                        "≥{} raw message flood events from {} within {}s",
+                        MSG_FLOOD_THRESHOLD, addr, MSG_FLOOD_WINDOW_SECS
+                    ),
+                    "Pre-channel message flood (>500 msgs/s) — bypasses rate limiters, saturates tokio workers".to_string(),
                 ],
                 first_detected: now,
                 last_seen: now,
