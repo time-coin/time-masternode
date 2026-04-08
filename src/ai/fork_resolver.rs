@@ -59,6 +59,12 @@ pub struct ForkResolutionParams {
     pub peer_tip_timestamp: Option<i64>,
     pub our_tip_hash: Option<[u8; 32]>,
     pub peer_tip_hash: Option<[u8; 32]>,
+    /// Common ancestor height (if known).
+    pub common_ancestor: Option<u64>,
+    /// Our block hash at common_ancestor+1 — the first block where the chains diverge.
+    pub our_fork_block_hash: Option<[u8; 32]>,
+    /// Peer's block hash at common_ancestor+1 — their first diverging block.
+    pub peer_fork_block_hash: Option<[u8; 32]>,
 }
 
 /// Fork resolution result
@@ -135,9 +141,48 @@ impl ForkResolver {
             };
         }
 
-        // Rule 3: Same height — deterministic hash tiebreaker (lower wins)
-        // This is globally consistent because all nodes see the same block hashes,
-        // unlike stake weight which is subjective (each node sees different peers).
+        // Rule 3: Same height — deterministic hash tiebreaker.
+        // Prefer comparing the FIRST DIVERGING BLOCK (ancestor+1) when available:
+        // both chains branched from the same parent, so the block each side produced
+        // right after the split is the canonical point of comparison. This is more
+        // meaningful than comparing the tip hashes, which reflect later block production.
+        // Fall back to tip-hash comparison when the diverging-block hashes are absent.
+        if let (Some(our_fork), Some(peer_fork)) =
+            (params.our_fork_block_hash, params.peer_fork_block_hash)
+        {
+            if peer_fork == our_fork {
+                // Identical first diverging block → chains are actually the same
+                reasoning.push("No fork: identical first diverging blocks".to_string());
+                return ForkResolution {
+                    accept_peer_chain: false,
+                    reasoning,
+                };
+            }
+            let accept = peer_fork < our_fork;
+            let ancestor_h = params.common_ancestor.unwrap_or(0);
+            reasoning.push(format!(
+                "{}: Same height {}, fork-point tiebreaker at ancestor+1={} (peer {} {} ours {})",
+                if accept { "ACCEPT" } else { "REJECT" },
+                params.peer_height,
+                ancestor_h + 1,
+                hex::encode(&peer_fork[..8]),
+                if accept { "<" } else { ">" },
+                hex::encode(&our_fork[..8])
+            ));
+            info!(
+                "⚖️  Fork: {} {} — fork-point hash tiebreaker at height {} (ancestor {})",
+                if accept { "ACCEPT" } else { "REJECT" },
+                params.peer_ip,
+                ancestor_h + 1,
+                ancestor_h,
+            );
+            return ForkResolution {
+                accept_peer_chain: accept,
+                reasoning,
+            };
+        }
+
+        // Fallback: compare tip hashes when fork-point hashes are unavailable
         if let (Some(our_hash), Some(peer_hash)) = (params.our_tip_hash, params.peer_tip_hash) {
             if peer_hash == our_hash {
                 reasoning.push("No fork: identical chains".to_string());

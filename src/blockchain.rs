@@ -9297,6 +9297,16 @@ impl Blockchain {
                 // Calculate fork depth
                 let fork_depth = our_height.saturating_sub(common_ancestor);
 
+                // Collect the first diverging block hashes (at common_ancestor+1) for
+                // the deterministic fork-point tiebreaker. These are more meaningful
+                // than tip hashes — they represent the actual point of chain split.
+                let first_diverge = common_ancestor + 1;
+                let our_fork_block_hash = self.get_block_hash(first_diverge).ok();
+                let peer_fork_block_hash = all_blocks
+                    .iter()
+                    .find(|b| b.header.height == first_diverge)
+                    .map(|b| b.hash());
+
                 // CRITICAL SECURITY CHECK: Reject reorgs that go back to genesis
                 // If common_ancestor == 0, this means the chains diverged at or before genesis
                 // This is ALWAYS suspicious - either different genesis blocks or an attack
@@ -9411,6 +9421,9 @@ impl Blockchain {
                         peer_tip_timestamp: Some(peer_tip_timestamp),
                         our_tip_hash: Some(our_tip_hash),
                         peer_tip_hash: Some(peer_tip_hash),
+                        common_ancestor: Some(common_ancestor),
+                        our_fork_block_hash,
+                        peer_fork_block_hash,
                     })
                     .await;
 
@@ -9866,21 +9879,29 @@ impl Blockchain {
                                     if let Some((tip_h, tip_hash)) =
                                         registry.get_peer_chain_tip(pip).await
                                     {
-                                        // total_ahead: peers strictly above our height.
-                                        // Excludes peers at our height who may be on the
-                                        // same minority fork and cannot vote either way.
-                                        if tip_h > our_height {
-                                            total_ahead += 1;
-                                        }
                                         // supporting: peers specifically on the alternative
                                         // chain — exact tip match, or further ahead of it
                                         // (implies they built valid blocks on top of it).
                                         // Peers above our height but below the alternative
                                         // tip are NOT counted; their chain may diverge.
-                                        if (tip_h == peer_tip_height && tip_hash == peer_tip_hash)
-                                            || tip_h > peer_tip_height
-                                        {
+                                        let on_peer_chain =
+                                            (tip_h == peer_tip_height
+                                                && tip_hash == peer_tip_hash)
+                                                || tip_h > peer_tip_height;
+                                        if on_peer_chain {
                                             supporting += 1;
+                                        }
+
+                                        // total_ahead: peers strictly above our height,
+                                        // OR at the same height but confirmed on the
+                                        // alternative chain's hash (same-height fork case).
+                                        // Without the second clause, a same-height fork
+                                        // (our height == consensus height) always yields
+                                        // total_ahead = 0, making both escape conditions
+                                        // permanently unreachable and trapping the node
+                                        // on the minority fork indefinitely.
+                                        if tip_h > our_height || on_peer_chain {
+                                            total_ahead += 1;
                                         }
                                     }
                                 }
@@ -9895,6 +9916,15 @@ impl Blockchain {
                                         .unwrap_or(0)
                                 };
 
+                                // SAME-HEIGHT CONSENSUS OVERRIDE: when the fork is at the same
+                                // height, we cannot wait for peers to advance past us (they
+                                // never will — both chains are equal length). If enough peers
+                                // independently confirm the consensus hash, the network has
+                                // already settled and we must follow it immediately.
+                                const MIN_SAME_HEIGHT_CONSENSUS_PEERS: usize = 3;
+                                let same_height_consensus_override = peer_tip_height == our_height
+                                    && supporting >= MIN_SAME_HEIGHT_CONSENSUS_PEERS;
+
                                 let normal_override = total_ahead > 0
                                     && supporting >= MIN_PEERS_FINALITY_OVERRIDE
                                     && supporting * 2 > total_ahead;
@@ -9903,7 +9933,16 @@ impl Blockchain {
                                     && supporting >= MIN_PEERS_FINALITY_ESCAPE
                                     && total_ahead > 0;
 
-                                if normal_override {
+                                if same_height_consensus_override {
+                                    warn!(
+                                        "⚠️  SAME-HEIGHT MINORITY FORK: {}/{} peers confirm \
+                                         consensus hash at height {} (ancestor {} < confirmed {}). \
+                                         Auto-resetting finality lock to {} to rejoin canonical chain.",
+                                        supporting, total_ahead,
+                                        peer_tip_height, common_ancestor, last_confirmed,
+                                        common_ancestor
+                                    );
+                                } else if normal_override {
                                     warn!(
                                         "⚠️  MINORITY FORK DETECTED: {}/{} ahead peers support \
                                          alternative chain (ancestor {} < confirmed {}). \
@@ -9920,7 +9959,7 @@ impl Blockchain {
                                         supporting, total_ahead, common_ancestor
                                     );
                                 }
-                                normal_override || escape_override
+                                same_height_consensus_override || normal_override || escape_override
                             } else {
                                 false
                             };
