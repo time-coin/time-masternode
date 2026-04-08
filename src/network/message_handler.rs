@@ -376,7 +376,8 @@ impl MessageHandler {
                 voter_id
             );
             // AV27: unsigned vote is never legitimate; record immediately
-            self.record_vote_violation(context, "unsigned vote (AV27)").await;
+            self.record_vote_violation(context, "unsigned vote (AV27)")
+                .await;
             return Ok(false);
         }
 
@@ -413,7 +414,8 @@ impl MessageHandler {
                     signature.len()
                 );
                 // AV27: wrong-length signature is always malformed; record immediately
-                self.record_vote_violation(context, "invalid vote signature length (AV27)").await;
+                self.record_vote_violation(context, "invalid vote signature length (AV27)")
+                    .await;
                 return Ok(false); // Reject
             }
         };
@@ -428,7 +430,8 @@ impl MessageHandler {
                 e
             );
             // AV27: forged Ed25519 signature; record immediately
-            self.record_vote_violation(context, "invalid vote signature (AV27)").await;
+            self.record_vote_violation(context, "invalid vote signature (AV27)")
+                .await;
             return Ok(false); // Reject
         }
 
@@ -904,7 +907,8 @@ impl MessageHandler {
             }
 
             NetworkMessage::UTXOStateResponse(states) => {
-                self.handle_utxo_state_response(states.clone(), context).await
+                self.handle_utxo_state_response(states.clone(), context)
+                    .await
             }
 
             // === Payment Request Relay ===
@@ -1713,9 +1717,12 @@ impl MessageHandler {
                 vec![]
             };
 
-            consensus
-                .timevote
-                .generate_precommit_vote(block_hash, &validator_id, validator_weight, self_signature.clone());
+            consensus.timevote.generate_precommit_vote(
+                block_hash,
+                &validator_id,
+                validator_weight,
+                self_signature.clone(),
+            );
             debug!(
                 "✅ [{}] Generated precommit vote for block {}",
                 self.direction,
@@ -1790,9 +1797,12 @@ impl MessageHandler {
             return Ok(None); // Reject invalid signature
         }
 
-        consensus
-            .timevote
-            .accumulate_precommit_vote(block_hash, voter_id.clone(), voter_weight, signature.clone());
+        consensus.timevote.accumulate_precommit_vote(
+            block_hash,
+            voter_id.clone(),
+            voter_weight,
+            signature.clone(),
+        );
 
         // Check if precommit consensus reached (>50% majority timevote)
         if consensus.timevote.check_precommit_consensus(block_hash) {
@@ -3122,23 +3132,17 @@ impl MessageHandler {
                                 // V4 proof (Level 1 key or Level 2 ProTx) is exempt from
                                 // this check because cryptographic key ownership supersedes
                                 // address matching.
-                                if !utxo.address.is_empty()
-                                    && reward_address != utxo.address
-                                {
+                                if !utxo.address.is_empty() && reward_address != utxo.address {
                                     static REWARD_MISMATCH: std::sync::OnceLock<
                                         dashmap::DashMap<String, std::time::Instant>,
                                     > = std::sync::OnceLock::new();
-                                    let wm = REWARD_MISMATCH
-                                        .get_or_init(dashmap::DashMap::new);
+                                    let wm = REWARD_MISMATCH.get_or_init(dashmap::DashMap::new);
                                     if wm
                                         .get(&peer_ip)
                                         .map(|t| t.elapsed().as_secs() >= 300)
                                         .unwrap_or(true)
                                     {
-                                        wm.insert(
-                                            peer_ip.clone(),
-                                            std::time::Instant::now(),
-                                        );
+                                        wm.insert(peer_ip.clone(), std::time::Instant::now());
                                         warn!(
                                             "🛡️ [{}] Rejecting {:?} masternode from {}: \
                                              reward_address {} does not match collateral \
@@ -3154,11 +3158,10 @@ impl MessageHandler {
                                         );
                                     }
                                     if let Some(ai) = &context.ai_system {
-                                        ai.attack_detector
-                                            .record_collateral_spoof_attempt(
-                                                &peer_ip,
-                                                &outpoint.to_string(),
-                                            );
+                                        ai.attack_detector.record_collateral_spoof_attempt(
+                                            &peer_ip,
+                                            &outpoint.to_string(),
+                                        );
                                     }
                                     return Ok(None);
                                 }
@@ -3195,8 +3198,7 @@ impl MessageHandler {
                                             txid_hex, outpoint.vout
                                         );
 
-                                        let claimant_matches_utxo =
-                                            reward_address == utxo.address;
+                                        let claimant_matches_utxo = reward_address == utxo.address;
 
                                         // Look up the squatter's stored reward_address to detect
                                         // address-match stalemates.
@@ -3213,15 +3215,13 @@ impl MessageHandler {
                                             && claimant_matches_utxo
                                         {
                                             use ed25519_dalek::Verifier;
-                                            ed25519_dalek::Signature::from_slice(
-                                                &collateral_proof,
-                                            )
-                                            .map(|sig| {
-                                                public_key
-                                                    .verify(proof_msg.as_bytes(), &sig)
-                                                    .is_ok()
-                                            })
-                                            .unwrap_or(false)
+                                            ed25519_dalek::Signature::from_slice(&collateral_proof)
+                                                .map(|sig| {
+                                                    public_key
+                                                        .verify(proof_msg.as_bytes(), &sig)
+                                                        .is_ok()
+                                                })
+                                                .unwrap_or(false)
                                         } else {
                                             false
                                         };
@@ -3238,13 +3238,10 @@ impl MessageHandler {
                                                 .unwrap_or(false);
                                             if is_local_squatter {
                                                 static LOCAL_V4_WARN: std::sync::OnceLock<
-                                                    dashmap::DashMap<
-                                                        String,
-                                                        std::time::Instant,
-                                                    >,
+                                                    dashmap::DashMap<String, std::time::Instant>,
                                                 > = std::sync::OnceLock::new();
-                                                let wm =
-                                                    LOCAL_V4_WARN.get_or_init(dashmap::DashMap::new);
+                                                let wm = LOCAL_V4_WARN
+                                                    .get_or_init(dashmap::DashMap::new);
                                                 if wm
                                                     .get(&peer_ip)
                                                     .map(|t| t.elapsed().as_secs() >= 120)
@@ -3267,16 +3264,34 @@ impl MessageHandler {
                                                 // Immediately record blacklist violation — no 30s
                                                 // enforcement-loop delay for collateral attacks.
                                                 if let Some(bl) = &context.blacklist {
-                                                    let bare = peer_ip.split(':').next().unwrap_or(&peer_ip);
-                                                    if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
+                                                    let bare = peer_ip
+                                                        .split(':')
+                                                        .next()
+                                                        .unwrap_or(&peer_ip);
+                                                    if let Ok(ban_ip) =
+                                                        bare.parse::<std::net::IpAddr>()
+                                                    {
                                                         let mut guard = bl.write().await;
-                                                        guard.record_violation(ban_ip, "V4 collateral hijack attempt");
-                                                        guard.record_violation(ban_ip, "V4 collateral hijack attempt");
-                                                        guard.record_violation(ban_ip, "V4 collateral hijack attempt");
+                                                        guard.record_violation(
+                                                            ban_ip,
+                                                            "V4 collateral hijack attempt",
+                                                        );
+                                                        guard.record_violation(
+                                                            ban_ip,
+                                                            "V4 collateral hijack attempt",
+                                                        );
+                                                        guard.record_violation(
+                                                            ban_ip,
+                                                            "V4 collateral hijack attempt",
+                                                        );
                                                     }
                                                 }
                                                 if let Some(ai) = &context.ai_system {
-                                                    ai.attack_detector.record_collateral_spoof_attempt(&peer_ip, &outpoint.to_string());
+                                                    ai.attack_detector
+                                                        .record_collateral_spoof_attempt(
+                                                            &peer_ip,
+                                                            &outpoint.to_string(),
+                                                        );
                                                 }
                                                 false
                                             } else {
@@ -3319,16 +3334,18 @@ impl MessageHandler {
                                                         );
                                                     }
                                                     if let Some(ai) = &context.ai_system {
-                                                        ai.attack_detector.record_eviction_storm_attempt(&peer_ip, &outpoint.to_string());
+                                                        ai.attack_detector
+                                                            .record_eviction_storm_attempt(
+                                                                &peer_ip,
+                                                                &outpoint.to_string(),
+                                                            );
                                                     }
                                                     false
                                                 } else {
                                                     true
                                                 }
                                             }
-                                        } else if claimant_matches_utxo
-                                            && !squatter_matches_utxo
-                                        {
+                                        } else if claimant_matches_utxo && !squatter_matches_utxo {
                                             // Tier 2: address-match beats address-mismatch squatter,
                                             // but ONLY for Free-tier squatters.
                                             //
@@ -3362,9 +3379,7 @@ impl MessageHandler {
                                                     .get(&squatter_ip)
                                                     .await
                                                     .map(|info| info.masternode.tier)
-                                                    .unwrap_or(
-                                                        crate::types::MasternodeTier::Free,
-                                                    );
+                                                    .unwrap_or(crate::types::MasternodeTier::Free);
                                                 if squatter_tier
                                                     != crate::types::MasternodeTier::Free
                                                 {
@@ -3450,10 +3465,7 @@ impl MessageHandler {
                                                     "🚨 [{}] Collateral conflict: {} claimed {} \
                                                      already held by {} — gossip cannot prove \
                                                      ownership, use on-chain MasternodeReg",
-                                                    self.direction,
-                                                    peer_ip,
-                                                    outpoint,
-                                                    squatter_ip
+                                                    self.direction, peer_ip, outpoint, squatter_ip
                                                 );
                                             }
                                             return Ok(None);
@@ -3514,23 +3526,20 @@ impl MessageHandler {
                                 .unwrap_or(false);
 
                             let txid_hex = hex::encode(outpoint.txid);
-                            let proof_msg = format!(
-                                "TIME_COLLATERAL_CLAIM:{}:{}",
-                                txid_hex, outpoint.vout
-                            );
+                            let proof_msg =
+                                format!("TIME_COLLATERAL_CLAIM:{}:{}", txid_hex, outpoint.vout);
 
-                            let has_valid_proof = if !collateral_proof.is_empty()
-                                && claimant_matches_utxo
-                            {
-                                use ed25519_dalek::Verifier;
-                                ed25519_dalek::Signature::from_slice(&collateral_proof)
-                                    .map(|sig| {
-                                        public_key.verify(proof_msg.as_bytes(), &sig).is_ok()
-                                    })
-                                    .unwrap_or(false)
-                            } else {
-                                false
-                            };
+                            let has_valid_proof =
+                                if !collateral_proof.is_empty() && claimant_matches_utxo {
+                                    use ed25519_dalek::Verifier;
+                                    ed25519_dalek::Signature::from_slice(&collateral_proof)
+                                        .map(|sig| {
+                                            public_key.verify(proof_msg.as_bytes(), &sig).is_ok()
+                                        })
+                                        .unwrap_or(false)
+                                } else {
+                                    false
+                                };
 
                             let can_evict = if has_valid_proof {
                                 // Tier 1: cryptographic proof — but never evict the local node
@@ -3563,13 +3572,25 @@ impl MessageHandler {
                                         let bare = peer_ip.split(':').next().unwrap_or(&peer_ip);
                                         if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
                                             let mut guard = bl.write().await;
-                                            guard.record_violation(ban_ip, "V4 collateral hijack attempt");
-                                            guard.record_violation(ban_ip, "V4 collateral hijack attempt");
-                                            guard.record_violation(ban_ip, "V4 collateral hijack attempt");
+                                            guard.record_violation(
+                                                ban_ip,
+                                                "V4 collateral hijack attempt",
+                                            );
+                                            guard.record_violation(
+                                                ban_ip,
+                                                "V4 collateral hijack attempt",
+                                            );
+                                            guard.record_violation(
+                                                ban_ip,
+                                                "V4 collateral hijack attempt",
+                                            );
                                         }
                                     }
                                     if let Some(ai) = &context.ai_system {
-                                        ai.attack_detector.record_collateral_spoof_attempt(&peer_ip, &outpoint.to_string());
+                                        ai.attack_detector.record_collateral_spoof_attempt(
+                                            &peer_ip,
+                                            &outpoint.to_string(),
+                                        );
                                     }
                                     false
                                 } else {
@@ -3577,9 +3598,7 @@ impl MessageHandler {
                                     let outpoint_key = outpoint.to_string();
                                     let within_cooldown = v4_eviction_cooldown()
                                         .get(&outpoint_key)
-                                        .map(|t| {
-                                            t.elapsed().as_secs() < V4_EVICTION_COOLDOWN_SECS
-                                        })
+                                        .map(|t| t.elapsed().as_secs() < V4_EVICTION_COOLDOWN_SECS)
                                         .unwrap_or(false);
                                     if within_cooldown {
                                         static STORM_WARN2: std::sync::OnceLock<
@@ -3591,10 +3610,7 @@ impl MessageHandler {
                                             .map(|t| t.elapsed().as_secs() >= 30)
                                             .unwrap_or(true)
                                         {
-                                            wm.insert(
-                                                outpoint_key,
-                                                std::time::Instant::now(),
-                                            );
+                                            wm.insert(outpoint_key, std::time::Instant::now());
                                             warn!(
                                                 "🛡️ [{}] V4 eviction storm blocked for {} \
                                                  ({} → {}) — cooldown active (registry path)",
@@ -3605,7 +3621,10 @@ impl MessageHandler {
                                             );
                                         }
                                         if let Some(ai) = &context.ai_system {
-                                            ai.attack_detector.record_eviction_storm_attempt(&peer_ip, &outpoint.to_string());
+                                            ai.attack_detector.record_eviction_storm_attempt(
+                                                &peer_ip,
+                                                &outpoint.to_string(),
+                                            );
                                         }
                                         false
                                     } else {
@@ -3643,10 +3662,7 @@ impl MessageHandler {
                                             "🛡️ [{}] Blocked Tier 2 eviction of paid-tier \
                                              squatter {} (registry): {} tried to claim {} via \
                                              reward_address match — V4 proof required",
-                                            self.direction,
-                                            registry_squatter,
-                                            peer_ip,
-                                            outpoint
+                                            self.direction, registry_squatter, peer_ip, outpoint
                                         );
                                         false
                                     } else {
@@ -3666,16 +3682,11 @@ impl MessageHandler {
 
                             if can_evict {
                                 if has_valid_proof {
-                                    v4_eviction_cooldown().insert(
-                                        outpoint.to_string(),
-                                        std::time::Instant::now(),
-                                    );
+                                    v4_eviction_cooldown()
+                                        .insert(outpoint.to_string(), std::time::Instant::now());
                                     // Arm post-eviction lockout (AV14).
-                                    let eviction_key = format!(
-                                        "{}:{}",
-                                        hex::encode(outpoint.txid),
-                                        outpoint.vout
-                                    );
+                                    let eviction_key =
+                                        format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
                                     context
                                         .masternode_registry
                                         .record_v4_eviction(&eviction_key);
@@ -3716,11 +3727,8 @@ impl MessageHandler {
 
                                 // Record a violation so the peer gets banned after repeated attempts.
                                 if let Some(blacklist) = &context.blacklist {
-                                    let bare_ip =
-                                        peer_ip.split(':').next().unwrap_or(&peer_ip);
-                                    if let Ok(ban_ip) =
-                                        bare_ip.parse::<std::net::IpAddr>()
-                                    {
+                                    let bare_ip = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                                    if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
                                         let mut bl = blacklist.write().await;
                                         bl.record_violation(
                                             ban_ip,
@@ -3734,28 +3742,21 @@ impl MessageHandler {
                                 // treat it as a coordinated attack and subnet-ban them all.
                                 {
                                     // subnet_key = "w.x.y" (first 3 octets of peer IPv4)
-                                    let bare_ip =
-                                        peer_ip.split(':').next().unwrap_or(&peer_ip);
+                                    let bare_ip = peer_ip.split(':').next().unwrap_or(&peer_ip);
                                     let subnet_key = bare_ip
                                         .rsplit_once('.')
                                         .map(|x| x.0)
                                         .unwrap_or(bare_ip)
                                         .to_string();
-                                    let tracker_key =
-                                        format!("{}|{}", subnet_key, outpoint_key);
+                                    let tracker_key = format!("{}|{}", subnet_key, outpoint_key);
 
                                     // Static: outpoint+subnet → Vec<(ip, timestamp)>
                                     static SYBIL_TRACKER: std::sync::OnceLock<
-                                        dashmap::DashMap<
-                                            String,
-                                            Vec<(String, std::time::Instant)>,
-                                        >,
+                                        dashmap::DashMap<String, Vec<(String, std::time::Instant)>>,
                                     > = std::sync::OnceLock::new();
-                                    let tracker =
-                                        SYBIL_TRACKER.get_or_init(dashmap::DashMap::new);
+                                    let tracker = SYBIL_TRACKER.get_or_init(dashmap::DashMap::new);
 
-                                    let mut entry =
-                                        tracker.entry(tracker_key.clone()).or_default();
+                                    let mut entry = tracker.entry(tracker_key.clone()).or_default();
                                     let now = std::time::Instant::now();
                                     // Evict stale entries (>60s)
                                     entry.retain(|(_, ts)| ts.elapsed().as_secs() < 60);
@@ -3768,8 +3769,7 @@ impl MessageHandler {
 
                                     if unique_count >= 5 {
                                         if let Some(blacklist) = &context.blacklist {
-                                            let cidr =
-                                                format!("{}.0/24", subnet_key);
+                                            let cidr = format!("{}.0/24", subnet_key);
                                             let mut bl = blacklist.write().await;
                                             if bl.subnet_ban_count() < 256 {
                                                 bl.add_subnet_ban(
@@ -3915,8 +3915,10 @@ impl MessageHandler {
                         self.direction, peer_ip, outpoint_for_relay
                     );
                     if let Some(ai) = &context.ai_system {
-                        ai.attack_detector
-                            .record_collateral_spoof_attempt(&peer_ip, &outpoint_for_relay.to_string());
+                        ai.attack_detector.record_collateral_spoof_attempt(
+                            &peer_ip,
+                            &outpoint_for_relay.to_string(),
+                        );
                     }
                     if let Some(blacklist) = &context.blacklist {
                         let bare_ip = peer_ip.split(':').next().unwrap_or(&peer_ip);
@@ -3966,7 +3968,10 @@ impl MessageHandler {
                 let now = Instant::now();
                 let limiter = subnet_announce_limiter();
                 let mut entry = limiter.entry(subnet_key.clone()).or_insert_with(|| {
-                    (now - SUBNET_ANNOUNCE_LOG_INTERVAL - Duration::from_secs(1), 0u32)
+                    (
+                        now - SUBNET_ANNOUNCE_LOG_INTERVAL - Duration::from_secs(1),
+                        0u32,
+                    )
                 });
                 entry.1 += 1;
                 if now.duration_since(entry.0) >= SUBNET_ANNOUNCE_LOG_INTERVAL {
@@ -4837,9 +4842,9 @@ impl MessageHandler {
             {
                 let now = Instant::now();
                 let tracker = incoming_fork_alert_tracker();
-                let mut entry = tracker.entry(self.peer_ip.clone()).or_insert_with(|| {
-                    (now, 0u32, now)
-                });
+                let mut entry = tracker
+                    .entry(self.peer_ip.clone())
+                    .or_insert_with(|| (now, 0u32, now));
                 let (last_sent, rejected_cycles, window_start) = *entry;
 
                 // Reset window if it has expired
@@ -5709,9 +5714,9 @@ impl MessageHandler {
             {
                 let now = Instant::now();
                 let tracker = incoming_fork_alert_tracker();
-                let mut entry = tracker.entry(self.peer_ip.clone()).or_insert_with(|| {
-                    (now, 0u32, now)
-                });
+                let mut entry = tracker
+                    .entry(self.peer_ip.clone())
+                    .or_insert_with(|| (now, 0u32, now));
                 let (last_sent, rejected_cycles, window_start) = *entry;
                 let in_window = now.duration_since(window_start) < FORK_ALERT_WINDOW;
                 let new_cycles = if in_window { rejected_cycles + 1 } else { 1 };

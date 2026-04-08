@@ -527,7 +527,8 @@ impl PrecommitVoteAccumulator {
     pub fn add_vote(&self, block_hash: Hash256, voter_id: String, signature: Vec<u8>, weight: u64) {
         // Check if this voter already voted for a DIFFERENT block
         for entry in self.votes.iter() {
-            if *entry.key() != block_hash && entry.value().iter().any(|(id, _, _)| *id == voter_id) {
+            if *entry.key() != block_hash && entry.value().iter().any(|(id, _, _)| *id == voter_id)
+            {
                 tracing::debug!(
                     "⚠️ Ignoring duplicate precommit vote from {} — already voted for different block",
                     voter_id

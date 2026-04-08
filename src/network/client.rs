@@ -112,10 +112,7 @@ impl NetworkClient {
     }
 
     /// Set the attack detector so outbound disconnects are recorded for AV3 detection.
-    pub fn set_attack_detector(
-        &mut self,
-        ad: Arc<crate::ai::attack_detector::AttackDetector>,
-    ) {
+    pub fn set_attack_detector(&mut self, ad: Arc<crate::ai::attack_detector::AttackDetector>) {
         self.attack_detector = Some(ad);
     }
 
@@ -431,7 +428,8 @@ impl NetworkClient {
                         std::collections::HashMap::new();
                     for mn_info in &all_masternodes {
                         let addr = &mn_info.masternode.address;
-                        if connection_manager.is_connected(addr) || peer_registry.is_connected(addr) {
+                        if connection_manager.is_connected(addr) || peer_registry.is_connected(addr)
+                        {
                             let ip = addr.split(':').next().unwrap_or(addr);
                             let parts: Vec<&str> = ip.split('.').collect();
                             let subnet = if parts.len() >= 3 {

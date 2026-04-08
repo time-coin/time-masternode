@@ -17,18 +17,18 @@ const DB_KEY_ATTACKS: &[u8] = b"ai:attack_detector:attacks";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AttackType {
-    EclipseAttack,         // Peer isolation attempt
-    SybilAttack,           // Fake peer flooding
-    TimingAttack,          // Clock manipulation
-    DoublespendAttack,     // Multiple conflicting transactions
-    ForkBombing,           // Intentional fork creation
-    ResourceExhaustion,    // Memory/bandwidth exhaustion
-    GossipEvictionStorm,   // Repeated V4 eviction attempts for the same outpoint
-    CollateralSpoofing,    // Attempting to claim another node's registered collateral
-    SyncLoopFlooding,      // Excessive GetBlocks for same range (sync loop DoS)
-    UtxoLockFlood,         // Peer sends excessive UTXOStateUpdate messages for one TX (DoS)
-    SynchronizedCycling,   // Coordinated synchronized disconnect/reconnect storm from a subnet
-    TlsFlood,              // High-rate TLS handshake flood from distributed IPs
+    EclipseAttack,       // Peer isolation attempt
+    SybilAttack,         // Fake peer flooding
+    TimingAttack,        // Clock manipulation
+    DoublespendAttack,   // Multiple conflicting transactions
+    ForkBombing,         // Intentional fork creation
+    ResourceExhaustion,  // Memory/bandwidth exhaustion
+    GossipEvictionStorm, // Repeated V4 eviction attempts for the same outpoint
+    CollateralSpoofing,  // Attempting to claim another node's registered collateral
+    SyncLoopFlooding,    // Excessive GetBlocks for same range (sync loop DoS)
+    UtxoLockFlood,       // Peer sends excessive UTXOStateUpdate messages for one TX (DoS)
+    SynchronizedCycling, // Coordinated synchronized disconnect/reconnect storm from a subnet
+    TlsFlood,            // High-rate TLS handshake flood from distributed IPs
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,7 +63,7 @@ pub enum MitigationAction {
     AlertOperator,
     EmergencySync,
     HaltProduction,
-    BanSubnet(String),     // Ban an entire /24 (or custom CIDR) subnet
+    BanSubnet(String), // Ban an entire /24 (or custom CIDR) subnet
 }
 
 #[derive(Debug, Clone)]
@@ -363,7 +363,10 @@ impl AttackDetector {
             confidence,
             severity: AttackSeverity::Critical,
             indicators: vec![
-                format!("{} eviction storm attempts for outpoint {} from {}", attempts, outpoint, addr),
+                format!(
+                    "{} eviction storm attempts for outpoint {} from {}",
+                    attempts, outpoint, addr
+                ),
                 "V4 eviction blocked by per-outpoint cooldown".to_string(),
             ],
             first_detected: now,
@@ -382,9 +385,13 @@ impl AttackDetector {
             confidence: 0.95,
             severity: AttackSeverity::Critical,
             indicators: vec![
-                format!("V4 proof used to evict local node from outpoint {}", outpoint),
+                format!(
+                    "V4 proof used to evict local node from outpoint {}",
+                    outpoint
+                ),
                 format!("Attacker IP: {}", addr),
-                "Gossip eviction of local node blocked — on-chain MasternodeReg required".to_string(),
+                "Gossip eviction of local node blocked — on-chain MasternodeReg required"
+                    .to_string(),
             ],
             first_detected: now,
             last_seen: now,
@@ -402,7 +409,10 @@ impl AttackDetector {
             confidence: 0.80,
             severity: AttackSeverity::Medium,
             indicators: vec![
-                format!("Peer {} sent ≥20 similar GetBlocks requests within 30s", addr),
+                format!(
+                    "Peer {} sent ≥20 similar GetBlocks requests within 30s",
+                    addr
+                ),
                 "Sync loop DoS pattern detected".to_string(),
             ],
             first_detected: now,
@@ -467,8 +477,12 @@ impl AttackDetector {
                 confidence: 0.95,
                 severity: AttackSeverity::High,
                 indicators: vec![
-                    format!("{} pre-handshake violations from {} — persistent probe", violations, addr),
-                    "Peer repeatedly sends data before handshake; likely an automated attack".to_string(),
+                    format!(
+                        "{} pre-handshake violations from {} — persistent probe",
+                        violations, addr
+                    ),
+                    "Peer repeatedly sends data before handshake; likely an automated attack"
+                        .to_string(),
                 ],
                 first_detected: now,
                 last_seen: now,
@@ -482,7 +496,10 @@ impl AttackDetector {
                 confidence: 0.75,
                 severity: AttackSeverity::Medium,
                 indicators: vec![
-                    format!("{} pre-handshake message violations from {}", violations, addr),
+                    format!(
+                        "{} pre-handshake message violations from {}",
+                        violations, addr
+                    ),
                     "Peer sends data before completing Version/Verack exchange".to_string(),
                 ],
                 first_detected: now,

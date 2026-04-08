@@ -91,9 +91,7 @@ impl IPBlacklist {
                     .ok()
                     .and_then(|s| s.parse::<IpAddr>().ok())
                 {
-                    if let Ok((expiry_unix, reason)) =
-                        bincode::deserialize::<(u64, String)>(&v)
-                    {
+                    if let Ok((expiry_unix, reason)) = bincode::deserialize::<(u64, String)>(&v) {
                         if expiry_unix <= now_unix {
                             // Expired — prune from sled too
                             let _ = tree.remove(k);
@@ -110,7 +108,8 @@ impl IPBlacklist {
             if loaded > 0 || expired > 0 {
                 tracing::info!(
                     "🔒 Loaded {} active temp ban(s) from sled ({} expired and pruned)",
-                    loaded, expired
+                    loaded,
+                    expired
                 );
             }
         }
@@ -136,8 +135,7 @@ impl IPBlacklist {
                             .iter()
                             .any(|(n, p, _)| format!("{}/{}", n, p) == cidr_str);
                         if !already {
-                            self.subnet_blacklist
-                                .push((network, prefix_len, reason));
+                            self.subnet_blacklist.push((network, prefix_len, reason));
                         }
                     }
                 }
@@ -158,16 +156,14 @@ impl IPBlacklist {
                     .ok()
                     .and_then(|s| s.parse::<IpAddr>().ok())
                 {
-                    if let Ok((count, last_unix)) =
-                        bincode::deserialize::<(u32, u64)>(&v)
-                    {
+                    if let Ok((count, last_unix)) = bincode::deserialize::<(u32, u64)>(&v) {
                         if last_unix < cutoff {
                             let _ = tree.remove(k);
                         } else {
                             // Reconstruct Instant from delta
                             let elapsed_secs = now_unix.saturating_sub(last_unix);
-                            let last_instant = Instant::now()
-                                - Duration::from_secs(elapsed_secs.min(3600));
+                            let last_instant =
+                                Instant::now() - Duration::from_secs(elapsed_secs.min(3600));
                             self.violations.insert(ip, (count, last_instant));
                             loaded += 1;
                         }
@@ -175,10 +171,7 @@ impl IPBlacklist {
                 }
             }
             if loaded > 0 {
-                tracing::info!(
-                    "🔒 Loaded {} violation counter(s) from sled",
-                    loaded
-                );
+                tracing::info!("🔒 Loaded {} violation counter(s) from sled", loaded);
             }
         }
     }
@@ -433,7 +426,9 @@ impl IPBlacklist {
         let old_ips: Vec<IpAddr> = self
             .violations
             .iter()
-            .filter(|(_, (_, last_time))| now.duration_since(*last_time) >= Duration::from_secs(86400))
+            .filter(|(_, (_, last_time))| {
+                now.duration_since(*last_time) >= Duration::from_secs(86400)
+            })
             .map(|(ip, _)| *ip)
             .collect();
         for ip in &old_ips {
@@ -461,10 +456,10 @@ impl IPBlacklist {
     pub fn list_bans(
         &self,
     ) -> (
-        Vec<(String, String)>,                 // (ip, reason)
-        Vec<(String, u64, String)>,            // (ip, remaining_secs, reason)
-        Vec<(String, String)>,                 // (cidr, reason)
-        Vec<(String, u32)>,                    // (ip, violation_count)
+        Vec<(String, String)>,      // (ip, reason)
+        Vec<(String, u64, String)>, // (ip, remaining_secs, reason)
+        Vec<(String, String)>,      // (cidr, reason)
+        Vec<(String, u32)>,         // (ip, violation_count)
     ) {
         let now = Instant::now();
 

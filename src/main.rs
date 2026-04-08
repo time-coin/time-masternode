@@ -1325,9 +1325,7 @@ async fn main() {
                     .await
                 {
                     Ok(_) => {
-                        tracing::info!(
-                            "✅ Local masternode re-registered after evicting squatter"
-                        );
+                        tracing::info!("✅ Local masternode re-registered after evicting squatter");
                         registry.set_local_masternode(mn.address.clone()).await;
 
                         // Mark as OnChain so it persists across peer disconnects
@@ -1350,8 +1348,8 @@ async fn main() {
                         } else {
                             wallet.signing_key().clone()
                         };
-                        if let Err(e) = consensus_engine
-                            .set_identity(mn.address.clone(), signing_key)
+                        if let Err(e) =
+                            consensus_engine.set_identity(mn.address.clone(), signing_key)
                         {
                             eprintln!("⚠️ Failed to set consensus identity: {}", e);
                         }
@@ -1375,7 +1373,10 @@ async fn main() {
                                     lock_height,
                                     mn.tier.collateral(),
                                 ) {
-                                    tracing::warn!("⚠️ Failed to lock local collateral UTXO: {:?}", e);
+                                    tracing::warn!(
+                                        "⚠️ Failed to lock local collateral UTXO: {:?}",
+                                        e
+                                    );
                                 } else {
                                     tracing::info!(
                                         "🔒 Locked collateral UTXO for {:?} tier",
@@ -1576,8 +1577,7 @@ async fn main() {
                     (&signing_key_for_announcement, &mn.collateral_outpoint)
                 {
                     let txid_hex = hex::encode(outpoint.txid);
-                    let proof_msg =
-                        format!("TIME_COLLATERAL_CLAIM:{}:{}", txid_hex, outpoint.vout);
+                    let proof_msg = format!("TIME_COLLATERAL_CLAIM:{}:{}", txid_hex, outpoint.vout);
                     use ed25519_dalek::Signer;
                     let sig = signing_key.sign(proof_msg.as_bytes());
                     return NetworkMessage::MasternodeAnnouncementV4 {
@@ -3799,9 +3799,12 @@ async fn main() {
                             } else {
                                 vec![]
                             };
-                            block_consensus_engine
-                                .timevote
-                                .generate_precommit_vote(block_hash, our_addr, our_weight, precommit_sig.clone());
+                            block_consensus_engine.timevote.generate_precommit_vote(
+                                block_hash,
+                                our_addr,
+                                our_weight,
+                                precommit_sig.clone(),
+                            );
                             let precommit =
                                 crate::network::message::NetworkMessage::TimeVotePrecommit {
                                     block_hash,
@@ -4460,7 +4463,9 @@ async fn main() {
             server.set_ai_system(ai_system.clone());
 
             // Enable blacklist persistence — bans now survive daemon restarts
-            server.enable_blacklist_persistence(&blacklist_storage).await;
+            server
+                .enable_blacklist_persistence(&blacklist_storage)
+                .await;
 
             // Initialize TLS for encrypted P2P connections
             let tls_config = if config.security.enable_tls {

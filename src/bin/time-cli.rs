@@ -1490,10 +1490,19 @@ fn print_human_readable(
         Commands::GetBlacklist => {
             let summary = result.get("summary");
             if let Some(s) = summary {
-                let perm = s.get("permanent_bans").and_then(|v| v.as_u64()).unwrap_or(0);
-                let temp = s.get("temporary_bans").and_then(|v| v.as_u64()).unwrap_or(0);
-                let viol = s.get("active_violations").and_then(|v| v.as_u64()).unwrap_or(0);
-                let wl   = s.get("whitelisted").and_then(|v| v.as_u64()).unwrap_or(0);
+                let perm = s
+                    .get("permanent_bans")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let temp = s
+                    .get("temporary_bans")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let viol = s
+                    .get("active_violations")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let wl = s.get("whitelisted").and_then(|v| v.as_u64()).unwrap_or(0);
                 println!("=== Blacklist Summary ===");
                 println!("Permanent bans:   {}", perm);
                 println!("Temporary bans:   {}", temp);
@@ -1504,7 +1513,7 @@ fn print_human_readable(
                 if !perms.is_empty() {
                     println!("\n--- Permanent Bans ---");
                     for entry in perms {
-                        let ip     = entry.get("ip").and_then(|v| v.as_str()).unwrap_or("");
+                        let ip = entry.get("ip").and_then(|v| v.as_str()).unwrap_or("");
                         let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("");
                         println!("  {:<20}  {}", ip, reason);
                     }
@@ -1514,8 +1523,11 @@ fn print_human_readable(
                 if !temps.is_empty() {
                     println!("\n--- Temporary Bans ---");
                     for entry in temps {
-                        let ip   = entry.get("ip").and_then(|v| v.as_str()).unwrap_or("");
-                        let secs = entry.get("remaining_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let ip = entry.get("ip").and_then(|v| v.as_str()).unwrap_or("");
+                        let secs = entry
+                            .get("remaining_secs")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
                         let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("");
                         println!("  {:<20}  {}s remaining  {}", ip, secs, reason);
                     }
@@ -1525,7 +1537,7 @@ fn print_human_readable(
                 if !subnets.is_empty() {
                     println!("\n--- Subnet Bans ---");
                     for entry in subnets {
-                        let cidr   = entry.get("subnet").and_then(|v| v.as_str()).unwrap_or("");
+                        let cidr = entry.get("subnet").and_then(|v| v.as_str()).unwrap_or("");
                         let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("");
                         println!("  {:<20}  {}", cidr, reason);
                     }
@@ -1535,15 +1547,20 @@ fn print_human_readable(
                 if !viols.is_empty() {
                     println!("\n--- Top Violation Counts ---");
                     for entry in viols.iter().take(20) {
-                        let ip    = entry.get("ip").and_then(|v| v.as_str()).unwrap_or("");
-                        let count = entry.get("violations").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let ip = entry.get("ip").and_then(|v| v.as_str()).unwrap_or("");
+                        let count = entry
+                            .get("violations")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
                         println!("  {:<20}  {} violation(s)", ip, count);
                     }
                 }
             }
         }
         Commands::Unban { .. } | Commands::AddWhitelist { .. } => {
-            let msg = result.get("message").and_then(|v| v.as_str())
+            let msg = result
+                .get("message")
+                .and_then(|v| v.as_str())
                 .or_else(|| result.get("result").and_then(|v| v.as_str()))
                 .unwrap_or("Done");
             println!("{}", msg);

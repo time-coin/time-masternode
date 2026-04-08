@@ -3847,9 +3847,7 @@ impl Blockchain {
                     {
                         if let Some(ref outpoint) = mn.masternode.collateral_outpoint {
                             if let Ok(utxo) = self.utxo_manager.get_utxo(outpoint).await {
-                                if !utxo.address.is_empty()
-                                    && utxo.address != registered_dest
-                                {
+                                if !utxo.address.is_empty() && utxo.address != registered_dest {
                                     tracing::info!(
                                         "💰 Block {}: redirecting reward for {} from {} to UTXO \
                                          owner {} (collateral enforcement)",
@@ -6045,14 +6043,12 @@ impl Blockchain {
                 // Fallback: linear search through recent blocks
                 if !found {
                     let search_limit = block.header.height.min(1000);
-                    for search_height in
-                        (0..block.header.height).rev().take(search_limit as usize)
+                    for search_height in (0..block.header.height).rev().take(search_limit as usize)
                     {
                         if let Ok(search_block) = self.get_block(search_height) {
                             for search_tx in &search_block.transactions {
                                 if search_tx.txid() == spent_txid {
-                                    if let Some(output) =
-                                        search_tx.outputs.get(spent_vout as usize)
+                                    if let Some(output) = search_tx.outputs.get(spent_vout as usize)
                                     {
                                         input_sum += output.value;
                                         found = true;
@@ -6334,8 +6330,7 @@ impl Blockchain {
                 } else {
                     info.masternode.wallet_address.clone()
                 }
-            })
-        {
+            }) {
             Some(w) => w,
             None => return Ok(()),
         };
@@ -6589,43 +6584,39 @@ impl Blockchain {
                     // of which masternodes the producer observed as consensus participants.
                     //
                     // If the bitmap is absent (old block), fall back to gossip `list_by_tier`.
-                    let non_producer_tier_nodes: usize =
-                        if !active_bitmap_nodes.is_empty() {
-                            // Use pre-computed bitmap decode (avoids redundant async call).
-                            active_bitmap_nodes
-                                .iter()
-                                .filter(|info| {
-                                    info.masternode.tier == *tier && {
-                                        let wallet = if !info.reward_address.is_empty() {
-                                            &info.reward_address
-                                        } else {
-                                            &info.masternode.wallet_address
-                                        };
-                                        wallet != producer_addr
-                                            && wallet.as_str() != producer_wallet
-                                    }
-                                })
-                                .count()
-                        } else if !block.header.active_masternodes_bitmap.is_empty() {
-                            // Bitmap present but decoded to zero nodes (empty registry?).
-                            0
-                        } else {
-                            // Old block without bitmap — fall back to gossip state.
-                            let tier_nodes =
-                                self.masternode_registry.list_by_tier(*tier).await;
-                            tier_nodes
-                                .iter()
-                                .filter(|info| {
+                    let non_producer_tier_nodes: usize = if !active_bitmap_nodes.is_empty() {
+                        // Use pre-computed bitmap decode (avoids redundant async call).
+                        active_bitmap_nodes
+                            .iter()
+                            .filter(|info| {
+                                info.masternode.tier == *tier && {
                                     let wallet = if !info.reward_address.is_empty() {
                                         &info.reward_address
                                     } else {
                                         &info.masternode.wallet_address
                                     };
-                                    wallet != producer_addr
-                                        && wallet.as_str() != producer_wallet
-                                })
-                                .count()
-                        };
+                                    wallet != producer_addr && wallet.as_str() != producer_wallet
+                                }
+                            })
+                            .count()
+                    } else if !block.header.active_masternodes_bitmap.is_empty() {
+                        // Bitmap present but decoded to zero nodes (empty registry?).
+                        0
+                    } else {
+                        // Old block without bitmap — fall back to gossip state.
+                        let tier_nodes = self.masternode_registry.list_by_tier(*tier).await;
+                        tier_nodes
+                            .iter()
+                            .filter(|info| {
+                                let wallet = if !info.reward_address.is_empty() {
+                                    &info.reward_address
+                                } else {
+                                    &info.masternode.wallet_address
+                                };
+                                wallet != producer_addr && wallet.as_str() != producer_wallet
+                            })
+                            .count()
+                    };
                     if non_producer_tier_nodes > 0 {
                         // Cross-check: if the bitmap is present, verify that at least
                         // one of the identified tier nodes actually appears as a paid
@@ -6638,27 +6629,28 @@ impl Blockchain {
                         // For old blocks (no bitmap) we always hard-fail: the gossip
                         // fallback is inherently unreliable, so we only relax the check
                         // when the bitmap drift signal is available.
-                        let drift_detected = !block.header.active_masternodes_bitmap.is_empty() && {
-                            let reward_wallets: std::collections::HashSet<&str> = block
-                                .masternode_rewards
-                                .iter()
-                                .filter(|(_, amt)| *amt > 0)
-                                .map(|(w, _)| w.as_str())
-                                .collect();
-                            !active_bitmap_nodes.iter().any(|info| {
-                                if info.masternode.tier != *tier {
-                                    return false;
-                                }
-                                let w = if !info.reward_address.is_empty() {
-                                    &info.reward_address
-                                } else {
-                                    &info.masternode.wallet_address
-                                };
-                                w != producer_addr
-                                    && w.as_str() != producer_wallet
-                                    && reward_wallets.contains(w.as_str())
-                            })
-                        };
+                        let drift_detected = !block.header.active_masternodes_bitmap.is_empty()
+                            && {
+                                let reward_wallets: std::collections::HashSet<&str> = block
+                                    .masternode_rewards
+                                    .iter()
+                                    .filter(|(_, amt)| *amt > 0)
+                                    .map(|(w, _)| w.as_str())
+                                    .collect();
+                                !active_bitmap_nodes.iter().any(|info| {
+                                    if info.masternode.tier != *tier {
+                                        return false;
+                                    }
+                                    let w = if !info.reward_address.is_empty() {
+                                        &info.reward_address
+                                    } else {
+                                        &info.masternode.wallet_address
+                                    };
+                                    w != producer_addr
+                                        && w.as_str() != producer_wallet
+                                        && reward_wallets.contains(w.as_str())
+                                })
+                            };
                         if drift_detected {
                             tracing::warn!(
                                 "Block {} {:?}-tier: bitmap shows {} active non-producer \
@@ -6816,7 +6808,8 @@ impl Blockchain {
                         let is_known_masternode = all_infos.iter().any(|info| {
                             info.reward_address == *wallet
                                 || info.masternode.wallet_address == *wallet
-                        }) || collateral_utxo_tier_map.contains_key(wallet.as_str());
+                        }) || collateral_utxo_tier_map
+                            .contains_key(wallet.as_str());
 
                         if is_known_masternode {
                             tracing::warn!(
@@ -7036,7 +7029,10 @@ impl Blockchain {
             }
         };
 
-        if let Err(e) = self.validate_pool_distribution(block, calculated_fees).await {
+        if let Err(e) = self
+            .validate_pool_distribution(block, calculated_fees)
+            .await
+        {
             if !producer_addr.is_empty() {
                 self.record_reward_violation(producer_addr).await;
             }

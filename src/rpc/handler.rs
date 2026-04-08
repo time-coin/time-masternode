@@ -2446,8 +2446,9 @@ impl RpcHandler {
             _ => (false, String::new()),
         };
 
-        let tier_match = !squatter && (format!("{:?}", local_mn.masternode.tier) == detected_tier
-            || local_mn.masternode.tier == crate::types::MasternodeTier::Free);
+        let tier_match = !squatter
+            && (format!("{:?}", local_mn.masternode.tier) == detected_tier
+                || local_mn.masternode.tier == crate::types::MasternodeTier::Free);
 
         let overall = if !utxo_found {
             "utxo_not_found"
@@ -2535,7 +2536,10 @@ impl RpcHandler {
         }
         let mut txid = [0u8; 32];
         txid.copy_from_slice(&txid_bytes);
-        let outpoint = crate::types::OutPoint { txid, vout: vout_u32 };
+        let outpoint = crate::types::OutPoint {
+            txid,
+            vout: vout_u32,
+        };
         let outpoint_display = format!("{}:{}", txid_str, vout_u32);
 
         // Registry: who currently claims this outpoint via gossip?
@@ -2568,7 +2572,11 @@ impl RpcHandler {
         let anchor_ip = self.registry.get_collateral_anchor(&outpoint);
 
         let claimant = registry_ip.clone().or_else(|| anchor_ip.clone());
-        let status = if claimant.is_none() { "unclaimed" } else { "claimed" };
+        let status = if claimant.is_none() {
+            "unclaimed"
+        } else {
+            "claimed"
+        };
 
         Ok(json!({
             "outpoint": outpoint_display,
@@ -4053,9 +4061,13 @@ impl RpcHandler {
 
         if was_banned {
             tracing::info!("🔓 RPC: Unbanned {}", ip_addr);
-            Ok(json!({"result": "success", "ip": ip_str, "message": "IP removed from ban list and violations cleared"}))
+            Ok(
+                json!({"result": "success", "ip": ip_str, "message": "IP removed from ban list and violations cleared"}),
+            )
         } else {
-            Ok(json!({"result": "not_banned", "ip": ip_str, "message": "IP was not in the ban list (violations cleared anyway)"}))
+            Ok(
+                json!({"result": "not_banned", "ip": ip_str, "message": "IP was not in the ban list (violations cleared anyway)"}),
+            )
         }
     }
 

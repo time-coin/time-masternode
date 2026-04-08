@@ -254,9 +254,7 @@ impl NetworkServer {
                     // yet, and marks them so subsequent ticks don't re-apply the same violation.
                     // This prevents a single detection event from accumulating 10 violations and
                     // triggering a permanent ban within 5 minutes.
-                    let attacks = enforce_ai
-                        .attack_detector
-                        .take_pending_mitigations();
+                    let attacks = enforce_ai.attack_detector.take_pending_mitigations();
 
                     if attacks.is_empty() {
                         continue;
@@ -349,8 +347,7 @@ impl NetworkServer {
         // Key: first-three-octet prefix (e.g. "50.28.104"), Value: accept timestamps.
         // Caps any single /24 at MAX_SUBNET_CONNECTS_PER_MIN new connections per minute,
         // preventing distributed SNI floods and botnet cycling attacks.
-        let subnet_accept_rate: Arc<DashMap<String, VecDeque<Instant>>> =
-            Arc::new(DashMap::new());
+        let subnet_accept_rate: Arc<DashMap<String, VecDeque<Instant>>> = Arc::new(DashMap::new());
 
         loop {
             let (stream, addr) = self.listener.accept().await?;
@@ -409,9 +406,7 @@ impl NetworkServer {
                 };
                 let now_instant = Instant::now();
                 let reject = {
-                    let mut entry = subnet_accept_rate
-                        .entry(subnet.clone())
-                        .or_default();
+                    let mut entry = subnet_accept_rate.entry(subnet.clone()).or_default();
                     while entry
                         .front()
                         .map(|t: &Instant| now_instant.duration_since(*t).as_secs() >= 60)
@@ -737,7 +732,8 @@ async fn handle_peer(
     // Per-connection UTXO lock flood counter: tracks how many UTXOStateUpdate (Locked)
     // messages this peer has sent for each TX.  A legitimate TX with N inputs produces
     // exactly N lock messages — an attacker who sends far more is DoS-flooding us.
-    let mut peer_tx_lock_counts: std::collections::HashMap<[u8; 32], u32> = std::collections::HashMap::new();
+    let mut peer_tx_lock_counts: std::collections::HashMap<[u8; 32], u32> =
+        std::collections::HashMap::new();
     const MAX_UTXO_LOCKS_PER_TX: u32 = 50;
 
     let magic_bytes = network_type.magic_bytes();

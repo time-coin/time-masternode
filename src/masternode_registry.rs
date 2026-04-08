@@ -281,14 +281,10 @@ impl MasternodeRegistry {
                 continue;
             }
             if let Some(ref outpoint) = info.masternode.collateral_outpoint {
-                let outpoint_key =
-                    format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
+                let outpoint_key = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
                 let anchor_key = format!("collateral_anchor:{}", outpoint_key);
                 if db.get(anchor_key.as_bytes()).ok().flatten().is_none() {
-                    let _ = db.insert(
-                        anchor_key.as_bytes(),
-                        info.masternode.address.as_bytes(),
-                    );
+                    let _ = db.insert(anchor_key.as_bytes(), info.masternode.address.as_bytes());
                     anchors_written += 1;
                 }
             }
@@ -336,10 +332,7 @@ impl MasternodeRegistry {
 
     /// Inject the UTXO manager after construction so that collateral ownership
     /// can be verified during gossip registration without circular dependencies.
-    pub async fn set_utxo_manager(
-        &self,
-        utxo_manager: Arc<crate::utxo_manager::UTXOStateManager>,
-    ) {
+    pub async fn set_utxo_manager(&self, utxo_manager: Arc<crate::utxo_manager::UTXOStateManager>) {
         *self.utxo_manager.write().await = Some(utxo_manager);
     }
 
@@ -353,12 +346,8 @@ impl MasternodeRegistry {
         let now = Self::now();
         self.post_eviction_lockout
             .insert(outpoint_key.to_string(), now);
-        tracing::debug!(
-            "Post-eviction lockout armed for {} (10 min)",
-            outpoint_key
-        );
+        tracing::debug!("Post-eviction lockout armed for {} (10 min)", outpoint_key);
     }
-
 
     fn now() -> u64 {
         SystemTime::now()
@@ -559,16 +548,18 @@ impl MasternodeRegistry {
                     // incoming node is the legitimate owner — evict the squatter and re-anchor.
                     let utxo_mgr_guard = self.utxo_manager.read().await;
                     let utxo_addr = if let Some(ref utxo_manager) = *utxo_mgr_guard {
-                        utxo_manager.get_utxo(outpoint).await.ok().map(|u| u.address)
+                        utxo_manager
+                            .get_utxo(outpoint)
+                            .await
+                            .ok()
+                            .map(|u| u.address)
                     } else {
                         None
                     };
                     drop(utxo_mgr_guard);
 
                     if let Some(ref utxo_address) = utxo_addr {
-                        if !utxo_address.is_empty()
-                            && utxo_address == &masternode.wallet_address
-                        {
+                        if !utxo_address.is_empty() && utxo_address == &masternode.wallet_address {
                             // The UTXO output address equals the wallet/reward address, which
                             // is publicly visible in block rewards. Any node can forge a
                             // matching wallet_address regardless of what tier they claim.
@@ -613,8 +604,7 @@ impl MasternodeRegistry {
                                         .map(|v| *v)
                                         .unwrap_or(0);
                                     if now.saturating_sub(last_warned) >= 300 {
-                                        self.collateral_migration_times
-                                            .insert(spam_key, now);
+                                        self.collateral_migration_times.insert(spam_key, now);
                                         tracing::warn!(
                                             "🛡️ Dual-claimant stalemate: both {} and {} hold wallet \
                                              matching UTXO {} — canonical {} keeps registration \
@@ -677,8 +667,7 @@ impl MasternodeRegistry {
                             // Fall through to register the legitimate owner
                         } else {
                             // UTXO address doesn't match — genuine hijack attempt or wrong wallet
-                            let spam_key =
-                                format!("hijack_warn:{}:{}", outpoint_key, incoming_ip);
+                            let spam_key = format!("hijack_warn:{}:{}", outpoint_key, incoming_ip);
                             let last_warned = self
                                 .collateral_migration_times
                                 .get(&spam_key)
@@ -790,7 +779,10 @@ impl MasternodeRegistry {
                 // is confirmed on-chain — that is the collateral-churn / IP-squatting attack
                 // where an attacker migrates from one of their own IPs to a legitimate node's IP.
                 if let Some(dest_info) = nodes.get(&masternode.address) {
-                    if matches!(dest_info.registration_source, RegistrationSource::OnChain(_)) {
+                    if matches!(
+                        dest_info.registration_source,
+                        RegistrationSource::OnChain(_)
+                    ) {
                         tracing::warn!(
                             "🛡️ [Collateral-Churn] Migration from {} to on-chain node {} \
                              blocked (incoming outpoint: {})",
@@ -1183,8 +1175,7 @@ impl MasternodeRegistry {
         // The anchor ensures all future claims must pass the canonical-anchor check.
         if masternode.tier != crate::types::MasternodeTier::Free {
             if let Some(ref outpoint) = masternode.collateral_outpoint {
-                let outpoint_key =
-                    format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
+                let outpoint_key = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
                 let anchor_key = format!("collateral_anchor:{}", outpoint_key);
                 if self.db.get(anchor_key.as_bytes()).ok().flatten().is_none() {
                     let _ = self
@@ -1474,8 +1465,7 @@ impl MasternodeRegistry {
             .values()
             .filter(|info| {
                 info.masternode.wallet_address == wallet_address
-                    || (!info.reward_address.is_empty()
-                        && info.reward_address == wallet_address)
+                    || (!info.reward_address.is_empty() && info.reward_address == wallet_address)
             })
             .map(|info| info.masternode.tier)
             .max_by_key(|tier| *tier as u64)
