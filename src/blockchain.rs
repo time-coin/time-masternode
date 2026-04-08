@@ -6326,7 +6326,7 @@ impl Blockchain {
         // the produce_block logic exactly.  Validators that only check wallet_address
         // will compute producer_received=0 when reward_address≠wallet_address,
         // incorrectly rejecting the block and causing a consensus fork.
-        let all_infos = self.masternode_registry.list_all().await;
+        let all_infos = self.masternode_registry.all_masternodes_cached();
         let producer_wallet = match all_infos
             .iter()
             .find(|info| info.masternode.address == *producer_addr)
