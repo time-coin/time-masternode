@@ -240,15 +240,24 @@ impl NetworkServer {
             }
         });
 
-        // Spawn attack mitigation enforcement task
-        // Periodically checks detected attacks and applies mitigations to the blacklist
+        // Spawn attack mitigation enforcement task.
+        // Wakes immediately when a new attack is detected (via ban_notifier Notify)
+        // and falls back to a 30-second poll so transient misses are still caught.
         if let Some(ai) = &self.ai_system {
             let enforce_ai = ai.clone();
             let enforce_blacklist = self.blacklist.clone();
             let enforce_registry = self.peer_registry.clone();
+            // Grab the notifier before entering the task so we don't hold an Arc<AISystem>
+            // reference just for the notifier.
+            let enforce_notify = enforce_ai.attack_detector.ban_notifier();
             tokio::spawn(async move {
                 loop {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                    // Wait for either an immediate wakeup from a new attack detection
+                    // or the 30-second fallback tick — whichever comes first.
+                    tokio::select! {
+                        _ = enforce_notify.notified() => {}
+                        _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {}
+                    }
 
                     // take_pending_mitigations() returns only attacks that haven't been actioned
                     // yet, and marks them so subsequent ticks don't re-apply the same violation.
@@ -260,85 +269,100 @@ impl NetworkServer {
                         continue;
                     }
 
-                    let mut blacklist = enforce_blacklist.write().await;
-                    for attack in &attacks {
-                        match &attack.recommended_action {
-                            crate::ai::MitigationAction::BlockPeer(ip_str) => {
-                                if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
-                                    if blacklist.is_whitelisted(ip) {
-                                        // Use severe violation for whitelisted peers
-                                        // (overrides whitelist on 2nd offense)
-                                        let should_disconnect = blacklist.record_severe_violation(
-                                            ip,
-                                            &format!("{:?}", attack.attack_type),
-                                        );
-                                        if should_disconnect {
-                                            tracing::warn!(
-                                                "🛡️ AI: Severe violation for whitelisted peer {} ({:?})",
-                                                ip, attack.attack_type
+                    // Collect peers to kick *before* dropping the blacklist lock.
+                    // kick_peer() is async and must not be called while holding the lock.
+                    let mut to_kick: Vec<String> = Vec::new();
+
+                    {
+                        let mut blacklist = enforce_blacklist.write().await;
+                        for attack in &attacks {
+                            match &attack.recommended_action {
+                                crate::ai::MitigationAction::BlockPeer(ip_str) => {
+                                    if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                                        if blacklist.is_whitelisted(ip) {
+                                            // Use severe violation for whitelisted peers
+                                            // (overrides whitelist on 2nd offense)
+                                            let should_disconnect =
+                                                blacklist.record_severe_violation(
+                                                    ip,
+                                                    &format!("{:?}", attack.attack_type),
+                                                );
+                                            if should_disconnect {
+                                                tracing::warn!(
+                                                    "🛡️ AI: Severe violation for whitelisted peer {} ({:?})",
+                                                    ip, attack.attack_type
+                                                );
+                                                to_kick.push(ip_str.clone());
+                                            }
+                                        } else {
+                                            let should_disconnect = blacklist.record_violation(
+                                                ip,
+                                                &format!("{:?}", attack.attack_type),
                                             );
-                                            enforce_registry.mark_disconnected(ip_str);
+                                            if should_disconnect {
+                                                tracing::warn!(
+                                                    "🚫 AI: Banned peer {} ({:?}, confidence={:.0}%)",
+                                                    ip,
+                                                    attack.attack_type,
+                                                    attack.confidence * 100.0
+                                                );
+                                                to_kick.push(ip_str.clone());
+                                            }
                                         }
-                                    } else {
+                                    }
+                                }
+                                crate::ai::MitigationAction::RateLimitPeer(ip_str) => {
+                                    if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                                        // Rate limit = record as violation (escalates automatically)
                                         let should_disconnect = blacklist.record_violation(
                                             ip,
-                                            &format!("{:?}", attack.attack_type),
+                                            &format!("Rate limited: {:?}", attack.attack_type),
                                         );
                                         if should_disconnect {
                                             tracing::warn!(
-                                                "🚫 AI: Banned peer {} ({:?}, confidence={:.0}%)",
+                                                "🚫 AI: Rate-limited peer {} escalated to ban ({:?})",
                                                 ip,
-                                                attack.attack_type,
-                                                attack.confidence * 100.0
+                                                attack.attack_type
                                             );
-                                            enforce_registry.mark_disconnected(ip_str);
+                                            to_kick.push(ip_str.clone());
                                         }
                                     }
                                 }
-                            }
-                            crate::ai::MitigationAction::RateLimitPeer(ip_str) => {
-                                if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
-                                    // Rate limit = record as violation (escalates automatically)
-                                    let should_disconnect = blacklist.record_violation(
-                                        ip,
-                                        &format!("Rate limited: {:?}", attack.attack_type),
+                                crate::ai::MitigationAction::AlertOperator => {
+                                    tracing::error!(
+                                        "🚨 AI ALERT: {:?} detected (confidence={:.0}%, severity={:?})",
+                                        attack.attack_type,
+                                        attack.confidence * 100.0,
+                                        attack.severity
                                     );
-                                    if should_disconnect {
-                                        tracing::warn!(
-                                            "🚫 AI: Rate-limited peer {} escalated to ban ({:?})",
-                                            ip,
-                                            attack.attack_type
-                                        );
-                                        enforce_registry.mark_disconnected(ip_str);
-                                    }
                                 }
+                                crate::ai::MitigationAction::BanSubnet(subnet_str) => {
+                                    blacklist.add_subnet_ban(
+                                        subnet_str,
+                                        &format!("AI-detected: {:?}", attack.attack_type),
+                                    );
+                                    tracing::warn!(
+                                        "🚫 AI: Auto-banned subnet {} ({:?}, confidence={:.0}%)",
+                                        subnet_str,
+                                        attack.attack_type,
+                                        attack.confidence * 100.0
+                                    );
+                                }
+                                _ => {} // Monitor, EmergencySync, HaltProduction — log only
                             }
-                            crate::ai::MitigationAction::AlertOperator => {
-                                tracing::error!(
-                                    "🚨 AI ALERT: {:?} detected (confidence={:.0}%, severity={:?})",
-                                    attack.attack_type,
-                                    attack.confidence * 100.0,
-                                    attack.severity
-                                );
-                            }
-                            crate::ai::MitigationAction::BanSubnet(subnet_str) => {
-                                blacklist.add_subnet_ban(
-                                    subnet_str,
-                                    &format!("AI-detected: {:?}", attack.attack_type),
-                                );
-                                tracing::warn!(
-                                    "🚫 AI: Auto-banned subnet {} ({:?}, confidence={:.0}%)",
-                                    subnet_str,
-                                    attack.attack_type,
-                                    attack.confidence * 100.0
-                                );
-                            }
-                            _ => {} // Monitor, EmergencySync, HaltProduction — log only
                         }
+                    } // blacklist write lock released here
+
+                    // Now close the TCP connections for every banned peer.
+                    // kick_peer() removes the peer from the registry and drops the writer
+                    // channel, which causes the I/O bridge task to exit and the TCP socket
+                    // to close — without this, bans only take effect on the next message.
+                    for ip_str in &to_kick {
+                        enforce_registry.kick_peer(ip_str).await;
                     }
                 }
             });
-            tracing::info!("🛡️ Attack mitigation enforcement task started (30s interval)");
+            tracing::info!("🛡️ Attack mitigation enforcement task started (event-driven + 30s fallback)");
         }
 
         // Note: Deduplication filter handles its own cleanup with automatic rotation
@@ -611,7 +635,7 @@ async fn handle_peer(
     // avoiding `tokio::io::split()` which causes frame corruption on TLS streams.
     // For non-TLS: `TcpStream::into_split()` is safe (true full-duplex).
     let (msg_read_tx, mut msg_read_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Result<Option<NetworkMessage>, String>>();
+        tokio::sync::mpsc::channel::<Result<Option<NetworkMessage>, String>>(512);
     let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let writer_tx: crate::network::peer_connection_registry::PeerWriterTx = write_tx;
 
@@ -649,28 +673,38 @@ async fn handle_peer(
                 tokio::spawn(async move {
                     use tokio::io::AsyncWriteExt;
                     let mut stream = tls_stream;
-                    let mut gate_count: u32 = 0;
-                    let mut gate_window = tokio::time::Instant::now();
-                    const GATE_SOFT: u32 = 200; // drop without forwarding (>200 msgs/s)
-                    const GATE_HARD: u32 = 500; // send error to trigger violation + disconnect (>500 msgs/s)
+                    // Token-bucket flood gate: event-driven, no 1-second timer polling.
+                    // Refills at GATE_RATE tokens/s; burst up to GATE_BURST.
+                    // Soft-drops messages while tokens are exhausted; after
+                    // GATE_HARD_DROPS consecutive soft-drops the peer is disconnected.
+                    const GATE_RATE: f64 = 200.0;      // sustained msgs/s allowed
+                    const GATE_BURST: f64 = 300.0;     // burst allowance
+                    const GATE_HARD_DROPS: u32 = 300;  // consecutive drops → hard kick
+                    let mut gate_tokens: f64 = GATE_BURST;
+                    let mut gate_last = std::time::Instant::now();
+                    let mut gate_drop_streak: u32 = 0;
                     loop {
                         tokio::select! {
                             result = crate::network::wire::read_message(&mut stream) => {
                                 let is_eof = matches!(&result, Ok(None));
                                 let is_err = result.is_err();
-                                // Pre-channel flood gate: count raw messages per second.
-                                if gate_window.elapsed() >= std::time::Duration::from_secs(1) {
-                                    gate_count = 0;
-                                    gate_window = tokio::time::Instant::now();
+                                // Token-bucket refill: time-since-last-message, not a timer.
+                                let gate_now = std::time::Instant::now();
+                                let elapsed = gate_now.duration_since(gate_last).as_secs_f64();
+                                gate_last = gate_now;
+                                gate_tokens = (gate_tokens + elapsed * GATE_RATE).min(GATE_BURST);
+                                if gate_tokens >= 1.0 {
+                                    gate_tokens -= 1.0;
+                                    gate_drop_streak = 0;
+                                } else {
+                                    gate_drop_streak += 1;
+                                    if gate_drop_streak > GATE_HARD_DROPS {
+                                        let _ = msg_read_tx.send(Err("Message flood detected: pre-channel gate triggered".to_string())).await;
+                                        break;
+                                    }
+                                    continue; // soft drop
                                 }
-                                gate_count += 1;
-                                if gate_count > GATE_HARD {
-                                    let _ = msg_read_tx.send(Err("Message flood detected: pre-channel gate triggered".to_string()));
-                                    break;
-                                } else if gate_count > GATE_SOFT {
-                                    continue; // silently drop this message
-                                }
-                                if msg_read_tx.send(result).is_err() {
+                                if msg_read_tx.send(result).await.is_err() {
                                     break; // receiver dropped
                                 }
                                 if is_eof || is_err {
@@ -716,29 +750,39 @@ async fn handle_peer(
         let peer_addr = peer.addr.clone();
         tokio::spawn(async move {
             let mut reader = r;
-            let mut gate_count: u32 = 0;
-            let mut gate_window = tokio::time::Instant::now();
-            const GATE_SOFT: u32 = 200; // drop without forwarding (>200 msgs/s)
-            const GATE_HARD: u32 = 500; // send error to trigger violation + disconnect (>500 msgs/s)
+            // Token-bucket flood gate: event-driven, no 1-second timer polling.
+            // Refills at GATE_RATE tokens/s; burst up to GATE_BURST.
+            // Soft-drops messages while tokens are exhausted; after
+            // GATE_HARD_DROPS consecutive soft-drops the peer is disconnected.
+            const GATE_RATE: f64 = 200.0;      // sustained msgs/s allowed
+            const GATE_BURST: f64 = 300.0;     // burst allowance
+            const GATE_HARD_DROPS: u32 = 300;  // consecutive drops → hard kick
+            let mut gate_tokens: f64 = GATE_BURST;
+            let mut gate_last = std::time::Instant::now();
+            let mut gate_drop_streak: u32 = 0;
             loop {
                 let result = crate::network::wire::read_message(&mut reader).await;
                 let is_eof = matches!(&result, Ok(None));
                 let is_err = result.is_err();
-                // Pre-channel flood gate: count raw messages per second.
-                if gate_window.elapsed() >= std::time::Duration::from_secs(1) {
-                    gate_count = 0;
-                    gate_window = tokio::time::Instant::now();
+                // Token-bucket refill: time-since-last-message, not a timer.
+                let gate_now = std::time::Instant::now();
+                let elapsed = gate_now.duration_since(gate_last).as_secs_f64();
+                gate_last = gate_now;
+                gate_tokens = (gate_tokens + elapsed * GATE_RATE).min(GATE_BURST);
+                if gate_tokens >= 1.0 {
+                    gate_tokens -= 1.0;
+                    gate_drop_streak = 0;
+                } else {
+                    gate_drop_streak += 1;
+                    if gate_drop_streak > GATE_HARD_DROPS {
+                        let _ = msg_read_tx.send(Err(
+                            "Message flood detected: pre-channel gate triggered".to_string(),
+                        )).await;
+                        break;
+                    }
+                    continue; // soft drop
                 }
-                gate_count += 1;
-                if gate_count > GATE_HARD {
-                    let _ = msg_read_tx.send(Err(
-                        "Message flood detected: pre-channel gate triggered".to_string(),
-                    ));
-                    break;
-                } else if gate_count > GATE_SOFT {
-                    continue; // silently drop this message
-                }
-                if msg_read_tx.send(result).is_err() {
+                if msg_read_tx.send(result).await.is_err() {
                     break;
                 }
                 if is_eof || is_err {
@@ -1045,6 +1089,9 @@ async fn handle_peer(
 
                                         if should_ban {
                                             tracing::warn!("🚫 Disconnecting {} due to rate limit violations", peer.addr);
+                                            drop(blacklist_guard);
+                                            drop(limiter);
+                                            peer_registry.kick_peer(&ip_str).await;
                                             break; // Exit connection loop
                                         }
                                         continue; // Skip processing this message
@@ -1215,6 +1262,7 @@ async fn handle_peer(
 
                                                 if should_ban {
                                                     tracing::warn!("🚫 Disconnecting {} due to repeated invalid transactions", peer.addr);
+                                                    peer_registry.kick_peer(&ip_str).await;
                                                     break;
                                                 }
                                             }
@@ -1733,6 +1781,7 @@ async fn handle_peer(
                                             );
                                             if should_ban {
                                                 tracing::warn!("🚫 Disconnecting {} for sending corrupted block", peer.addr);
+                                                peer_registry.kick_peer(&ip_str).await;
                                                 break; // Exit the message loop to disconnect
                                             }
                                         }
@@ -1810,6 +1859,7 @@ async fn handle_peer(
                                             );
                                             if should_ban {
                                                 tracing::warn!("🚫 Disconnecting {} for sending corrupted block", peer.addr);
+                                                peer_registry.kick_peer(&ip_str).await;
                                                 break;
                                             }
                                         }
@@ -1963,6 +2013,7 @@ async fn handle_peer(
                                                 }
                                                 if should_ban {
                                                     tracing::warn!("🚫 Disconnecting {} due to ping flood violations", peer.addr);
+                                                    peer_registry.kick_peer(&ip_str).await;
                                                     break;
                                                 }
                                                 ping_excess_streak = 0;

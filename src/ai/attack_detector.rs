@@ -108,6 +108,9 @@ pub struct AttackDetector {
     ping_flood_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
     /// Per-peer raw message flood timestamps for MessageFlood detection.
     message_flood_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
+    /// Fires when a new (non-duplicate) attack is detected so the enforcement
+    /// loop can wake up immediately instead of waiting the full 30-second tick.
+    ban_notify: Arc<tokio::sync::Notify>,
 }
 
 impl AttackDetector {
@@ -123,6 +126,7 @@ impl AttackDetector {
             tls_failure_times: Arc::new(RwLock::new(HashMap::new())),
             ping_flood_times: Arc::new(RwLock::new(HashMap::new())),
             message_flood_times: Arc::new(RwLock::new(HashMap::new())),
+            ban_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -140,6 +144,13 @@ impl AttackDetector {
         if let Ok(bytes) = serde_json::to_vec(&*attacks) {
             let _ = self.db.insert(DB_KEY_ATTACKS, bytes);
         }
+    }
+
+    /// Returns the notifier that fires whenever a new (non-duplicate) attack is
+    /// detected.  The AI enforcement loop in `server.rs` waits on this so it can
+    /// apply mitigations immediately instead of waiting the full 30-second tick.
+    pub fn ban_notifier(&self) -> Arc<tokio::sync::Notify> {
+        self.ban_notify.clone()
     }
 
     // ===== Dedup helper =====
@@ -185,6 +196,9 @@ impl AttackDetector {
 
         attacks.push(attack);
         drop(attacks);
+        // Wake the enforcement loop immediately so it can apply mitigations without
+        // waiting the full 30-second periodic tick.
+        self.ban_notify.notify_one();
         self.persist_attacks();
         true
     }
