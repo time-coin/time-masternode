@@ -64,6 +64,7 @@ impl IPBlacklist {
 
         // ── Load permanent bans ───────────────────────────────────────────
         if let Some(tree) = &self.db_permanent {
+            let mut whitelisted_pruned = 0usize;
             for item in tree.iter().flatten() {
                 let (k, v) = item;
                 if let Ok(ip) = std::str::from_utf8(&k)
@@ -71,26 +72,47 @@ impl IPBlacklist {
                     .and_then(|s| s.parse::<IpAddr>().ok())
                     .ok_or(())
                 {
-                    let reason = String::from_utf8_lossy(&v).into_owned();
-                    self.permanent_blacklist.insert(ip, reason);
+                    if self.whitelist.contains_key(&ip) {
+                        // Whitelisted peer — discard the stored ban and remove from sled
+                        let _ = tree.remove(k);
+                        whitelisted_pruned += 1;
+                        tracing::info!(
+                            "🔓 Cleared persisted ban for whitelisted peer {} on startup",
+                            ip
+                        );
+                    } else {
+                        let reason = String::from_utf8_lossy(&v).into_owned();
+                        self.permanent_blacklist.insert(ip, reason);
+                    }
                 }
             }
             tracing::info!(
-                "🔒 Loaded {} permanent IP ban(s) from sled",
-                self.permanent_blacklist.len()
+                "🔒 Loaded {} permanent IP ban(s) from sled ({} cleared for whitelisted peers)",
+                self.permanent_blacklist.len(),
+                whitelisted_pruned
             );
         }
 
-        // ── Load temp bans (skip expired) ────────────────────────────────
+        // ── Load temp bans (skip expired, skip whitelisted) ──────────────
         if let Some(tree) = &self.db_temp {
             let mut loaded = 0usize;
             let mut expired = 0usize;
+            let mut whitelisted_pruned = 0usize;
             for item in tree.iter().flatten() {
                 let (k, v) = item;
                 if let Some(ip) = std::str::from_utf8(&k)
                     .ok()
                     .and_then(|s| s.parse::<IpAddr>().ok())
                 {
+                    if self.whitelist.contains_key(&ip) {
+                        let _ = tree.remove(k);
+                        whitelisted_pruned += 1;
+                        tracing::info!(
+                            "🔓 Cleared persisted temp ban for whitelisted peer {} on startup",
+                            ip
+                        );
+                        continue;
+                    }
                     if let Ok((expiry_unix, reason)) = bincode::deserialize::<(u64, String)>(&v) {
                         if expiry_unix <= now_unix {
                             // Expired — prune from sled too
@@ -105,11 +127,12 @@ impl IPBlacklist {
                     }
                 }
             }
-            if loaded > 0 || expired > 0 {
+            if loaded > 0 || expired > 0 || whitelisted_pruned > 0 {
                 tracing::info!(
-                    "🔒 Loaded {} active temp ban(s) from sled ({} expired and pruned)",
+                    "🔒 Loaded {} active temp ban(s) from sled ({} expired and pruned, {} cleared for whitelisted peers)",
                     loaded,
-                    expired
+                    expired,
+                    whitelisted_pruned
                 );
             }
         }
@@ -146,16 +169,22 @@ impl IPBlacklist {
             );
         }
 
-        // ── Load violation counters (prune entries older than 1 hour) ────
+        // ── Load violation counters (prune entries older than 1 hour, skip whitelisted) ────
         if let Some(tree) = &self.db_violations {
             let cutoff = now_unix.saturating_sub(3600);
             let mut loaded = 0usize;
+            let mut whitelisted_pruned = 0usize;
             for item in tree.iter().flatten() {
                 let (k, v) = item;
                 if let Some(ip) = std::str::from_utf8(&k)
                     .ok()
                     .and_then(|s| s.parse::<IpAddr>().ok())
                 {
+                    if self.whitelist.contains_key(&ip) {
+                        let _ = tree.remove(k);
+                        whitelisted_pruned += 1;
+                        continue;
+                    }
                     if let Ok((count, last_unix)) = bincode::deserialize::<(u32, u64)>(&v) {
                         if last_unix < cutoff {
                             let _ = tree.remove(k);
@@ -170,8 +199,12 @@ impl IPBlacklist {
                     }
                 }
             }
-            if loaded > 0 {
-                tracing::info!("🔒 Loaded {} violation counter(s) from sled", loaded);
+            if loaded > 0 || whitelisted_pruned > 0 {
+                tracing::info!(
+                    "🔒 Loaded {} violation counter(s) from sled ({} cleared for whitelisted peers)",
+                    loaded,
+                    whitelisted_pruned
+                );
             }
         }
     }
