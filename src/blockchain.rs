@@ -231,6 +231,11 @@ pub struct Blockchain {
     /// stuck on a minority fork can escape even when peer counts are low.
     #[allow(clippy::type_complexity)]
     finality_lock_blocked_since: Arc<RwLock<Option<(u64, std::time::Instant)>>>,
+    /// Unix-second deadline before which fork-resolution re-attempts are suppressed.
+    /// Set when the finality lock blocks a reorg, to prevent the ping handler from
+    /// immediately re-triggering the deep-fetch/finality-lock cycle.  Checked by
+    /// both `handle_fork` and the ping handler in message_handler.rs.
+    pub fork_resolution_blocked_until: Arc<AtomicU64>,
 }
 
 impl Blockchain {
@@ -344,6 +349,7 @@ impl Blockchain {
             blacklist: Arc::new(RwLock::new(None)),
             last_locally_confirmed_height: Arc::new(AtomicU64::new(loaded_height)),
             finality_lock_blocked_since: Arc::new(RwLock::new(None)),
+            fork_resolution_blocked_until: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -9083,6 +9089,35 @@ impl Blockchain {
             return Ok(());
         }
 
+        // Respect the finality-lock cooldown: if a recent reorg attempt was blocked
+        // and we set a deadline, suppress handle_fork until the deadline passes so
+        // the finality-lock escape timer has time to accumulate.  FetchingChain
+        // continuation calls (state already active for this peer) are exempt so the
+        // in-progress deep-fetch can complete.
+        {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let blocked_until = self.fork_resolution_blocked_until.load(Ordering::Acquire);
+            if now_secs < blocked_until {
+                // Allow continuation of an already-active FetchingChain for this peer.
+                let is_continuation = {
+                    let fs = self.fork_state.read().await;
+                    matches!(&*fs, ForkResolutionState::FetchingChain { peer_addr: p, .. } if p == &peer_addr)
+                };
+                if !is_continuation {
+                    tracing::debug!(
+                        "⏳ Skipping handle_fork() from {} — finality-lock cooldown active \
+                         ({}s remaining)",
+                        peer_addr,
+                        blocked_until.saturating_sub(now_secs)
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
         let fork_height = blocks[0].header.height;
         let our_height = self.get_height();
 
@@ -9860,8 +9895,9 @@ impl Blockchain {
                     //     their tips (e.g. only 7/24 responding) yet the peer chain
                     //     is clearly longer and fully validated.
                     {
-                        const MIN_PEERS_FINALITY_OVERRIDE: usize = 5;
+                        const MIN_PEERS_FINALITY_OVERRIDE: usize = 2;
                         const FINALITY_LOCK_ESCAPE_SECS: u64 = 300; // 5 minutes
+                        const FINALITY_LOCK_LONGER_CHAIN_ESCAPE_SECS: u64 = 60; // 1 min for longer-chain
                         const MIN_PEERS_FINALITY_ESCAPE: usize = 2;
                         let last_confirmed =
                             self.last_locally_confirmed_height.load(Ordering::Acquire);
@@ -9884,10 +9920,9 @@ impl Blockchain {
                                         // (implies they built valid blocks on top of it).
                                         // Peers above our height but below the alternative
                                         // tip are NOT counted; their chain may diverge.
-                                        let on_peer_chain =
-                                            (tip_h == peer_tip_height
-                                                && tip_hash == peer_tip_hash)
-                                                || tip_h > peer_tip_height;
+                                        let on_peer_chain = (tip_h == peer_tip_height
+                                            && tip_hash == peer_tip_hash)
+                                            || tip_h > peer_tip_height;
                                         if on_peer_chain {
                                             supporting += 1;
                                         }
@@ -9925,6 +9960,18 @@ impl Blockchain {
                                 let same_height_consensus_override = peer_tip_height == our_height
                                     && supporting >= MIN_SAME_HEIGHT_CONSENSUS_PEERS;
 
+                                // LONGER-CHAIN FAST ESCAPE: a strictly longer peer chain
+                                // with at least 1 supporting peer that is the majority of
+                                // all ahead peers should override within 60 s, not 5 min.
+                                // In small networks (≤10 nodes) only 1-2 peers may respond
+                                // at any time; waiting 5 min while clearly on a minority
+                                // fork stalls the chain for an entire block window.
+                                let longer_chain_escape = peer_tip_height > our_height
+                                    && blocked_secs >= FINALITY_LOCK_LONGER_CHAIN_ESCAPE_SECS
+                                    && supporting >= 1
+                                    && total_ahead > 0
+                                    && supporting * 2 > total_ahead;
+
                                 let normal_override = total_ahead > 0
                                     && supporting >= MIN_PEERS_FINALITY_OVERRIDE
                                     && supporting * 2 > total_ahead;
@@ -9950,6 +9997,18 @@ impl Blockchain {
                                         supporting, total_ahead,
                                         common_ancestor, last_confirmed, common_ancestor
                                     );
+                                } else if longer_chain_escape {
+                                    warn!(
+                                        "⚠️  LONGER-CHAIN ESCAPE: Peer chain is longer ({} > {}), \
+                                         stuck on ancestor {} for {}s. {}/{} ahead peers support. \
+                                         Auto-resetting finality lock to rejoin canonical chain.",
+                                        peer_tip_height,
+                                        our_height,
+                                        common_ancestor,
+                                        blocked_secs,
+                                        supporting,
+                                        total_ahead
+                                    );
                                 } else if escape_override {
                                     warn!(
                                         "⚠️  FINALITY LOCK ESCAPE: Stuck on ancestor {} for {}s. \
@@ -9959,7 +10018,10 @@ impl Blockchain {
                                         supporting, total_ahead, common_ancestor
                                     );
                                 }
-                                same_height_consensus_override || normal_override || escape_override
+                                same_height_consensus_override
+                                    || normal_override
+                                    || longer_chain_escape
+                                    || escape_override
                             } else {
                                 false
                             };
@@ -9992,6 +10054,20 @@ impl Blockchain {
                                      Not enough ahead peers ({} required) support the alternative chain.",
                                     common_ancestor, last_confirmed, MIN_PEERS_FINALITY_OVERRIDE
                                 );
+                                // Suppress fork-resolution re-attempts for 120 s so the
+                                // finality-lock escape timer can accumulate before the next
+                                // cycle. Without this, the ping handler re-triggers the full
+                                // deep-fetch every ~15 s (instead of every ~60 s), burning
+                                // CPU and delaying the 60 s longer-chain escape.
+                                {
+                                    let deadline = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs()
+                                        .saturating_add(120);
+                                    self.fork_resolution_blocked_until
+                                        .store(deadline, Ordering::Release);
+                                }
                                 *self.fork_state.write().await = ForkResolutionState::None;
                                 self.consensus_peers.write().await.clear();
                                 return Ok(());
@@ -10703,6 +10779,7 @@ impl Clone for Blockchain {
             blacklist: self.blacklist.clone(),
             last_locally_confirmed_height: self.last_locally_confirmed_height.clone(),
             finality_lock_blocked_since: self.finality_lock_blocked_since.clone(),
+            fork_resolution_blocked_until: self.fork_resolution_blocked_until.clone(),
         }
     }
 }

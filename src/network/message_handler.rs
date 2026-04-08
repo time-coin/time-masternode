@@ -5071,6 +5071,47 @@ impl MessageHandler {
                     return Ok(Some(NetworkMessage::RequestGenesis));
                 }
 
+                // Don't send a new GetBlocks request if fork resolution is already
+                // in progress (FetchingChain / Reorging) — the state machine will
+                // request exactly what it needs.  Sending a redundant GetBlocks here
+                // while FetchingChain is active causes the response to be processed
+                // through the normal add_block path, which re-detects the fork and
+                // spawns a competing handle_fork(), resetting accumulated state and
+                // creating a busy-loop that never reaches the common ancestor.
+                // Also suppress during the finality-lock cooldown window so a blocked
+                // reorg attempt cannot immediately re-trigger the full deep-fetch cycle.
+                {
+                    use crate::blockchain::ForkResolutionState;
+                    use std::sync::atomic::Ordering;
+                    let fs = context.blockchain.fork_state.read().await;
+                    if !matches!(*fs, ForkResolutionState::None) {
+                        debug!(
+                            "⏭️  [{}] Skipping GetBlocks to {} — fork resolution already active",
+                            self.direction, self.peer_ip
+                        );
+                        return Ok(None);
+                    }
+                    drop(fs);
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let blocked_until = context
+                        .blockchain
+                        .fork_resolution_blocked_until
+                        .load(Ordering::Acquire);
+                    if now_secs < blocked_until {
+                        debug!(
+                            "⏭️  [{}] Skipping GetBlocks to {} — finality-lock cooldown \
+                             ({}s remaining)",
+                            self.direction,
+                            self.peer_ip,
+                            blocked_until.saturating_sub(now_secs)
+                        );
+                        return Ok(None);
+                    }
+                }
+
                 // Request blocks for fork resolution
                 let request_from = peer_height.saturating_sub(10);
                 info!(
