@@ -399,6 +399,7 @@ impl PeerConnectionRegistry {
                     "ℹ️  Peer {} returned no genesis hash (old code): assuming compatible",
                     ip_only
                 );
+                self.mark_genesis_confirmed(peer_ip).await;
                 true
             }
             Ok(other) => {
@@ -409,6 +410,7 @@ impl PeerConnectionRegistry {
                     ip_only,
                     other.message_type()
                 );
+                self.mark_genesis_confirmed(peer_ip).await;
                 true
             }
             Err(e) => {
@@ -425,6 +427,7 @@ impl PeerConnectionRegistry {
                     ip_only,
                     e
                 );
+                self.mark_genesis_confirmed(peer_ip).await;
                 true
             }
         }
