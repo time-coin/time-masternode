@@ -199,6 +199,12 @@ pub struct MasternodeRegistry {
     free_tier_subnet_counts: Arc<DashMap<String, u32>>,
     /// Optional reference to the UTXO manager, used for collateral ownership verification.
     utxo_manager: Arc<RwLock<Option<Arc<crate::utxo_manager::UTXOStateManager>>>>,
+    /// Sync-readable snapshot of active masternodes (is_active == true).
+    /// Rebuilt inside every masternodes write lock scope so it is always consistent.
+    /// Lets consensus sync functions read without block_in_place + block_on.
+    cached_active: parking_lot::RwLock<Vec<MasternodeInfo>>,
+    /// Sync-readable snapshot of all masternodes.
+    cached_all: parking_lot::RwLock<Vec<MasternodeInfo>>,
 }
 
 impl MasternodeRegistry {
@@ -306,6 +312,11 @@ impl MasternodeRegistry {
             }
         }
 
+        // Build initial sync caches from the loaded nodes.
+        let init_active: Vec<MasternodeInfo> =
+            nodes.values().filter(|i| i.is_active).cloned().collect();
+        let init_all: Vec<MasternodeInfo> = nodes.values().cloned().collect();
+
         Self {
             masternodes: Arc::new(RwLock::new(nodes)),
             local_masternode_address: Arc::new(RwLock::new(None)),
@@ -327,6 +338,8 @@ impl MasternodeRegistry {
             collateral_migration_counts: Arc::new(DashMap::new()),
             free_tier_subnet_counts: Arc::new(free_tier_subnet_counts),
             utxo_manager: Arc::new(RwLock::new(None)),
+            cached_active: parking_lot::RwLock::new(init_active),
+            cached_all: parking_lot::RwLock::new(init_all),
         }
     }
 
@@ -354,6 +367,31 @@ impl MasternodeRegistry {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs()
+    }
+
+    /// Rebuild both sync caches from a snapshot of the masternodes map.
+    ///
+    /// Call this **while holding the `masternodes` write guard** so the cache is
+    /// atomically consistent with the mutation that just completed.
+    fn rebuild_node_caches(&self, nodes: &HashMap<String, MasternodeInfo>) {
+        let active: Vec<MasternodeInfo> =
+            nodes.values().filter(|i| i.is_active).cloned().collect();
+        let all: Vec<MasternodeInfo> = nodes.values().cloned().collect();
+        *self.cached_active.write() = active;
+        *self.cached_all.write() = all;
+    }
+
+    /// Synchronous read of active masternodes (no await required).
+    ///
+    /// Backed by `rebuild_node_caches()` which is called after every write to
+    /// `masternodes`, so this is always consistent with the async `list_active()`.
+    pub fn active_masternodes_cached(&self) -> Vec<MasternodeInfo> {
+        self.cached_active.read().clone()
+    }
+
+    /// Synchronous read of all masternodes (no await required).
+    pub fn all_masternodes_cached(&self) -> Vec<MasternodeInfo> {
+        self.cached_all.read().clone()
     }
 
     /// Extract the /24 subnet prefix from an IP string.
@@ -1092,6 +1130,7 @@ impl MasternodeRegistry {
             // Update on disk
             self.store_masternode(&masternode.address, existing)?;
 
+            self.rebuild_node_caches(&nodes);
             return Ok(());
         }
 
@@ -1198,6 +1237,7 @@ impl MasternodeRegistry {
             reward_address,
             now
         );
+        self.rebuild_node_caches(&nodes);
         Ok(())
     }
 
@@ -1296,6 +1336,7 @@ impl MasternodeRegistry {
             // considered transient visitors. Remove them entirely from the registry on
             // disconnect so they cannot inflate the quorum weight denominator while absent.
             masternodes.remove(address);
+            self.rebuild_node_caches(&masternodes);
             drop(masternodes);
 
             // AV25: Decrement the per-subnet Free-tier count when the node is removed.
@@ -1350,6 +1391,7 @@ impl MasternodeRegistry {
 
             // Persist to disk.
             self.store_masternode(address, info)?;
+            self.rebuild_node_caches(&masternodes);
         }
 
         Ok(())
@@ -1386,10 +1428,9 @@ impl MasternodeRegistry {
             }
         }
 
+        self.rebuild_node_caches(&nodes);
         Ok(removed)
     }
-
-    /// Find a masternode by its reward address. Returns (network_address, info).
     pub async fn find_by_reward_address(
         &self,
         reward_addr: &str,
@@ -2738,6 +2779,8 @@ impl MasternodeRegistry {
                 total_active
             );
         }
+
+        self.rebuild_node_caches(&masternodes);
     }
 
     /// Calculate blocks without reward for a masternode by scanning blockchain
@@ -3218,6 +3261,7 @@ impl MasternodeRegistry {
                 tracing::error!("🚨 ════════════════════════════════════════════════════════════");
                 nodes.remove(&squatter);
             }
+            self.rebuild_node_caches(&nodes);
         }
 
         // Register in the registry (insert or update existing entry)
@@ -3466,6 +3510,7 @@ impl MasternodeRegistry {
             );
         }
 
+        self.rebuild_node_caches(&nodes);
         Ok(())
     }
 
@@ -3583,6 +3628,8 @@ impl Clone for MasternodeRegistry {
             collateral_migration_counts: self.collateral_migration_counts.clone(),
             free_tier_subnet_counts: self.free_tier_subnet_counts.clone(),
             utxo_manager: self.utxo_manager.clone(),
+            cached_active: parking_lot::RwLock::new(self.cached_active.read().clone()),
+            cached_all: parking_lot::RwLock::new(self.cached_all.read().clone()),
         }
     }
 }

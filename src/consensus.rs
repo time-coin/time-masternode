@@ -795,9 +795,7 @@ impl TimeVoteConsensus {
     /// Get current validators (returns Arc to avoid cloning)
     /// Fetches active masternodes from registry and converts to ValidatorInfo
     pub fn get_validators(&self) -> Arc<Vec<ValidatorInfo>> {
-        let masternodes = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.masternode_registry.list_active())
-        });
+        let masternodes = self.masternode_registry.active_masternodes_cached();
         Arc::new(
             masternodes
                 .iter()
@@ -943,9 +941,7 @@ impl TimeVoteConsensus {
 
         // Step 1: Verify signature
         // Get masternode info to get public key
-        let masternodes = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.masternode_registry.list_active())
-        });
+        let masternodes = self.masternode_registry.active_masternodes_cached();
 
         let mn_info = masternodes
             .iter()
@@ -1365,9 +1361,7 @@ impl TimeVoteConsensus {
     /// Returns Ok(accumulated_weight) if valid, Err if invalid
     pub fn verify_timeproof(&self, timeproof: &TimeProof) -> Result<u64, String> {
         // Get active masternodes for AVS verification
-        let masternodes = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.masternode_registry.list_active())
-        });
+        let masternodes = self.masternode_registry.active_masternodes_cached();
 
         // Calculate total AVS weight
         let total_avs_weight: u64 = masternodes
@@ -1445,9 +1439,7 @@ impl TimeVoteConsensus {
         // as the upper bound. The adaptive quorum in check_consensus() will
         // min() this with actual participants, so non-voting nodes won't block finalization.
         let sample_size = if sample_size == 0 {
-            let all_registered = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(self.masternode_registry.list_all())
-            });
+            let all_registered = self.masternode_registry.all_masternodes_cached();
             tracing::warn!(
                 "⚠️ No active validators for consensus check, using all {} registered masternodes (bootstrap mode)",
                 all_registered.len()
@@ -1519,9 +1511,7 @@ impl TimeVoteConsensus {
         // as the upper bound. The adaptive quorum in check_consensus() will
         // min() this with actual participants, so non-voting nodes won't block finalization.
         let sample_size = if sample_size == 0 {
-            let all_registered = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(self.masternode_registry.list_all())
-            });
+            let all_registered = self.masternode_registry.all_masternodes_cached();
             tracing::warn!(
                 "⚠️ No active validators for consensus check, using all {} registered masternodes (bootstrap mode)",
                 all_registered.len()
@@ -2332,17 +2322,13 @@ impl ConsensusEngine {
     // Lock-free read of masternodes from registry
     fn get_masternodes(&self) -> Vec<Masternode> {
         // Get active masternodes from the registry (single source of truth)
-        let active = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.masternode_registry.list_active())
-        });
+        let active = self.masternode_registry.active_masternodes_cached();
         active.iter().map(|info| info.masternode.clone()).collect()
     }
 
     // Returns (Masternode, reward_address) pairs for block reward distribution
     fn get_masternodes_with_rewards(&self) -> Vec<(Masternode, String)> {
-        let active = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.masternode_registry.list_active())
-        });
+        let active = self.masternode_registry.active_masternodes_cached();
         active
             .iter()
             .map(|info| (info.masternode.clone(), info.reward_address.clone()))
