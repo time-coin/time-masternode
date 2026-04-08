@@ -166,6 +166,44 @@ service_started_ago() {
     echo $(( $(date +%s) - started_ts ))
 }
 
+# ── Stall diagnostics ─────────────────────────────────────────────────────────
+# Called on the first poll of every RPC stall (rpc_busy_streak == 1) and every
+# 5 polls thereafter.  Dumps process stats and recent log lines so post-mortem
+# analysis doesn't require a separate shell session on the node.
+log_stall_diagnostics() {
+    local streak=$1
+
+    log "── STALL DIAGNOSTICS (busy_streak=${streak}) ──"
+
+    # Daemon PID and CPU/memory
+    local pid
+    pid=$(systemctl show timed --property=MainPID --value 2>/dev/null)
+    if [[ -n "$pid" && "$pid" != "0" ]]; then
+        local cpu_mem thread_count fd_count
+        cpu_mem=$(ps -p "$pid" -o pid=,pcpu=,pmem=,vsz=,rss= 2>/dev/null || echo "unavailable")
+        thread_count=$(ls /proc/"$pid"/task 2>/dev/null | wc -l || echo "?")
+        fd_count=$(ls /proc/"$pid"/fd 2>/dev/null | wc -l || echo "?")
+        log "  PID=${pid}  cpu/mem: ${cpu_mem}  threads=${thread_count}  fds=${fd_count}"
+    else
+        log "  PID: unavailable"
+    fi
+
+    # Open TCP connections to/from the daemon's P2P port
+    local conn_count inbound outbound
+    conn_count=$(ss -tnp 2>/dev/null | grep -c "timed" || echo "?")
+    inbound=$(ss  -tnp 2>/dev/null | grep "timed" | grep -c ":24000 " || echo "?")
+    outbound=$(ss -tnp 2>/dev/null | grep "timed" | grep -cv ":24000 " || echo "?")
+    log "  TCP connections: total=${conn_count} inbound~=${inbound} outbound~=${outbound}"
+
+    # Last 25 log lines — strip timestamps down to HH:MM:SS for compactness
+    log "  -- last 25 log lines --"
+    journalctl -u timed -n 25 --no-pager --output=short 2>/dev/null \
+        | sed 's/^[A-Za-z]* [A-Za-z]* [0-9]* //' \
+        | while IFS= read -r line; do log "  $line"; done
+
+    log "── END STALL DIAGNOSTICS ──"
+}
+
 # ── Main loop ──────────────────────────────────────────────────────────────────
 while true; do
     sleep "$POLL_INTERVAL"
@@ -220,6 +258,10 @@ while true; do
         if daemon_recently_active "$DAEMON_ACTIVE_SECS"; then
             rpc_busy_streak=$(( rpc_busy_streak + 1 ))
             logw "⏳ RPC timeout — daemon is alive and logging (busy_streak: ${rpc_busy_streak}/${RPC_BUSY_MAX}); NOT counting as de-registration"
+            # Dump diagnostics on the first poll of every stall, then every 5 polls.
+            if [ "$rpc_busy_streak" -eq 1 ] || [ $(( rpc_busy_streak % 5 )) -eq 0 ]; then
+                log_stall_diagnostics "$rpc_busy_streak"
+            fi
             # Only escalate to a restart trigger after sustained unresponsiveness.
             if [ "$rpc_busy_streak" -ge "$RPC_BUSY_MAX" ]; then
                 logw "🔴 Daemon has been RPC-unresponsive for $((rpc_busy_streak * POLL_INTERVAL))s while logging — escalating to fail_streak"
