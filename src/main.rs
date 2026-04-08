@@ -4422,19 +4422,15 @@ async fn main() {
     });
     shutdown_manager.register_task(utxo_sync_handle);
 
-    // Prepare combined whitelist BEFORE creating server
-    // This ensures masternodes are whitelisted before any connections are accepted
-    let mut combined_whitelist = config.network.whitelisted_peers.clone();
-    combined_whitelist.extend(discovered_peer_ips.clone());
+    // Prepare whitelist from official peer discovery ONLY (time-coin.io).
+    // Users cannot add to the whitelist via time.conf — only the addwhitelist
+    // RPC (which verifies against the official peer list) is accepted.
+    let combined_whitelist = discovered_peer_ips.clone();
 
     println!(
-        "🔐 Preparing whitelist with {} trusted peer(s)...",
+        "🔐 Preparing whitelist with {} trusted peer(s) from time-coin.io...",
         combined_whitelist.len()
     );
-    if !combined_whitelist.is_empty() {
-        println!("  • {} from config", config.network.whitelisted_peers.len());
-        println!("  • {} from time-coin.io", discovered_peer_ips.len());
-    }
     println!();
 
     match NetworkServer::new_with_blacklist(
@@ -4457,7 +4453,7 @@ async fn main() {
     {
         Ok(mut server) => {
             // NOTE: Masternodes announced via P2P are NOT auto-whitelisted.
-            // Only peers from time-coin.io and config are trusted.
+            // Only peers from time-coin.io DNS discovery are trusted at startup.
 
             // Wire up AI system for attack detection enforcement
             server.set_ai_system(ai_system.clone());

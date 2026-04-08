@@ -3916,7 +3916,7 @@ impl RpcHandler {
 
         Ok(json!({
             "count": whitelist_count,
-            "info": "Whitelisted IPs are exempt from rate limiting and bans. Use 'addwhitelist <ip>' to add."
+            "info": "Whitelisted IPs are exempt from rate limiting and bans. Only peers verified via time-coin.io may be whitelisted. Use 'addwhitelist <ip>' to add (requires network peer verification)."
         }))
     }
 

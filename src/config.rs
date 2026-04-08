@@ -100,8 +100,9 @@ pub struct NetworkConfig {
     /// All IPs in the subnet are rejected at the TCP level. Key in time.conf: bansubnet=
     #[serde(default)]
     pub blacklisted_subnets: Vec<String>,
-    /// IPs to whitelist (exempt from rate limiting and bans)
-    /// Typically used for trusted masternodes or infrastructure nodes
+    /// IPs to whitelist (exempt from rate limiting and bans).
+    /// Populated at runtime from the official DNS/peer discovery feed only.
+    /// Not user-configurable — any `whitelist=` entries in time.conf are ignored.
     #[serde(default)]
     pub whitelisted_peers: Vec<String>,
     /// When true, ONLY whitelisted peers can connect (all others are rejected).
@@ -664,7 +665,6 @@ impl Config {
             let saved_external = config.network.external_address.clone();
             let saved_peers = config.network.bootstrap_peers.clone();
             let saved_blacklist = config.network.blacklisted_peers.clone();
-            let saved_whitelist = config.network.whitelisted_peers.clone();
             let saved_rpc_enabled = config.rpc.enabled;
             let saved_rpc_addr = config.rpc.listen_address.clone();
             let saved_rpc_origins = config.rpc.allow_origins.clone();
@@ -681,7 +681,6 @@ impl Config {
             config.network.external_address = saved_external;
             config.network.bootstrap_peers = saved_peers;
             config.network.blacklisted_peers = saved_blacklist;
-            config.network.whitelisted_peers = saved_whitelist;
             config.rpc.enabled = saved_rpc_enabled;
             config.rpc.listen_address = saved_rpc_addr;
             config.rpc.allow_origins = saved_rpc_origins;
@@ -907,9 +906,6 @@ impl Config {
             }
             if let Some(v) = entries.get("bansubnet") {
                 config.network.blacklisted_subnets = v.clone();
-            }
-            if let Some(v) = entries.get("whitelist") {
-                config.network.whitelisted_peers = v.clone();
             }
             if let Some(v) = entries.get("whitelistonly") {
                 config.network.whitelist_only = v.last().is_some_and(|s| s == "1");
@@ -1273,9 +1269,6 @@ masternode=1
 # Permanently ban IPs (one per line, can repeat)
 #ban=1.2.3.4
 #ban=5.6.7.8
-
-# Whitelist IPs — exempt from rate limits and auto-bans (one per line)
-#whitelist=1.2.3.4
 
 # ─── Logging ─────────────────────────────────────────────────
 # Log level: trace, debug, info, warn, error
