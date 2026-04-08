@@ -1165,6 +1165,66 @@ During the ghost connection OOM this contributed ~15 extra concurrent futures ev
 
 ---
 
+### 14.11 ⚠️ PARTIALLY MITIGATED — Reconnection-Storm Tokio Thread Starvation
+**Status:** **PARTIALLY MITIGATED** (April 8, 2026 — watchdog false-restart root cause)
+
+**Attack / Failure Mode:** When 40+ masternodes disconnect and reconnect simultaneously (due to a mass eviction from the Free-tier subnet flood, attacker-triggered disconnect storm, or a network partition resolving), each inbound reconnection spawns a TLS I/O bridge task plus a message-processing loop task. During the resulting burst:
+
+- Each arriving message acquires a write lock on the **shared** `Arc<RwLock<RateLimiter>>` (one lock for ALL inbound connections)
+- Ping/pong bursts from 15+ peers at ~3 pings/sec each = 45+ write-lock acquisitions per second on one mutex
+- Fork-resolution state-machine runs concurrent `GetBlocks` cycles against the same peers
+- All of the above on a 4-worker tokio runtime (pinned for sled-on-VPS safety)
+
+Result: tokio worker threads saturate → RPC JSON-RPC handler never gets scheduled → `masternodestatus` RPC times out in 3s → watchdog calls it "de-registration" and restarts the node → **restart every ~10 minutes**.
+
+**Observed (April 8 watchdog log):**
+```
+16:20:24 🔁 De-registration detected after 2 consecutive checks — restarting timed (restart #12)
+16:35:39 🔁 De-registration detected after 2 consecutive checks — restarting timed (restart #13)
+16:46:00 🔁 De-registration detected after 2 consecutive checks — restarting timed (restart #14)
+... (5 more restarts at ~10 min intervals)
+```
+
+**Root Cause (two parts):**
+1. **Shared rate-limiter mutex** — `Arc<RwLock<RateLimiter>>` is shared across ALL inbound peer connections; write-lock contention under load directly starves the RPC server task
+2. **Watchdog does not distinguish RPC busy from RPC dead** — any 3-second RPC timeout is treated as de-registration
+
+**Fixes Applied:**
+- ✅ **`fork_resolution_blocked_until` cooldown** (commit `92737ad`) — stops the deep-fetch busy-loop from restarting every 15s on finality lock; removes the biggest single contributor to tokio saturation
+- ✅ **`MIN_PEERS_FINALITY_OVERRIDE` lowered 5 → 2** (commit `92737ad`) — node escapes minority fork within 60s instead of being permanently stuck
+- ✅ **Watchdog activity-check before restart** (this release) — checks `journalctl` for recent log activity before treating RPC timeout as de-registration (see section 14.12)
+- ⚠️ **Per-connection rate limiter** (OPEN) — `RateLimiter` should be instantiated per-connection, eliminating cross-peer mutex contention; shared `Arc<RwLock<RateLimiter>>` should be removed
+- ⚠️ **Ping flood escalation** (OPEN) — excessive pings silently dropped (`check_rate_limit_soft!`) but never recorded as violations; sustained ping floods from one peer do not escalate to blacklist
+
+**Code References:**
+- `src/blockchain.rs` — `fork_resolution_blocked_until`, `MIN_PEERS_FINALITY_OVERRIDE`, `longer_chain_escape`
+- `src/network/rate_limiter.rs` — `RateLimiter::new()` (shared instance)
+- `src/network/server.rs` — `rate_limiter: Arc<RwLock<RateLimiter>>` passed to every `handle_peer()`
+- `scripts/mn-watchdog.sh` — `daemon_recently_active()` check before restart
+
+---
+
+### 14.12 ✅ FIXED — Watchdog False-Restart on RPC Timeout
+**Status:** **FIXED in watchdog v1.1** (April 8, 2026)
+
+**Attack / Failure Mode:** The masternode watchdog script (`mn-watchdog.sh`) treated any `masternodestatus` RPC timeout as "de-registration detected" and restarted `timed` after 2 consecutive failures (a ~6-second window at the 3-second RPC timeout default). A node legitimately busy processing fork resolution or a reconnection storm is alive and healthy, but its tokio RPC handler thread is temporarily starved — the daemon is not dead or de-registered.
+
+**Consequence:** Nodes restarted every ~10 minutes even though they had caught up to the canonical chain and were operating normally. Each restart reset the masternode registration startup sequence, causing a ~60s window of ineligibility for block production rewards on every cycle.
+
+**Attack amplification:** An attacker who can trigger a brief reconnection storm (by coordinating 40+ Free-tier nodes to disconnect/reconnect simultaneously — AV3/AV25) can induce continuous watchdog restarts without ever directly attacking consensus.
+
+**Fix Applied:**
+- ✅ **`daemon_recently_active()` function** — checks `journalctl -u timed` for log entries within the last `DAEMON_ACTIVE_SECS` seconds (default: 90s). If the daemon has logged recently, it is alive and busy — not dead or de-registered.
+- ✅ **Separate busy-streak counter** — RPC timeouts while the daemon is logging increment `rpc_busy_streak`; restart is suppressed until `rpc_busy_streak >= RPC_BUSY_MAX` (default: 10, i.e. ~90s of continuous unresponsiveness with recent log activity). Silent failures still escalate normally via `fail_streak`.
+- ✅ **Raised default `RPC_TIMEOUT`** from 3s → 8s — gives the tokio RPC handler more time to respond during load spikes
+- ✅ **Raised default `FAIL_THRESHOLD`** from 2 → 3 — three consecutive confirmed failures before restart
+- ✅ **Accurate log message** — distinguishes "node busy (RPC timeout but daemon logging)" from "de-registration detected (RPC returned not-active status)"
+
+**Code References:**
+- `scripts/mn-watchdog.sh` — `daemon_recently_active()`, `rpc_busy_streak`, `RPC_BUSY_MAX`, `DAEMON_ACTIVE_SECS`
+
+---
+
 ## SUMMARY TABLE: ATTACK SURFACE ANALYSIS
 
 | Attack Vector | Mitigation Status | Risk Level | Notes |
@@ -1215,6 +1275,9 @@ During the ghost connection OOM this contributed ~15 extra concurrent futures ev
 | **Wallet Default Password** | ✅ Fixed | 🟢 Low | Auto-generated 32-char password (v1.2.0) |
 | **Unsigned Vote Acceptance** | ✅ Fixed | 🟢 Low | Empty signatures rejected (v1.2.0) |
 | **General Message Signing** | ⚠️ Not Enforced | 🟡 Medium | SignedMessage exists but unused for non-votes |
+| **Reconnection Storm → Tokio Starvation** | ⚠️ Partial | 🟡 Medium | Busy-loop fix (92737ad); per-connection rate-limiter refactor still open |
+| **Watchdog False-Restart via RPC Timeout** | ✅ Fixed | 🟢 Low | `daemon_recently_active()` check added; watchdog v1.1 (Apr 2026) |
+| **Ping Flood (no escalation)** | ⚠️ Open | 🟡 Medium | Soft-drop only; repeated flooding never triggers blacklist |
 
 ---
 

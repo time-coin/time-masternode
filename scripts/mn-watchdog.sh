@@ -8,10 +8,28 @@
 # "Not a masternode" status is treated as de-registration only when
 # masternode=1 is present in time.conf; if not configured it is skipped.
 #
+# IMPORTANT — RPC timeout vs. de-registration:
+#   An RPC timeout does NOT necessarily mean the node is de-registered.
+#   A node busy with fork resolution or a reconnection storm may exhaust
+#   its tokio worker threads temporarily, making RPC unresponsive for up
+#   to ~90 seconds while still running and registered. Restarting such a
+#   node interrupts healthy operation and causes a ~60s reward eligibility
+#   gap on every cycle (the "false-restart loop").
+#
+#   The watchdog distinguishes these cases using journalctl:
+#   - If `timed` has logged within DAEMON_ACTIVE_SECS (default: 90s),
+#     the daemon is alive and busy — RPC failures increment rpc_busy_streak.
+#   - Only when rpc_busy_streak >= RPC_BUSY_MAX (default: 10 consecutive
+#     polls, ~90s of unresponsiveness with recent log activity) OR when the
+#     daemon has NOT logged recently does a restart trigger.
+#   - When the RPC returns an explicit "not active" status (daemon is alive
+#     and answering but the masternode is not registered), the standard
+#     fail_streak / FAIL_THRESHOLD logic applies as before.
+#
 # Design:
 #   - Polls `masternodestatus` every POLL_INTERVAL seconds
-#   - Requires FAIL_THRESHOLD consecutive "not active" readings before
-#     restarting (avoids false positives from brief RPC hiccups)
+#   - Requires FAIL_THRESHOLD consecutive confirmed "not active" readings
+#     before restarting (avoids false positives from brief RPC hiccups)
 #   - Enforces RESTART_COOLDOWN between restarts (avoids restart loops)
 #   - Startup grace: waits STARTUP_GRACE seconds after timed last started
 #     before monitoring (avoids restarting a daemon that is still initializing)
@@ -28,23 +46,27 @@
 #   sudo bash scripts/mn-watchdog.sh --dry-run
 #
 # Options:
-#   --testnet              Use testnet RPC port (24101)
-#   --poll SECS            Poll interval in seconds (default: 3)
-#   --fail-threshold N     Consecutive "not active" readings before restart (default: 2)
-#   --restart-cooldown N   Min seconds between restarts (default: 60)
-#   --startup-grace N      Seconds to wait after watchdog launches before monitoring (default: 3)
-#   --rpc-timeout N        Seconds to wait for time-cli RPC response (default: 3)
-#   --dry-run              Log what would happen but do not restart
-#   -h, --help             Show this help
+#   --testnet                Use testnet RPC port (24101)
+#   --poll SECS              Poll interval in seconds (default: 3)
+#   --fail-threshold N       Consecutive confirmed "not active" readings before restart (default: 3)
+#   --restart-cooldown N     Min seconds between restarts (default: 60)
+#   --startup-grace N        Seconds to wait after watchdog launches before monitoring (default: 3)
+#   --rpc-timeout N          Seconds to wait for time-cli RPC response (default: 8)
+#   --rpc-busy-max N         Consecutive RPC timeouts while daemon is logging before restart (default: 10)
+#   --daemon-active-secs N   Consider daemon alive if it logged within this many seconds (default: 90)
+#   --dry-run                Log what would happen but do not restart
+#   -h, --help               Show this help
 
 set -uo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 POLL_INTERVAL=3
-FAIL_THRESHOLD=2
+FAIL_THRESHOLD=3       # confirmed "not active" RPC responses before restart
 RESTART_COOLDOWN=60
 STARTUP_GRACE=3
-RPC_TIMEOUT=3      # seconds to wait for time-cli before treating as failure
+RPC_TIMEOUT=8          # seconds to wait for time-cli before treating as failure
+RPC_BUSY_MAX=10        # consecutive timeouts while daemon is still logging → restart
+DAEMON_ACTIVE_SECS=90  # consider daemon alive if it logged within this many seconds
 DRY_RUN=0
 NETWORK="mainnet"
 
@@ -63,6 +85,8 @@ while [[ $# -gt 0 ]]; do
         --restart-cooldown)   RESTART_COOLDOWN="$2"; shift 2 ;;
         --startup-grace)      STARTUP_GRACE="$2"; shift 2 ;;
         --rpc-timeout)        RPC_TIMEOUT="$2"; shift 2 ;;
+        --rpc-busy-max)       RPC_BUSY_MAX="$2"; shift 2 ;;
+        --daemon-active-secs) DAEMON_ACTIVE_SECS="$2"; shift 2 ;;
         --dry-run)            DRY_RUN=1; shift ;;
         -h|--help)            usage ;;
         *) echo "Unknown option: $1"; usage ;;
@@ -99,14 +123,31 @@ fi
 CLI_CMD="$CLI"
 [ "$NETWORK" = "testnet" ] && CLI_CMD="$CLI --testnet"
 
-log "Starting ($NETWORK) | poll=${POLL_INTERVAL}s fail-threshold=${FAIL_THRESHOLD} cooldown=${RESTART_COOLDOWN}s grace=${STARTUP_GRACE}s rpc-timeout=${RPC_TIMEOUT}s dry-run=${DRY_RUN}"
+log "Starting ($NETWORK) | poll=${POLL_INTERVAL}s fail-threshold=${FAIL_THRESHOLD} cooldown=${RESTART_COOLDOWN}s grace=${STARTUP_GRACE}s rpc-timeout=${RPC_TIMEOUT}s busy-max=${RPC_BUSY_MAX} daemon-active-secs=${DAEMON_ACTIVE_SECS} dry-run=${DRY_RUN}"
 log "Using CLI: $CLI_CMD"
 
 # ── State ──────────────────────────────────────────────────────────────────────
-fail_streak=0           # consecutive non-active readings
+fail_streak=0           # consecutive confirmed "not active" RPC responses
+rpc_busy_streak=0       # consecutive RPC timeouts while daemon is still logging
 last_restart_ts=0       # unix timestamp of last restart we triggered
 total_restarts=0
 watchdog_start_ts=$(date +%s)   # used for one-time startup grace
+
+# ── Check if timed has logged recently (daemon alive but possibly busy) ────────
+# Returns 0 (true) if timed has written a log entry within the last N seconds.
+daemon_recently_active() {
+    local max_age_secs=${1:-$DAEMON_ACTIVE_SECS}
+    local last_log_line last_ts now_ts age
+    # --output=short-unix gives a Unix timestamp as the first field.
+    last_log_line=$(journalctl -u timed -n 1 --no-pager --output=short-unix 2>/dev/null)
+    last_ts=$(echo "$last_log_line" | awk '{print $1}' | head -1)
+    if [[ -z "$last_ts" || ! "$last_ts" =~ ^[0-9]+$ ]]; then
+        return 1  # no parseable log entry found
+    fi
+    now_ts=$(date +%s)
+    age=$(( now_ts - last_ts ))
+    [ "$age" -le "$max_age_secs" ]
+}
 
 # ── Check if timed has been running long enough (startup grace) ────────────────
 service_started_ago() {
@@ -170,9 +211,26 @@ while true; do
     #    doesn't stall each check for 60+ seconds.
     status_json=$(timeout "$RPC_TIMEOUT" $CLI_CMD masternodestatus 2>/dev/null) || status_json=""
     if [ -z "$status_json" ]; then
-        logw "RPC call failed (streak: $((fail_streak + 1))/$FAIL_THRESHOLD)"
-        fail_streak=$(( fail_streak + 1 ))
+        # RPC timed out or returned nothing.  Before treating as a hard failure,
+        # check whether the daemon is still writing to its log.  A node busy with
+        # fork resolution or a reconnection storm can starve its tokio RPC thread
+        # for up to ~90s while still alive and registered.
+        if daemon_recently_active "$DAEMON_ACTIVE_SECS"; then
+            rpc_busy_streak=$(( rpc_busy_streak + 1 ))
+            logw "⏳ RPC timeout — daemon is alive and logging (busy_streak: ${rpc_busy_streak}/${RPC_BUSY_MAX}); NOT counting as de-registration"
+            # Only escalate to a restart trigger after sustained unresponsiveness.
+            if [ "$rpc_busy_streak" -ge "$RPC_BUSY_MAX" ]; then
+                logw "🔴 Daemon has been RPC-unresponsive for $((rpc_busy_streak * POLL_INTERVAL))s while logging — escalating to fail_streak"
+                fail_streak=$(( fail_streak + 1 ))
+                rpc_busy_streak=0
+            fi
+        else
+            logw "RPC call failed — daemon has NOT logged in ${DAEMON_ACTIVE_SECS}s (streak: $((fail_streak + 1))/$FAIL_THRESHOLD)"
+            fail_streak=$(( fail_streak + 1 ))
+            rpc_busy_streak=0
+        fi
     else
+        rpc_busy_streak=0
         # Parse the "status" field.  Uses jq if available, falls back to grep.
         if command -v jq &>/dev/null; then
             mn_status=$(echo "$status_json" | jq -r '.status // "unknown"' 2>/dev/null)
@@ -183,9 +241,12 @@ while true; do
         fi
 
         if [ "$mn_status" = "active" ] && [ "$is_active" = "true" ]; then
-            # Healthy — reset streak.
-            [ "$fail_streak" -gt 0 ] && log "Masternode active again — clearing failure streak"
+            # Healthy — reset both streaks.
+            if [ "$fail_streak" -gt 0 ] || [ "$rpc_busy_streak" -gt 0 ]; then
+                log "Masternode active again — clearing failure streak"
+            fi
             fail_streak=0
+            rpc_busy_streak=0
         elif [ "$mn_status" = "Not a masternode" ]; then
             # The daemon says it is not registered.  This can mean either:
             #   (a) masternode=0 in time.conf  → operator intentionally disabled; don't restart
@@ -229,7 +290,7 @@ while true; do
         if [ "$DRY_RUN" -eq 1 ]; then
             log "DRY-RUN: would run 'systemctl restart timed' (restart #${total_restarts})"
         else
-            log "🔁 De-registration detected after ${fail_streak} consecutive checks — restarting timed (restart #${total_restarts})"
+            log "🔁 De-registration confirmed after ${fail_streak} consecutive checks — restarting timed (restart #${total_restarts})"
             if systemctl restart timed; then
                 log "✅ systemctl restart timed succeeded"
             else
