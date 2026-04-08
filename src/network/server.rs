@@ -617,6 +617,28 @@ async fn handle_peer(
     if let Some(tls) = tls_config {
         match tls.accept_server(stream).await {
             Ok(tls_stream) => {
+                // Enforce SNI = "timecoin.local": every legitimate TIME node sets this
+                // exact SNI when opening an outbound TLS connection (peer_connection.rs).
+                // Any connection with a missing, blank, or different SNI (e.g. an IP
+                // address literal) is provably not one of our nodes — it's a scanner,
+                // prober, or attacker.  Record an immediate violation so the IP
+                // escalates through temp → permanent ban (sled-persisted).
+                {
+                    let sni = tls_stream.get_ref().1.server_name();
+                    if sni != Some("timecoin.local") {
+                        let sni_desc = sni.unwrap_or("<none>").to_owned();
+                        blacklist
+                            .write()
+                            .await
+                            .record_violation(ip, &format!("Invalid TLS SNI: {}", sni_desc));
+                        tracing::debug!(
+                            "🚫 Rejected {} — invalid SNI {:?} (not a TIME node)",
+                            ip,
+                            sni_desc
+                        );
+                        return Ok(());
+                    }
+                }
                 // Log only after TLS succeeds — plain TCP probes (reachability checks)
                 // would otherwise spam the log with connections that immediately fail TLS.
                 tracing::info!("🔌 New peer connection from: {}", peer.addr);
