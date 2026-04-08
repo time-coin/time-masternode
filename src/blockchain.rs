@@ -6383,6 +6383,28 @@ impl Blockchain {
         // Each entry in masternode_rewards is a (TIME_wallet_address, satoshis) pair
         // committed in the block.  Look up each non-producer wallet's tier from the
         // registry (stable property) so we can verify the pool amounts.
+        //
+        // IMPORTANT: use the already-captured all_infos snapshot rather than a live
+        // tier_for_wallet call.  The two operations are semantically equivalent but a
+        // live call reads the registry AFTER the snapshot, introducing a TOCTOU race:
+        // a masternode that gossip-registers between the snapshot and this loop would be
+        // classified as "known" here (keeping unknown_non_producer_paid == 0) but would
+        // NOT appear in all_infos, causing the Step 5 is_known_masternode fallback to
+        // return false and hard-reject a fully valid block.
+        // Using the snapshot keeps Steps 2 and 5 consistent: if a wallet is unknown in
+        // all_infos it will be counted as unknown_non_producer_paid here, which causes
+        // Step 5 to be skipped entirely (the correct, lenient path for unknown addresses).
+        let snapshot_tier_for_wallet = |wallet: &str| -> Option<MasternodeTier> {
+            all_infos
+                .iter()
+                .filter(|info| {
+                    info.masternode.wallet_address == wallet
+                        || (!info.reward_address.is_empty() && info.reward_address == wallet)
+                })
+                .map(|info| info.masternode.tier)
+                .max_by_key(|tier| *tier as u64)
+        };
+
         let mut producer_received: u64 = 0;
         // Accumulate the total paid per tier from the block's actual rewards.
         let mut tier_paid: std::collections::HashMap<MasternodeTier, u64> =
@@ -6393,21 +6415,23 @@ impl Blockchain {
             if wallet == &producer_wallet {
                 producer_received += amount;
             } else {
-                match self.masternode_registry.tier_for_wallet(wallet).await {
+                match snapshot_tier_for_wallet(wallet.as_str()) {
                     Some(tier) => {
                         *tier_paid.entry(tier).or_insert(0) += amount;
                     }
                     None => {
                         // Check if this wallet is a UTXO-owner address under anti-squatter
                         // enforcement (block.height >= COLLATERAL_REWARD_ENFORCEMENT_HEIGHT).
-                        // A squatter holds the registry anchor, so tier_for_wallet returns None
-                        // for the legitimate UTXO owner — use the pre-built collateral map.
+                        // A squatter holds the registry anchor, so the wallet lookup returns
+                        // None for the legitimate UTXO owner — use the pre-built collateral map.
                         if let Some(&tier) = collateral_utxo_tier_map.get(wallet.as_str()) {
                             *tier_paid.entry(tier).or_insert(0) += amount;
                         } else {
-                            // Wallet not in current registry — masternode may have
-                            // deregistered since the block was produced.  Accept the
-                            // payment as long as it doesn't exceed the largest single pool.
+                            // Wallet not in current registry snapshot — masternode may have
+                            // deregistered since the block was produced, or this node missed
+                            // the gossip announcement.  Accept the payment as long as it
+                            // doesn't exceed the largest single pool.  Step 5 bitmap check
+                            // is skipped when unknown_non_producer_paid > 0.
                             unknown_non_producer_paid += amount;
                             if *amount > GOLD_POOL_SATOSHIS {
                                 return Err(format!(
