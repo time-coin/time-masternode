@@ -141,6 +141,8 @@ daemon_recently_active() {
     # --output=short-unix gives a Unix timestamp as the first field.
     last_log_line=$(journalctl -u timed -n 1 --no-pager --output=short-unix 2>/dev/null)
     last_ts=$(echo "$last_log_line" | awk '{print $1}' | head -1)
+    # short-unix may produce fractional timestamps (e.g. 1234567890.123456); strip decimals
+    last_ts="${last_ts%%.*}"
     if [[ -z "$last_ts" || ! "$last_ts" =~ ^[0-9]+$ ]]; then
         return 1  # no parseable log entry found
     fi
