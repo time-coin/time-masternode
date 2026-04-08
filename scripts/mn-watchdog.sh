@@ -98,6 +98,9 @@ TAG="mn-watchdog"
 log()  { logger -t "$TAG" -- "$*"; echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
 logw() { logger -t "$TAG" -p user.warning  -- "WARN  $*"; echo "$(date '+%Y-%m-%d %H:%M:%S') WARN  $*"; }
 loge() { logger -t "$TAG" -p user.err      -- "ERROR $*"; echo "$(date '+%Y-%m-%d %H:%M:%S') ERROR $*" >&2; }
+# Journal-only logger — no echo to screen (used for verbose diagnostics that
+# would scroll important watchdog status messages off the terminal)
+logj() { logger -t "$TAG" -- "$*"; }
 
 # ── Locate time-cli ────────────────────────────────────────────────────────────
 CLI=""
@@ -173,7 +176,7 @@ service_started_ago() {
 log_stall_diagnostics() {
     local streak=$1
 
-    log "── STALL DIAGNOSTICS (busy_streak=${streak}) ──"
+    logj "── STALL DIAGNOSTICS (busy_streak=${streak}) ──"
 
     # Daemon PID and CPU/memory
     local pid
@@ -183,9 +186,9 @@ log_stall_diagnostics() {
         cpu_mem=$(ps -p "$pid" -o pid=,pcpu=,pmem=,vsz=,rss= 2>/dev/null || echo "unavailable")
         thread_count=$(ls /proc/"$pid"/task 2>/dev/null | wc -l || echo "?")
         fd_count=$(ls /proc/"$pid"/fd 2>/dev/null | wc -l || echo "?")
-        log "  PID=${pid}  cpu/mem: ${cpu_mem}  threads=${thread_count}  fds=${fd_count}"
+        logj "  PID=${pid}  cpu/mem: ${cpu_mem}  threads=${thread_count}  fds=${fd_count}"
     else
-        log "  PID: unavailable"
+        logj "  PID: unavailable"
     fi
 
     # Open TCP connections to/from the daemon's P2P port
@@ -193,15 +196,15 @@ log_stall_diagnostics() {
     conn_count=$(ss -tnp 2>/dev/null | grep -c "timed" || echo "?")
     inbound=$(ss  -tnp 2>/dev/null | grep "timed" | grep -c ":24000 " || echo "?")
     outbound=$(ss -tnp 2>/dev/null | grep "timed" | grep -cv ":24000 " || echo "?")
-    log "  TCP connections: total=${conn_count} inbound~=${inbound} outbound~=${outbound}"
+    logj "  TCP connections: total=${conn_count} inbound~=${inbound} outbound~=${outbound}"
 
     # Last 25 log lines — strip timestamps down to HH:MM:SS for compactness
-    log "  -- last 25 log lines --"
+    logj "  -- last 25 log lines --"
     journalctl -u timed -n 25 --no-pager --output=short 2>/dev/null \
         | sed 's/^[A-Za-z]* [A-Za-z]* [0-9]* //' \
-        | while IFS= read -r line; do log "  $line"; done
+        | while IFS= read -r line; do logj "  $line"; done
 
-    log "── END STALL DIAGNOSTICS ──"
+    logj "── END STALL DIAGNOSTICS ──"
 }
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
