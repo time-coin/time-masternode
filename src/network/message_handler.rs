@@ -5297,6 +5297,13 @@ impl MessageHandler {
                         )
                         .await;
                     context.peer_registry.kick_peer(&self.peer_ip).await;
+                    // Return a DISCONNECT error so run_message_loop_unified breaks out
+                    // of its select! loop and drops writer_tx — this closes the channel,
+                    // causes the I/O bridge task to exit, and actually shuts down the TCP
+                    // connection.  Without this, kick_peer only drops the *registry's*
+                    // clone of writer_tx; PeerConnection still holds its own clone so the
+                    // channel stays open and the zombie keeps sending messages forever.
+                    return Err(format!("DISCONNECT: zombie peer kicked ({})", self.peer_ip));
                 }
             } else {
                 // Peer made progress — clear any zombie timer
