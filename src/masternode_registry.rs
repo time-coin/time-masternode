@@ -1061,12 +1061,26 @@ impl MasternodeRegistry {
                 .map(|c| *c)
                 .unwrap_or(0);
             if count >= MAX_FREE_TIER_PER_SUBNET {
-                tracing::warn!(
-                    "🚫 [AV25] Free-tier registration rejected: /24 {} already has {} nodes (max {})",
-                    subnet,
-                    count,
-                    MAX_FREE_TIER_PER_SUBNET
-                );
+                // Rate-limit this WARN to at most once per 30s per subnet.
+                // During AV3 cycling windows, 100+ nodes burst in simultaneously
+                // after the old 5 disconnect — logging each one creates WARN floods.
+                static SUBNET_REJECT_LIMITER: std::sync::OnceLock<
+                    dashmap::DashMap<String, std::time::Instant>,
+                > = std::sync::OnceLock::new();
+                let limiter = SUBNET_REJECT_LIMITER.get_or_init(dashmap::DashMap::new);
+                let needs_log = limiter
+                    .get(&subnet)
+                    .map(|t| t.elapsed().as_secs() >= 30)
+                    .unwrap_or(true);
+                if needs_log {
+                    limiter.insert(subnet.clone(), std::time::Instant::now());
+                    tracing::warn!(
+                        "🚫 [AV25] Free-tier registration rejected: /24 {} already has {} nodes (max {})",
+                        subnet,
+                        count,
+                        MAX_FREE_TIER_PER_SUBNET
+                    );
+                }
                 return Err(RegistryError::InvalidCollateral);
             }
         }

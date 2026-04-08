@@ -3255,14 +3255,25 @@ impl MessageHandler {
                                                         std::time::Instant::now(),
                                                     );
                                                     warn!(
-                                                        "🛡️ [{}] Blocked V4 eviction of local node \
-                                                         {} by {} for {} — use on-chain \
-                                                         MasternodeReg to reclaim collateral",
+                                                        "🚨 [{}] COLLATERAL HIJACK BLOCKED: {} \
+                                                         tried V4 eviction of local node {} \
+                                                         for {} — blacklisting attacker",
                                                         self.direction,
-                                                        squatter_ip,
                                                         peer_ip,
+                                                        squatter_ip,
                                                         outpoint
                                                     );
+                                                }
+                                                // Immediately record blacklist violation — no 30s
+                                                // enforcement-loop delay for collateral attacks.
+                                                if let Some(bl) = &context.blacklist {
+                                                    let bare = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                                                    if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
+                                                        let mut guard = bl.write().await;
+                                                        guard.record_violation(ban_ip, "V4 collateral hijack attempt");
+                                                        guard.record_violation(ban_ip, "V4 collateral hijack attempt");
+                                                        guard.record_violation(ban_ip, "V4 collateral hijack attempt");
+                                                    }
                                                 }
                                                 if let Some(ai) = &context.ai_system {
                                                     ai.attack_detector.record_collateral_spoof_attempt(&peer_ip, &outpoint.to_string());
@@ -3541,11 +3552,21 @@ impl MessageHandler {
                                     {
                                         wm.insert(peer_ip.clone(), std::time::Instant::now());
                                         warn!(
-                                            "🛡️ [{}] Blocked V4 eviction of local node {} \
-                                             by {} for {} (registry path) \
-                                             — use on-chain MasternodeReg to reclaim",
-                                            self.direction, registry_squatter, peer_ip, outpoint
+                                            "🚨 [{}] COLLATERAL HIJACK BLOCKED: {} tried V4 \
+                                             eviction of local node {} for {} (registry path) \
+                                             — blacklisting attacker",
+                                            self.direction, peer_ip, registry_squatter, outpoint
                                         );
+                                    }
+                                    // Immediately record blacklist violation — no 30s delay.
+                                    if let Some(bl) = &context.blacklist {
+                                        let bare = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                                        if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
+                                            let mut guard = bl.write().await;
+                                            guard.record_violation(ban_ip, "V4 collateral hijack attempt");
+                                            guard.record_violation(ban_ip, "V4 collateral hijack attempt");
+                                            guard.record_violation(ban_ip, "V4 collateral hijack attempt");
+                                        }
                                     }
                                     if let Some(ai) = &context.ai_system {
                                         ai.attack_detector.record_collateral_spoof_attempt(&peer_ip, &outpoint.to_string());
