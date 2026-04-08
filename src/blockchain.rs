@@ -6350,16 +6350,19 @@ impl Blockchain {
         // UTXO-owner address → tier so that Step 2 and Step 5 can classify them correctly
         // even when tier_for_wallet(utxo_owner_addr) returns None (because the squatter,
         // not the UTXO owner, holds the registry anchor).
+        //
+        // IMPORTANT (AV6 / bitmap positional drift): we build this map from ALL known
+        // paid-tier masternodes in all_infos, NOT from the bitmap-decoded subset.
+        // The bitmap positions are relative to the PRODUCER'S registry sort order at
+        // production time; our local sort order may differ (Free-tier gossip churn
+        // adds/removes nodes, shifting every subsequent bit position).  If we built the
+        // map only from bitmap-decoded nodes, legitimate UTXO owner addresses would be
+        // missing whenever our sort order diverged — causing valid blocks to be rejected
+        // with "NOT in active-masternodes bitmap" even for legitimate recipients.
         let collateral_utxo_tier_map: std::collections::HashMap<String, MasternodeTier> =
-            if block.header.height >= COLLATERAL_REWARD_ENFORCEMENT_HEIGHT
-                && !block.header.active_masternodes_bitmap.is_empty()
-            {
-                let bitmap_nodes = self
-                    .masternode_registry
-                    .get_active_from_bitmap(&block.header.active_masternodes_bitmap)
-                    .await;
+            if block.header.height >= COLLATERAL_REWARD_ENFORCEMENT_HEIGHT {
                 let mut map = std::collections::HashMap::new();
-                for info in &bitmap_nodes {
+                for info in &all_infos {
                     if info.masternode.tier == MasternodeTier::Free {
                         continue; // Free tier has no collateral UTXO
                     }
@@ -6780,11 +6783,32 @@ impl Blockchain {
                         continue; // zero-amount entries are metadata padding
                     }
                     if !eligible.contains(wallet.as_str()) {
-                        return Err(format!(
-                            "Block {} reward of {} satoshis paid to {} who is NOT in the \
-                             active-masternodes bitmap — possible reward injection",
-                            block.header.height, amount, wallet
-                        ));
+                        // Before hard-failing, check whether this address belongs to any
+                        // known masternode in the full registry.  If it does, the bitmap
+                        // positional decode is merely wrong (AV6: our local registry sort
+                        // order differs from the producer's) — the amounts have already been
+                        // validated in Steps 2-4, so the block is safe to accept.
+                        // Only reject if the address is completely unknown to us (true injection).
+                        let is_known_masternode = all_infos.iter().any(|info| {
+                            info.reward_address == *wallet
+                                || info.masternode.wallet_address == *wallet
+                        }) || collateral_utxo_tier_map.contains_key(wallet.as_str());
+
+                        if is_known_masternode {
+                            tracing::warn!(
+                                "Block {} bitmap drift: {} ({} sat) not at expected bitmap \
+                                 position — known masternode, registry diverged, accepting",
+                                block.header.height,
+                                wallet,
+                                amount
+                            );
+                        } else {
+                            return Err(format!(
+                                "Block {} reward of {} satoshis paid to {} who is NOT in the \
+                                 active-masternodes bitmap — possible reward injection",
+                                block.header.height, amount, wallet
+                            ));
+                        }
                     }
                 }
 
