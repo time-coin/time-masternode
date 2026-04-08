@@ -5005,7 +5005,13 @@ fn setup_logging(
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
     let level = if verbose { "trace" } else { &config.level };
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
+    // Suppress noisy third-party crate warnings that are informational-only.
+    // rustls logs "Illegal SNI extension: ignoring IP address presented as hostname" at WARN
+    // for every attacker probe that uses the node's IP as SNI — we already handle these in
+    // our TLS accept path, so rustls's own log is pure noise.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(level))
+        .add_directive("rustls=error".parse().expect("valid directive"));
 
     // Detect if running under systemd/journald
     let is_systemd =
