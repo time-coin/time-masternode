@@ -1165,8 +1165,8 @@ During the ghost connection OOM this contributed ~15 extra concurrent futures ev
 
 ---
 
-### 14.11 ⚠️ PARTIALLY MITIGATED — Reconnection-Storm Tokio Thread Starvation
-**Status:** **PARTIALLY MITIGATED** (April 8, 2026 — watchdog false-restart root cause)
+### 14.11 ✅ FIXED — Reconnection-Storm Tokio Thread Starvation
+**Status:** **FIXED in v1.4.35** (commit `22e056a`, April 8, 2026)
 
 **Attack / Failure Mode:** When 40+ masternodes disconnect and reconnect simultaneously (due to a mass eviction from the Free-tier subnet flood, attacker-triggered disconnect storm, or a network partition resolving), each inbound reconnection spawns a TLS I/O bridge task plus a message-processing loop task. During the resulting burst:
 
@@ -1192,14 +1192,16 @@ Result: tokio worker threads saturate → RPC JSON-RPC handler never gets schedu
 **Fixes Applied:**
 - ✅ **`fork_resolution_blocked_until` cooldown** (commit `92737ad`) — stops the deep-fetch busy-loop from restarting every 15s on finality lock; removes the biggest single contributor to tokio saturation
 - ✅ **`MIN_PEERS_FINALITY_OVERRIDE` lowered 5 → 2** (commit `92737ad`) — node escapes minority fork within 60s instead of being permanently stuck
-- ✅ **Watchdog activity-check before restart** (this release) — checks `journalctl` for recent log activity before treating RPC timeout as de-registration (see section 14.12)
-- ⚠️ **Per-connection rate limiter** (OPEN) — `RateLimiter` should be instantiated per-connection, eliminating cross-peer mutex contention; shared `Arc<RwLock<RateLimiter>>` should be removed
-- ⚠️ **Ping flood escalation** (OPEN) — excessive pings silently dropped (`check_rate_limit_soft!`) but never recorded as violations; sustained ping floods from one peer do not escalate to blacklist
+- ✅ **Watchdog activity-check before restart** (commit `f3e6229`) — checks `journalctl` for recent log activity before treating RPC timeout as de-registration (see section 14.12)
+- ✅ **Per-connection rate limiter** (commit `22e056a`) — `handle_peer()` now creates a local `RateLimiter::new()` that shadows the shared parameter; each peer's rate checks are fully independent with zero cross-peer lock contention
+- ✅ **Pre-channel message gate** (commit `22e056a`) — TLS and plaintext I/O bridge tasks count raw messages per second before forwarding to the processing channel; soft limit 200/s (silent drop), hard limit 500/s (error → `record_violation()` + `record_message_flood()` → disconnect)
+- ✅ **Ping flood escalation** (commit `22e056a`) — `ping_excess_streak` counter escalates 3 consecutive rate-limit exceedances to `record_violation()` + `record_ping_flood()`; peer is disconnected on ban threshold
+- ✅ **`PingFlood` / `MessageFlood` in `AttackDetector`** (commit `22e056a`) — new `AttackType` variants with sliding-window detection methods; feed the 30s enforcement loop → `IPBlacklist` auto-ban
 
 **Code References:**
 - `src/blockchain.rs` — `fork_resolution_blocked_until`, `MIN_PEERS_FINALITY_OVERRIDE`, `longer_chain_escape`
-- `src/network/rate_limiter.rs` — `RateLimiter::new()` (shared instance)
-- `src/network/server.rs` — `rate_limiter: Arc<RwLock<RateLimiter>>` passed to every `handle_peer()`
+- `src/network/server.rs` — per-connection `RateLimiter::new()` shadow; pre-channel gate in TLS+plaintext bridge tasks; `ping_excess_streak` escalation
+- `src/ai/attack_detector.rs` — `PingFlood`, `MessageFlood` variants; `record_ping_flood()`, `record_message_flood()`
 - `scripts/mn-watchdog.sh` — `daemon_recently_active()` check before restart
 
 ---
@@ -1275,9 +1277,10 @@ Result: tokio worker threads saturate → RPC JSON-RPC handler never gets schedu
 | **Wallet Default Password** | ✅ Fixed | 🟢 Low | Auto-generated 32-char password (v1.2.0) |
 | **Unsigned Vote Acceptance** | ✅ Fixed | 🟢 Low | Empty signatures rejected (v1.2.0) |
 | **General Message Signing** | ⚠️ Not Enforced | 🟡 Medium | SignedMessage exists but unused for non-votes |
-| **Reconnection Storm → Tokio Starvation** | ⚠️ Partial | 🟡 Medium | Busy-loop fix (92737ad); per-connection rate-limiter refactor still open |
+| **Reconnection Storm → Tokio Starvation** | ✅ Fixed | 🟢 Low | Per-connection rate-limiter, pre-channel gate, ping flood escalation (22e056a) |
 | **Watchdog False-Restart via RPC Timeout** | ✅ Fixed | 🟢 Low | `daemon_recently_active()` check added; watchdog v1.1 (Apr 2026) |
-| **Ping Flood (no escalation)** | ⚠️ Open | 🟡 Medium | Soft-drop only; repeated flooding never triggers blacklist |
+| **Ping Flood (no escalation)** | ✅ Fixed | 🟢 Low | `ping_excess_streak` → `record_ping_flood()` → blacklist (22e056a) |
+| **Pre-channel Message Flood** | ✅ Fixed | 🟢 Low | Soft 200/s + hard 500/s gate in TLS and plaintext I/O bridge tasks (22e056a) |
 
 ---
 
