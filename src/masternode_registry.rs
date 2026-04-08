@@ -785,6 +785,23 @@ impl MasternodeRegistry {
                     return Err(RegistryError::CollateralAlreadyLocked);
                 }
 
+                // Block migration whose *destination* IP is already held by an on-chain node.
+                // A gossip-based Free-tier migration cannot displace a node whose collateral
+                // is confirmed on-chain — that is the collateral-churn / IP-squatting attack
+                // where an attacker migrates from one of their own IPs to a legitimate node's IP.
+                if let Some(dest_info) = nodes.get(&masternode.address) {
+                    if matches!(dest_info.registration_source, RegistrationSource::OnChain(_)) {
+                        tracing::warn!(
+                            "🛡️ [Collateral-Churn] Migration from {} to on-chain node {} \
+                             blocked (incoming outpoint: {})",
+                            old_addr,
+                            masternode.address,
+                            outpoint,
+                        );
+                        return Err(RegistryError::CollateralAlreadyLocked);
+                    }
+                }
+
                 // Free tier: no collateral to protect, allow migration with cooldown
                 // Never let a remote peer steal the local masternode's collateral
                 let old_ip = old_addr.split(':').next().unwrap_or(&old_addr);
@@ -977,6 +994,43 @@ impl MasternodeRegistry {
                 // may lack the outpoint even though the node has valid collateral.
                 let old_outpoint = existing.masternode.collateral_outpoint.clone();
                 let new_outpoint = masternode.collateral_outpoint.clone();
+
+                // Block collateral-churn: remote gossip cannot replace the on-chain outpoint
+                // of an on-chain registered node. Only a new on-chain MasternodeReg tx may
+                // do that. This closes the attack where a remote peer floods V4 announces
+                // claiming a legitimate node's IP with different collateral outpoints,
+                // causing the real on-chain collateral to be queued for unlock.
+                if old_outpoint != new_outpoint
+                    && old_outpoint.is_some()
+                    && matches!(existing.registration_source, RegistrationSource::OnChain(_))
+                {
+                    static CHURN_WARN: std::sync::OnceLock<
+                        dashmap::DashMap<String, std::time::Instant>,
+                    > = std::sync::OnceLock::new();
+                    let warn_map = CHURN_WARN.get_or_init(dashmap::DashMap::new);
+                    let needs_log = warn_map
+                        .get(&masternode.address)
+                        .map(|t| t.elapsed().as_secs() >= 60)
+                        .unwrap_or(true);
+                    if needs_log {
+                        warn_map.insert(masternode.address.clone(), std::time::Instant::now());
+                        tracing::warn!(
+                            "🛡️ [Collateral-Churn] Blocked outpoint replacement for on-chain \
+                             node {} (on-chain: {}, rejected: {})",
+                            masternode.address,
+                            old_outpoint
+                                .as_ref()
+                                .map(|o| o.to_string())
+                                .unwrap_or_default(),
+                            new_outpoint
+                                .as_ref()
+                                .map(|o| o.to_string())
+                                .unwrap_or_default(),
+                        );
+                    }
+                    return Err(RegistryError::CollateralAlreadyLocked);
+                }
+
                 let effective_outpoint = if new_outpoint.is_none() && old_outpoint.is_some() {
                     // Preserve existing outpoint — incoming data is incomplete
                     old_outpoint.clone()
