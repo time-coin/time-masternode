@@ -5267,43 +5267,26 @@ impl MessageHandler {
                 self.direction, self.peer_ip, peer_height, our_height
             );
 
-            // Zombie peer check: if a peer has been ≥200 blocks behind for
-            // longer than ZOMBIE_TIMEOUT, it is stuck and will never catch up
-            // on its own.  Kick it to free the connection slot.
+            // Zombie peer logging only — kick disabled pending diagnosis of
+            // post-kick disconnect-cleanup stall (the full disconnect path was
+            // stalling tokio workers on every kick).  Zombie peers are harmless:
+            // they sit idle receiving empty block responses and waste one slot.
+            // TODO: re-enable kick once disconnect-cleanup stall is resolved.
             if height_diff >= 200 {
                 let now = Instant::now();
-                let since = zombie_peer_tracker()
+                let since = *zombie_peer_tracker()
                     .entry(self.peer_ip.clone())
                     .or_insert(now);
-                if now.duration_since(*since) >= ZOMBIE_TIMEOUT {
+                if now.duration_since(since) >= ZOMBIE_TIMEOUT {
                     warn!(
-                        "🧟 [{}] Kicking zombie peer {} — {} blocks behind for >{:.0}s",
+                        "🧟 [{}] Zombie peer {} — {} blocks behind for >{:.0}s (kick disabled)",
                         self.direction,
                         self.peer_ip,
                         height_diff,
                         ZOMBIE_TIMEOUT.as_secs_f32(),
                     );
-                    zombie_peer_tracker().remove(&self.peer_ip);
-                    context
-                        .peer_registry
-                        .mark_incompatible(
-                            &self.peer_ip,
-                            &format!(
-                                "zombie: {} blocks behind for >{:.0}s",
-                                height_diff,
-                                ZOMBIE_TIMEOUT.as_secs_f32()
-                            ),
-                            false,
-                        )
-                        .await;
-                    context.peer_registry.kick_peer(&self.peer_ip).await;
-                    // Return a DISCONNECT error so run_message_loop_unified breaks out
-                    // of its select! loop and drops writer_tx — this closes the channel,
-                    // causes the I/O bridge task to exit, and actually shuts down the TCP
-                    // connection.  Without this, kick_peer only drops the *registry's*
-                    // clone of writer_tx; PeerConnection still holds its own clone so the
-                    // channel stays open and the zombie keeps sending messages forever.
-                    return Err(format!("DISCONNECT: zombie peer kicked ({})", self.peer_ip));
+                    // Reset so we log again after another full ZOMBIE_TIMEOUT.
+                    zombie_peer_tracker().insert(self.peer_ip.clone(), now);
                 }
             } else {
                 // Peer made progress — clear any zombie timer
