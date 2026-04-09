@@ -704,36 +704,11 @@ impl MasternodeRegistry {
                                 }
                             }
 
-                            let canonical_tier = nodes
-                                .values()
-                                .find(|n| {
-                                    n.masternode
-                                        .address
-                                        .split(':')
-                                        .next()
-                                        .unwrap_or(&n.masternode.address)
-                                        == canonical_ip
-                                })
-                                .map(|n| n.masternode.tier)
-                                .unwrap_or(crate::types::MasternodeTier::Free);
-                            if canonical_tier != crate::types::MasternodeTier::Free {
-                                let is_local = local_ip
-                                    .as_deref()
-                                    .map(|l| l == incoming_ip)
-                                    .unwrap_or(false);
-                                if !is_local {
-                                    tracing::warn!(
-                                        "🛡️ Blocked wallet-match eviction of paid-tier {} by {} \
-                                         (claimed tier: {:?}) for {} — V4 proof or on-chain \
-                                         MasternodeReg required",
-                                        canonical,
-                                        masternode.address,
-                                        masternode.tier,
-                                        outpoint_key,
-                                    );
-                                    return Err(RegistryError::CollateralAlreadyLocked);
-                                }
-                            }
+                            // The canonical holder's wallet does NOT match the UTXO output
+                            // address, but the incoming node's wallet does.  The canonical
+                            // holder is a squatter (registered a collateral they don't own)
+                            // and must be evicted regardless of their tier.
+                            // Tier cannot override UTXO-address proof of ownership.
 
                             // Legitimate owner proved via UTXO output address — evict squatter
                             tracing::info!(
@@ -824,21 +799,47 @@ impl MasternodeRegistry {
                     }
                 }
             }
-            if let Some(old_addr) = old_addr_to_remove {
-                // Collateral is already claimed by a different IP.
-                // Paid tiers (Bronze+) MUST use an on-chain MasternodeReg tx to claim
-                // or migrate collateral. Gossip cannot move collateral between IPs because
-                // different nodes see gossip in different order, leading to split registries.
-                if masternode.tier != crate::types::MasternodeTier::Free {
-                    tracing::warn!(
-                        "🛡️ Collateral {} is registered to {} — {} must file an on-chain \
-                         MasternodeReg tx to claim it (gossip migration blocked for paid tiers)",
-                        outpoint,
-                        old_addr,
-                        masternode.address
-                    );
-                    return Err(RegistryError::CollateralAlreadyLocked);
+            if let Some(ref old_addr) = old_addr_to_remove {
+                // Collateral is already claimed by a different IP in memory.
+                // Check UTXO ownership first: if the existing holder's wallet_address
+                // doesn't match the UTXO output address, they're a squatter — evict them
+                // regardless of tier.
+                let utxo_mgr_guard = self.utxo_manager.read().await;
+                let utxo_addr = if let Some(ref utxo_manager) = *utxo_mgr_guard {
+                    utxo_manager.get_utxo(outpoint).await.ok().map(|u| u.address)
+                } else {
+                    None
+                };
+                drop(utxo_mgr_guard);
+
+                if let Some(ref utxo_address) = utxo_addr {
+                    if !utxo_address.is_empty() {
+                        let old_ip = old_addr.split(':').next().unwrap_or(old_addr);
+                        let old_wallet = nodes
+                            .get(old_ip)
+                            .map(|n| n.masternode.wallet_address.clone())
+                            .unwrap_or_default();
+                        if old_wallet != *utxo_address && masternode.wallet_address == *utxo_address {
+                            // Existing holder's wallet doesn't match UTXO, incoming's does.
+                            // Existing holder is the squatter — evict and fall through.
+                            tracing::info!(
+                                "✅ Evicting in-memory squatter {} (wallet {} ≠ UTXO {}) — {} proved ownership",
+                                old_addr, old_wallet, utxo_address, masternode.address
+                            );
+                            nodes.remove(old_ip);
+                        } else if masternode.wallet_address != *utxo_address && !old_wallet.is_empty() {
+                            // Incoming node's wallet doesn't match UTXO — they're the squatter
+                            tracing::warn!(
+                                "🛡️ Collateral squatter rejected: {} wallet {} doesn't match UTXO {} (registered to {})",
+                                masternode.address, masternode.wallet_address, utxo_address, old_addr
+                            );
+                            return Err(RegistryError::CollateralAlreadyLocked);
+                        }
+                        // If both match or UTXO check is inconclusive, fall through to tier rules
+                    }
                 }
+            }
+            if let Some(old_addr) = old_addr_to_remove {
 
                 // Even a Free-tier incoming claim must not displace a paid-tier holder.
                 // Attackers exploit the Free-tier migration path to re-steal collateral
