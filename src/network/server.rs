@@ -2543,7 +2543,13 @@ async fn handle_peer(
                                         Arc::clone(&masternode_registry),
                                     );
 
-                                    let _ = handler.handle_message(&msg, &context).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Err(e) if e.contains("DISCONNECT:") => {
+                                            tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e);
+                                            break;
+                                        }
+                                        _ => {}
+                                    }
                                 }
                                 NetworkMessage::MasternodeStatusGossip { .. } => {
                                     // Handle gossip via unified message handler

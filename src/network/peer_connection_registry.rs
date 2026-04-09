@@ -836,11 +836,13 @@ impl PeerConnectionRegistry {
                 let peer_commit_counts = Arc::clone(&self.peer_commit_counts);
                 let ip = ip.to_string();
                 async move {
-                    peer_chain_tips.write().await.remove(&ip);
-                    peer_heights.write().await.remove(&ip);
-                    peer_ping_times.write().await.remove(&ip);
-                    pending_pings.write().await.remove(&ip);
-                    peer_commit_counts.write().await.remove(&ip);
+                    // Drop each write lock before acquiring the next to avoid
+                    // holding multiple locks across await points.
+                    { peer_chain_tips.write().await.remove(&ip); }
+                    { peer_heights.write().await.remove(&ip); }
+                    { peer_ping_times.write().await.remove(&ip); }
+                    { pending_pings.write().await.remove(&ip); }
+                    { peer_commit_counts.write().await.remove(&ip); }
                 }
             });
         }
@@ -865,11 +867,11 @@ impl PeerConnectionRegistry {
                 let peer_commit_counts = Arc::clone(&self.peer_commit_counts);
                 let ip = ip.to_string();
                 async move {
-                    peer_chain_tips.write().await.remove(&ip);
-                    peer_heights.write().await.remove(&ip);
-                    peer_ping_times.write().await.remove(&ip);
-                    pending_pings.write().await.remove(&ip);
-                    peer_commit_counts.write().await.remove(&ip);
+                    { peer_chain_tips.write().await.remove(&ip); }
+                    { peer_heights.write().await.remove(&ip); }
+                    { peer_ping_times.write().await.remove(&ip); }
+                    { pending_pings.write().await.remove(&ip); }
+                    { peer_commit_counts.write().await.remove(&ip); }
                 }
             });
         }
@@ -889,11 +891,11 @@ impl PeerConnectionRegistry {
                 let peer_commit_counts = Arc::clone(&self.peer_commit_counts);
                 let ip = ip.to_string();
                 async move {
-                    peer_chain_tips.write().await.remove(&ip);
-                    peer_heights.write().await.remove(&ip);
-                    peer_ping_times.write().await.remove(&ip);
-                    pending_pings.write().await.remove(&ip);
-                    peer_commit_counts.write().await.remove(&ip);
+                    { peer_chain_tips.write().await.remove(&ip); }
+                    { peer_heights.write().await.remove(&ip); }
+                    { peer_ping_times.write().await.remove(&ip); }
+                    { pending_pings.write().await.remove(&ip); }
+                    { peer_commit_counts.write().await.remove(&ip); }
                 }
             });
         }
@@ -993,22 +995,17 @@ impl PeerConnectionRegistry {
         // Remove from connections map
         self.mark_disconnected(peer_ip);
 
-        let mut writers = self.peer_writers.write().await;
-        writers.remove(peer_ip);
+        // Drop each write lock before acquiring the next to avoid holding
+        // multiple locks across await points.  The old code held all 6 write
+        // locks simultaneously (variables lived until end-of-scope), which
+        // blocked ALL broadcast/send_to_peer calls for the entire duration.
+        { self.peer_writers.write().await.remove(peer_ip); }
         debug!("🔌 Unregistered peer connection: {}", peer_ip);
-
-        let mut pending = self.pending_responses.write().await;
-        pending.remove(peer_ip);
-
-        // Remove peer height, ping time, pending pings, and commit count
-        let mut heights = self.peer_heights.write().await;
-        heights.remove(peer_ip);
-        let mut ping_times = self.peer_ping_times.write().await;
-        ping_times.remove(peer_ip);
-        let mut pings = self.pending_pings.write().await;
-        pings.remove(peer_ip);
-        let mut commit_counts = self.peer_commit_counts.write().await;
-        commit_counts.remove(peer_ip);
+        { self.pending_responses.write().await.remove(peer_ip); }
+        { self.peer_heights.write().await.remove(peer_ip); }
+        { self.peer_ping_times.write().await.remove(peer_ip); }
+        { self.pending_pings.write().await.remove(peer_ip); }
+        { self.peer_commit_counts.write().await.remove(peer_ip); }
     }
 
     /// Set a peer's reported blockchain height
