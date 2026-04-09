@@ -581,6 +581,21 @@ impl MasternodeRegistry {
             return Err(RegistryError::InvalidCollateral);
         }
 
+        // Pre-fetch the UTXO address BEFORE taking the write lock.
+        // SledUtxoStorage::get_utxo uses spawn_blocking internally; doing it inside
+        // masternodes.write().await starves every other task queued on that lock.
+        let prefetched_utxo_addr: Option<String> =
+            if let Some(ref outpoint) = masternode.collateral_outpoint {
+                let utxo_mgr_guard = self.utxo_manager.read().await;
+                if let Some(ref utxo_manager) = *utxo_mgr_guard {
+                    utxo_manager.get_utxo(outpoint).await.ok().map(|u| u.address)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
         let mut nodes = self.masternodes.write().await;
         let now = Self::now();
 
@@ -631,17 +646,9 @@ impl MasternodeRegistry {
                     //
                     // If the incoming wallet_address matches the UTXO's output address, the
                     // incoming node is the legitimate owner — evict the squatter and re-anchor.
-                    let utxo_mgr_guard = self.utxo_manager.read().await;
-                    let utxo_addr = if let Some(ref utxo_manager) = *utxo_mgr_guard {
-                        utxo_manager
-                            .get_utxo(outpoint)
-                            .await
-                            .ok()
-                            .map(|u| u.address)
-                    } else {
-                        None
-                    };
-                    drop(utxo_mgr_guard);
+                    // Use the pre-fetched UTXO address (looked up before taking the write lock
+                    // to avoid spawn_blocking inside masternodes.write().await).
+                    let utxo_addr = prefetched_utxo_addr.clone();
 
                     if let Some(ref utxo_address) = utxo_addr {
                         if !utxo_address.is_empty() && utxo_address == &masternode.wallet_address {
@@ -804,13 +811,8 @@ impl MasternodeRegistry {
                 // Check UTXO ownership first: if the existing holder's wallet_address
                 // doesn't match the UTXO output address, they're a squatter — evict them
                 // regardless of tier.
-                let utxo_mgr_guard = self.utxo_manager.read().await;
-                let utxo_addr = if let Some(ref utxo_manager) = *utxo_mgr_guard {
-                    utxo_manager.get_utxo(outpoint).await.ok().map(|u| u.address)
-                } else {
-                    None
-                };
-                drop(utxo_mgr_guard);
+                // Use the pre-fetched address (no spawn_blocking inside write lock).
+                let utxo_addr = prefetched_utxo_addr.clone();
 
                 if let Some(ref utxo_address) = utxo_addr {
                     if !utxo_address.is_empty() {
