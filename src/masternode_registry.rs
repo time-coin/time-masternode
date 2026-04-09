@@ -581,9 +581,9 @@ impl MasternodeRegistry {
             return Err(RegistryError::InvalidCollateral);
         }
 
-        // Pre-fetch the UTXO address BEFORE taking the write lock.
-        // SledUtxoStorage::get_utxo uses spawn_blocking internally; doing it inside
-        // masternodes.write().await starves every other task queued on that lock.
+        // Pre-fetch the UTXO address AND local masternode address BEFORE taking the
+        // write lock.  SledUtxoStorage::get_utxo uses spawn_blocking internally; any
+        // await inside masternodes.write().await starves queued tasks.
         let prefetched_utxo_addr: Option<String> =
             if let Some(ref outpoint) = masternode.collateral_outpoint {
                 let utxo_mgr_guard = self.utxo_manager.read().await;
@@ -596,17 +596,17 @@ impl MasternodeRegistry {
                 None
             };
 
-        let mut nodes = self.masternodes.write().await;
-        let now = Self::now();
-
-        // Check for duplicate collateral: if another masternode uses this outpoint,
-        // treat it as an IP migration — unregister the old entry and allow the new one.
-        // NEVER migrate away the local masternode's collateral — reject the remote claim.
-        let local_addr_guard = self.local_masternode_address.read().await;
-        let local_ip = local_addr_guard
+        // Also pre-fetch local_masternode_address to avoid a nested async lock
+        // inside masternodes.write().await.
+        let local_ip: Option<String> = self
+            .local_masternode_address
+            .read()
+            .await
             .as_ref()
             .map(|a| a.split(':').next().unwrap_or(a).to_string());
-        drop(local_addr_guard);
+
+        let mut nodes = self.masternodes.write().await;
+        let now = Self::now();
 
         if let Some(ref outpoint) = masternode.collateral_outpoint {
             let outpoint_key = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
