@@ -211,6 +211,18 @@ log_stall_diagnostics() {
 while true; do
     sleep "$POLL_INTERVAL"
 
+    # 0. If already at threshold and in cooldown, skip polling entirely — don't increment.
+    if [ "$fail_streak" -ge "$FAIL_THRESHOLD" ]; then
+        now=$(date +%s)
+        since_last=$(( now - last_restart_ts ))
+        if [ "$since_last" -lt "$RESTART_COOLDOWN" ]; then
+            remaining=$(( RESTART_COOLDOWN - since_last ))
+            logw "Threshold reached but restart cooldown active (${remaining}s remaining) — waiting"
+            continue
+        fi
+        # Cooldown expired — fall through to restart block below.
+    fi
+
     # 1. Daemon must be running.
     if ! systemctl is-active --quiet timed 2>/dev/null; then
         # timed is dead (OOM killed, segfault, etc.) — restart it directly.
@@ -328,8 +340,6 @@ while true; do
         if [ "$since_last" -lt "$RESTART_COOLDOWN" ]; then
             remaining=$(( RESTART_COOLDOWN - since_last ))
             logw "Threshold reached but restart cooldown active (${remaining}s remaining) — waiting"
-            # Cap at threshold so streak doesn't grow unbounded; still retries immediately when cooldown expires.
-            fail_streak=$FAIL_THRESHOLD
             continue
         fi
 
