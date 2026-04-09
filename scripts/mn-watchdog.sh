@@ -328,7 +328,8 @@ while true; do
         if [ "$since_last" -lt "$RESTART_COOLDOWN" ]; then
             remaining=$(( RESTART_COOLDOWN - since_last ))
             logw "Threshold reached but restart cooldown active (${remaining}s remaining) — waiting"
-            # Don't reset fail_streak; keep accumulating so we retry the moment cooldown expires.
+            # Cap at threshold so streak doesn't grow unbounded; still retries immediately when cooldown expires.
+            fail_streak=$FAIL_THRESHOLD
             continue
         fi
 
