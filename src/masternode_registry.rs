@@ -72,6 +72,8 @@ pub enum RegistryError {
     OwnerMismatch,
     #[error("Invalid signature")]
     InvalidSignature,
+    #[error("IP cycling detected (AV3)")]
+    IpCyclingRejected,
     #[error("Storage error: {0}")]
     Storage(String),
 }
@@ -962,7 +964,7 @@ impl MasternodeRegistry {
                                         now.saturating_sub(*last_migrated),
                                         CYCLING_LOCKOUT_SECS,
                                     );
-                                    return Err(RegistryError::InvalidCollateral);
+                                    return Err(RegistryError::IpCyclingRejected);
                                 }
                             }
                         }

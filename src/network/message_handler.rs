@@ -3924,10 +3924,32 @@ impl MessageHandler {
                         let bare_ip = peer_ip.split(':').next().unwrap_or(&peer_ip);
                         if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
                             let mut bl = blacklist.write().await;
-                            bl.record_severe_violation(
+                            let should_disconnect = bl.record_severe_violation(
                                 ban_ip,
                                 &format!("Collateral hijack attempt for {}", outpoint_for_relay),
                             );
+                            if should_disconnect {
+                                return Err(format!(
+                                    "DISCONNECT: collateral hijack banned {}",
+                                    ban_ip
+                                ));
+                            }
+                        }
+                    }
+                }
+                Err(crate::masternode_registry::RegistryError::IpCyclingRejected) => {
+                    if let Some(blacklist) = &context.blacklist {
+                        let bare_ip = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                        if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
+                            let mut bl = blacklist.write().await;
+                            let should_disconnect =
+                                bl.record_violation(ban_ip, "IP cycling (AV3)");
+                            if should_disconnect {
+                                return Err(format!(
+                                    "DISCONNECT: IP cycling banned {}",
+                                    ban_ip
+                                ));
+                            }
                         }
                     }
                 }
@@ -4051,10 +4073,32 @@ impl MessageHandler {
                         let bare_ip = peer_ip.split(':').next().unwrap_or(&peer_ip);
                         if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
                             let mut bl = blacklist.write().await;
-                            bl.record_severe_violation(
+                            let should_disconnect = bl.record_severe_violation(
                                 ban_ip,
                                 "Free-tier collateral hijack: tried to claim paid-tier collateral",
                             );
+                            if should_disconnect {
+                                return Err(format!(
+                                    "DISCONNECT: free-tier collateral hijack banned {}",
+                                    ban_ip
+                                ));
+                            }
+                        }
+                    }
+                }
+                Err(crate::masternode_registry::RegistryError::IpCyclingRejected) => {
+                    if let Some(blacklist) = &context.blacklist {
+                        let bare_ip = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                        if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
+                            let mut bl = blacklist.write().await;
+                            let should_disconnect =
+                                bl.record_violation(ban_ip, "IP cycling (AV3)");
+                            if should_disconnect {
+                                return Err(format!(
+                                    "DISCONNECT: IP cycling banned {}",
+                                    ban_ip
+                                ));
+                            }
                         }
                     }
                 }
