@@ -2,7 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Mainnet Consensus Constraint
+## Versioning
+
+The version for this repo is defined in **`Cargo.toml`** (`version = "x.y.z"`). When bumping the version:
+
+1. Update `Cargo.toml` here
+2. Update **`~/projects/time-website/js/config.js`** — this is the single source of truth for the version numbers displayed on the public website (`nodeVersion`, `devNotice`, `progressInfo`). The website does not auto-read Cargo.toml; it must be updated manually.
+
+
 
 **This project is deployed on mainnet. Never make changes that break consensus compatibility with existing nodes.**
 
