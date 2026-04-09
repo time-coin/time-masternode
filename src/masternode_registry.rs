@@ -1402,6 +1402,7 @@ impl MasternodeRegistry {
             );
 
             // Broadcast removal so peers update their active sets immediately.
+            // Write lock is already dropped above; no lock held during this await.
             if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
                 let _ = tx.send(
                     crate::network::message::NetworkMessage::MasternodeInactive {
@@ -1411,11 +1412,10 @@ impl MasternodeRegistry {
                 );
             }
 
-            // Remove from disk.
+            // Remove from disk via background writer — avoids sync sled I/O on the
+            // tokio thread when many free-tier nodes disconnect simultaneously.
             let key = format!("masternode:{}", address);
-            self.db
-                .remove(key.as_bytes())
-                .map_err(|e| RegistryError::Storage(e.to_string()))?;
+            self.sled_remove_bg(key.into_bytes());
         } else if is_active {
             // On-chain registered nodes (Bronze+) paid collateral and may reconnect.
             // Mark inactive so they are excluded from vote weight until they return.
@@ -1430,7 +1430,14 @@ impl MasternodeRegistry {
                 address
             );
 
-            // Broadcast inactive status to all peers for consensus.
+            // Persist and rebuild caches while still holding the write lock (fast — bg channel).
+            self.store_masternode(address, info)?;
+            self.rebuild_node_caches(&masternodes);
+
+            // Drop the write lock BEFORE awaiting on broadcast_tx so we don't hold
+            // masternodes.write() across an async boundary.
+            drop(masternodes);
+
             if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
                 let _ = tx.send(
                     crate::network::message::NetworkMessage::MasternodeInactive {
@@ -1439,10 +1446,6 @@ impl MasternodeRegistry {
                     },
                 );
             }
-
-            // Persist to disk.
-            self.store_masternode(address, info)?;
-            self.rebuild_node_caches(&masternodes);
         }
 
         Ok(())
@@ -2616,21 +2619,20 @@ impl MasternodeRegistry {
         peer_registry: &crate::network::peer_connection_registry::PeerConnectionRegistry,
     ) {
         let now = Self::now();
-        let mut masternodes = self.masternodes.write().await;
 
-        // Snapshot connected peers once so we can protect directly-connected
-        // OnChain nodes from having their is_active flipped by stale gossip counts.
+        // Pre-fetch async state BEFORE taking the write lock so we never hold
+        // masternodes.write() across an async boundary.
         let connected_peers: std::collections::HashSet<String> = peer_registry
             .get_connected_peers()
             .await
             .into_iter()
             .collect();
-
-        // Read local address once to protect local node from gossip-based deactivation.
         let local_addr = self.local_masternode_address.read().await.clone();
         let local_ip = local_addr
             .as_ref()
             .map(|a| a.split(':').next().unwrap_or(a).to_string());
+
+        let mut masternodes = self.masternodes.write().await;
 
         let mut status_changes = 0;
         let mut total_active = 0;
