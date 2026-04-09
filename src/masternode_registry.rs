@@ -149,6 +149,14 @@ pub struct MasternodeInfo {
     pub first_seen_at: u64,
 }
 
+/// Buffered sled write sent to the background writer task.
+/// All sled I/O from within async write-lock scope is sent here so tokio
+/// workers are never blocked by disk operations.
+enum SledWriteOp {
+    Upsert { key: Vec<u8>, value: Vec<u8> },
+    Remove { key: Vec<u8> },
+}
+
 pub struct MasternodeRegistry {
     masternodes: Arc<RwLock<HashMap<String, MasternodeInfo>>>,
     local_masternode_address: Arc<RwLock<Option<String>>>, // Track which one is ours
@@ -157,6 +165,9 @@ pub struct MasternodeRegistry {
     /// Certificate for the local masternode (website-issued Ed25519 signature)
     local_certificate: Arc<RwLock<[u8; 64]>>,
     db: Arc<Db>,
+    /// Background sled-writer channel. Sled writes are queued here and flushed
+    /// asynchronously so the masternodes write lock is never held during disk I/O.
+    sled_write_tx: tokio::sync::mpsc::UnboundedSender<SledWriteOp>,
     network: NetworkType,
     block_period_start: Arc<RwLock<u64>>,
     peer_manager: Arc<RwLock<Option<Arc<crate::peer_manager::PeerManager>>>>,
@@ -317,12 +328,36 @@ impl MasternodeRegistry {
             nodes.values().filter(|i| i.is_active).cloned().collect();
         let init_all: Vec<MasternodeInfo> = nodes.values().cloned().collect();
 
+        // Spawn background sled-writer task. All sled inserts and removes are
+        // queued via sled_write_tx so the masternodes write lock is never held
+        // during disk I/O, preventing tokio worker starvation under gossip floods.
+        let (sled_write_tx, mut sled_write_rx) =
+            tokio::sync::mpsc::unbounded_channel::<SledWriteOp>();
+        let db_bg = db.clone();
+        tokio::runtime::Handle::current().spawn(async move {
+            while let Some(op) = sled_write_rx.recv().await {
+                match op {
+                    SledWriteOp::Upsert { key, value } => {
+                        if let Err(e) = db_bg.insert(key, value) {
+                            tracing::warn!("⚠️ Sled background write failed: {}", e);
+                        }
+                    }
+                    SledWriteOp::Remove { key } => {
+                        if let Err(e) = db_bg.remove(key) {
+                            tracing::warn!("⚠️ Sled background remove failed: {}", e);
+                        }
+                    }
+                }
+            }
+        });
+
         Self {
             masternodes: Arc::new(RwLock::new(nodes)),
             local_masternode_address: Arc::new(RwLock::new(None)),
             local_wallet_address: Arc::new(RwLock::new(None)),
             local_certificate: Arc::new(RwLock::new([0u8; 64])),
             db,
+            sled_write_tx,
             network,
             block_period_start: Arc::new(RwLock::new(now)),
             peer_manager: Arc::new(RwLock::new(None)),
@@ -483,13 +518,25 @@ impl MasternodeRegistry {
         self.network
     }
 
-    /// Helper to serialize and store a masternode to disk
+    /// Queue a sled key/value insertion via the background writer.
+    /// Never blocks; errors are logged by the background task.
+    fn sled_insert_bg(&self, key: Vec<u8>, value: Vec<u8>) {
+        let _ = self
+            .sled_write_tx
+            .send(SledWriteOp::Upsert { key, value });
+    }
+
+    /// Queue a sled key removal via the background writer.
+    fn sled_remove_bg(&self, key: Vec<u8>) {
+        let _ = self.sled_write_tx.send(SledWriteOp::Remove { key });
+    }
+
+    /// Helper to serialize and enqueue a masternode write via the background sled writer.
+    /// Serialization happens synchronously (cheap); disk I/O is deferred.
     fn store_masternode(&self, address: &str, info: &MasternodeInfo) -> Result<(), RegistryError> {
-        let key = format!("masternode:{}", address);
+        let key = format!("masternode:{}", address).into_bytes();
         let value = bincode::serialize(info).map_err(|e| RegistryError::Storage(e.to_string()))?;
-        self.db
-            .insert(key.as_bytes(), value)
-            .map_err(|e| RegistryError::Storage(e.to_string()))?;
+        self.sled_insert_bg(key, value);
         Ok(())
     }
 
@@ -971,8 +1018,8 @@ impl MasternodeRegistry {
                     masternode.address
                 );
                 nodes.remove(&old_addr);
-                let key = format!("masternode:{}", old_addr);
-                let _ = self.db.remove(key.as_bytes());
+                let key = format!("masternode:{}", old_addr).into_bytes();
+                self.sled_remove_bg(key);
             } else if anchor_addr.is_none() && masternode.tier != crate::types::MasternodeTier::Free
             {
                 // Gossip does NOT set collateral anchors for paid tiers.
@@ -1217,9 +1264,10 @@ impl MasternodeRegistry {
                 let outpoint_key = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
                 let anchor_key = format!("collateral_anchor:{}", outpoint_key);
                 if self.db.get(anchor_key.as_bytes()).ok().flatten().is_none() {
-                    let _ = self
-                        .db
-                        .insert(anchor_key.as_bytes(), masternode.address.as_bytes());
+                    self.sled_insert_bg(
+                        anchor_key.into_bytes(),
+                        masternode.address.as_bytes().to_vec(),
+                    );
                     tracing::debug!(
                         "🔒 Set collateral anchor {} → {}",
                         outpoint_key,
@@ -1405,22 +1453,16 @@ impl MasternodeRegistry {
             return Err(RegistryError::NotFound);
         }
 
-        // Remove from disk
-        let key = format!("masternode:{}", address);
-        self.db
-            .remove(key.as_bytes())
-            .map_err(|e| RegistryError::Storage(e.to_string()))?;
-
         let removed = nodes.remove(address);
 
-        // Also remove the collateral_anchor entry for this masternode's outpoint.
-        // This allows the IP to re-register with new collateral after deregistration
-        // (e.g. after a collateral UTXO was spent and the masternode auto-deregistered).
+        // Queue disk removals via background writer (no sled I/O under write lock).
+        self.sled_remove_bg(format!("masternode:{}", address).into_bytes());
+
         if let Some(ref info) = removed {
             if let Some(ref op) = info.masternode.collateral_outpoint {
                 let outpoint_str = format!("{}:{}", hex::encode(op.txid), op.vout);
                 let anchor_key = format!("collateral_anchor:{}", outpoint_str);
-                let _ = self.db.remove(anchor_key.as_bytes());
+                self.sled_remove_bg(anchor_key.into_bytes());
                 debug!(
                     "🔓 Removed collateral anchor {} on masternode deregistration",
                     outpoint_str
@@ -2735,8 +2777,7 @@ impl MasternodeRegistry {
         for address in &to_remove {
             if let Some(info) = masternodes.remove(address) {
                 // Remove from disk
-                let key = format!("masternode:{}", address);
-                let _ = self.db.remove(key.as_bytes());
+                self.sled_remove_bg(format!("masternode:{}", address).into_bytes());
 
                 // Queue collateral unlock and remove on-chain anchor
                 if let Some(outpoint) = &info.masternode.collateral_outpoint {
@@ -2748,7 +2789,7 @@ impl MasternodeRegistry {
                     // re-registered by a new masternode without being blocked.
                     let outpoint_str = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
                     let anchor_key = format!("collateral_anchor:{}", outpoint_str);
-                    let _ = self.db.remove(anchor_key.as_bytes());
+                    self.sled_remove_bg(anchor_key.into_bytes());
                 }
 
                 info!(
@@ -2906,10 +2947,11 @@ impl MasternodeRegistry {
             info.last_reward_height = block_height;
             info.blocks_without_reward = 0;
 
-            // Persist to disk
-            let key = format!("masternode:{}", masternode_address);
             if let Ok(data) = bincode::serialize(info) {
-                let _ = self.db.insert(key.as_bytes(), data);
+                self.sled_insert_bg(
+                    format!("masternode:{}", masternode_address).into_bytes(),
+                    data,
+                );
             }
 
             tracing::debug!(
@@ -2953,9 +2995,11 @@ impl MasternodeRegistry {
         // Batch persist to disk periodically (every 10 blocks)
         if current_height % 10 == 0 {
             for (address, info) in masternodes.iter() {
-                let key = format!("masternode:{}", address);
                 if let Ok(data) = bincode::serialize(info) {
-                    let _ = self.db.insert(key.as_bytes(), data);
+                    self.sled_insert_bg(
+                        format!("masternode:{}", address).into_bytes(),
+                        data,
+                    );
                 }
             }
             tracing::debug!(
@@ -3613,6 +3657,7 @@ impl Clone for MasternodeRegistry {
             local_wallet_address: self.local_wallet_address.clone(),
             local_certificate: self.local_certificate.clone(),
             db: self.db.clone(),
+            sled_write_tx: self.sled_write_tx.clone(),
             network: self.network,
             block_period_start: self.block_period_start.clone(),
             peer_manager: self.peer_manager.clone(),
