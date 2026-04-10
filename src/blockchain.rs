@@ -7476,6 +7476,8 @@ impl Blockchain {
                     }
                 }
             }
+            // Yield after each block so RPC and network tasks can run during long reorgs.
+            tokio::task::yield_now().await;
         }
 
         tracing::info!(
@@ -7521,6 +7523,8 @@ impl Blockchain {
             }
             // CRITICAL: Invalidate cache to prevent stale reads
             self.block_cache.invalidate(height);
+            // Yield after each block removal so the runtime stays responsive during long reorgs.
+            tokio::task::yield_now().await;
         }
 
         // Step 3: Update chain height
@@ -9619,8 +9623,7 @@ impl Blockchain {
                     // the majority-chain consensus overrides the local hash tiebreaker.
                     let mut consensus_override = false;
                     if peer_tip_height == our_height {
-                        let peer_registry_guard = self.peer_registry.read().await;
-                        if let Some(registry) = peer_registry_guard.as_ref() {
+                        if let Some(registry) = self.get_peer_registry().await {
                             let compatible_peers = registry.get_compatible_peers().await;
                             let mut supporting_peers = 0usize;
                             let mut total_checked = 0usize;
@@ -9673,8 +9676,7 @@ impl Blockchain {
                 // integrity) already protects against fabricated chains.
                 if peer_tip_height <= our_height {
                     const MIN_PEERS_FOR_ONDEMAND_FORK: usize = 3;
-                    let peer_registry = self.peer_registry.read().await;
-                    if let Some(registry) = peer_registry.as_ref() {
+                    if let Some(registry) = self.get_peer_registry().await {
                         let compatible_peers = registry.get_compatible_peers().await;
                         let mut supporting_peers = 0usize;
                         let mut total_checked = 0usize;

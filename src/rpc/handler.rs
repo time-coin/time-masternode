@@ -296,20 +296,25 @@ impl RpcHandler {
 
         // Best-effort sync progress: ask the peer registry for the highest
         // known peer tip so wallets can show a progress estimate.
-        let peer_tip = if let Some(registry) = self.blockchain.get_peer_registry().await {
-            let peers = registry.get_connected_peers().await;
-            let mut max_tip = height;
-            for peer in &peers {
-                if let Some(h) = registry.get_peer_height(peer).await {
-                    if h > max_tip {
-                        max_tip = h;
+        // Timeout prevents this from blocking the RPC thread during heavy fork resolution.
+        let peer_tip = tokio::time::timeout(Duration::from_secs(2), async {
+            if let Some(registry) = self.blockchain.get_peer_registry().await {
+                let peers = registry.get_connected_peers().await;
+                let mut max_tip = height;
+                for peer in &peers {
+                    if let Some(h) = registry.get_peer_height(peer).await {
+                        if h > max_tip {
+                            max_tip = h;
+                        }
                     }
                 }
+                max_tip
+            } else {
+                height
             }
-            max_tip
-        } else {
-            height
-        };
+        })
+        .await
+        .unwrap_or(height);
         let verification_progress = if is_syncing && peer_tip > 0 {
             (height as f64 / peer_tip as f64).min(1.0)
         } else {

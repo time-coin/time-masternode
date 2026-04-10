@@ -204,6 +204,20 @@ impl NetworkServer {
     pub async fn enable_blacklist_persistence(&self, db: &sled::Db) {
         self.blacklist.write().await.attach_storage(db);
         tracing::info!("🔒 Blacklist persistence enabled — bans will survive restarts");
+        // After loading persisted bans, ensure we never ban our own IP.
+        // This clears any accidental self-ban that accumulated from self-connection
+        // TLS failures (the node briefly connecting to its own IP via the peer list).
+        if let Some(ref own_ip) = self.local_ip {
+            if let Ok(ip) = own_ip.parse::<IpAddr>() {
+                let mut bl = self.blacklist.write().await;
+                if bl.is_blacklisted(ip).is_some() {
+                    bl.unban(ip);
+                    tracing::info!("🏠 Cleared self-ban for local IP {} on startup", own_ip);
+                }
+                // Whitelist our own IP permanently so future self-connections never ban us.
+                bl.add_to_whitelist(ip, "local node IP");
+            }
+        }
     }
 
     /// Set the TLS configuration for encrypted connections
@@ -601,7 +615,7 @@ async fn handle_peer(
     seen_utxo_locks: Arc<DeduplicationFilter>,
     connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
     peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
-    _local_ip: Option<String>,
+    local_ip: Option<String>,
     block_cache: Arc<BlockCache>, // Phase 3E.1: Block cache parameter
     _peer_fork_status: Arc<DashMap<String, PeerForkStatus>>, // Phase 2: Fork status tracker (no longer used - periodic resolution handles forks)
     is_whitelisted: bool,
@@ -736,10 +750,18 @@ async fn handle_peer(
                 // Charge a violation so repeat offenders accumulate bans.
                 // Without this, an attacker can flood TLS connections at zero cost —
                 // each attempt consumes a tokio task + TLS negotiation with no penalty.
-                blacklist
-                    .write()
-                    .await
-                    .record_violation(ip, &format!("TLS handshake failed: {}", e));
+                // Never record violations against our own IP — self-connections (the node
+                // briefly attempting to connect to itself via the peer list) must not
+                // cause the node to permanently ban itself.
+                let is_self = local_ip.as_deref().map_or(false, |l| l == ip_str);
+                if !is_self {
+                    blacklist
+                        .write()
+                        .await
+                        .record_violation(ip, &format!("TLS handshake failed: {}", e));
+                } else {
+                    tracing::debug!("🔄 Ignoring TLS failure from own IP {} (self-connection)", ip_str);
+                }
                 return Ok(());
             }
         }
