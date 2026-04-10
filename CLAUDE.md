@@ -179,7 +179,8 @@ Transactions finalize during SpentPending→SpentFinalized transition, not block
 ### Masternode System
 
 - Four tiers: **Gold → Silver → Bronze → Free** (collateral-based, stored in `MasternodeTier`).
-- Collateral: exactly 1000/10000/100000 TIME; tier auto-detected from amount.
+- Collateral: Free=0, Bronze=1,000 TIME, Silver=10,000 TIME, Gold=100,000 TIME; tier auto-detected from amount.
+- Sampling weights (TimeVote stake): Free=1, Bronze=10, Silver=100, Gold=1,000.
 - Registry uses gossip-based liveness: active when ≥3 peers reported it within 5 min.
 - Network topology mirrors tier pyramid: Gold full mesh; lower tiers connect upward.
 - Collateral UTXOs require 3 confirmations before activation.
