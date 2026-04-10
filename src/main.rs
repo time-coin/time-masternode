@@ -1331,6 +1331,15 @@ async fn main() {
                     let _ = registry.unregister(sq).await;
                 }
 
+                // Clear any stale registry entry for our own IP (e.g., from a previous
+                // collateral migration that was never cleaned up).  Without this, the
+                // Collateral-Churn guard in register() sees our IP already on-chain with a
+                // *different* outpoint and blocks the re-registration.  It's safe to remove
+                // our own stale entry here because we're about to immediately re-register
+                // with the current conf outpoint, and reconstruct_reward_counters() will
+                // rebuild the in-memory counters from blockchain state afterwards.
+                let _ = registry.unregister(&mn.address).await; // ok if NotFound
+
                 // Re-register — squatter and its canonical anchor are now gone
                 match registry
                     .register(mn.clone(), mn.wallet_address.clone())

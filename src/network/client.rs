@@ -372,6 +372,15 @@ impl NetworkClient {
                     if should_skip(ip) {
                         continue;
                     }
+                    // Skip IPs that are currently blacklisted — same guard as PHASE3.
+                    if let Some(ref bl) = res.ip_blacklist {
+                        if let Ok(parsed_ip) = ip.parse::<std::net::IpAddr>() {
+                            if bl.write().await.is_blacklisted(parsed_ip).is_some() {
+                                tracing::debug!("⏭️  [PHASE2] Skipping {} (blacklisted)", ip);
+                                continue;
+                            }
+                        }
+                    }
                     if !connection_manager.mark_connecting(ip) {
                         continue;
                     }
