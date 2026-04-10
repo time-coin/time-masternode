@@ -85,7 +85,7 @@ socket2 = "0.6"                                     # Socket configuration
 
 # WebSocket support for real-time wallet notifications
 tokio-tungstenite = "0.26"                          # WebSocket server
-futures-util = "0.3"                                # Stream utilities for WebSocket
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }  # Stream utilities for WebSocket
 
 # TUI dashboard dependencies (optional — only needed for time-dashboard binary)
 ratatui = { version = "0.26", optional = true }
@@ -126,4 +126,4 @@ debug = true
 strip = false
 
 [build-dependencies]
-chrono = "0.4"
+# (none — build.rs uses stdlib only)
