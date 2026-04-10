@@ -2,7 +2,7 @@
 
 This document outlines the development roadmap for TimeCoin.
 
-## Current Version: v1.2.0
+## Current Version: v1.4.34
 
 ---
 
@@ -39,7 +39,7 @@ This document outlines the development roadmap for TimeCoin.
 - **Anomaly detector** — Z-score statistical analysis on network events
 - **Attack detector** — detects Eclipse, Sybil, Timing, DoublespendAttempt, ForkBombing, ResourceExhaustion
 - **Consensus health** — monitors agreement ratios, predicts fork probability
-- **Fork resolver** — deterministic rules with AI scoring for ambiguous cases
+- **Fork resolver** — deterministic longest-chain rule with hash tiebreaker (AI scoring removed in v1.2.0)
 - **Peer selector** — epsilon-greedy scoring by reliability, latency, recency
 - **Predictive sync** — predicts next block timing from 20-block history
 

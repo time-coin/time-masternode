@@ -1,10 +1,7 @@
 # TIME Coin — Linux Installation Guide
 
-**Version**: 1.2.0
-**Last Updated**: 2026-03-24
-
-This guide walks you through installing and running a TIME Coin masternode on a
-fresh Linux server. Follow it from top to bottom for a production-ready node.
+**Version**: 1.4.34
+**Last Updated**: 2026-04-10
 
 ---
 
@@ -951,5 +948,5 @@ Your IP should appear in the returned JSON array.
 
 ---
 
-**Version**: 1.2.0
-**Last Updated**: 2026-03-24
+**Version**: 1.4.34
+**Last Updated**: 2026-04-10

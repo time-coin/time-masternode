@@ -63,7 +63,7 @@ TimeCoin implements several security measures:
    - Per-peer, per-message-type rate limiting
    - Per-/24 subnet connection rate limiter (>20 connections/min dropped before TLS)
    - `bansubnet=` config option for static CIDR-level bans
-   - Peer reputation scoring via AI attack detector
+   - Peer violation tracking via rule-based attack detector (threshold counters and sliding windows; no ML)
    - Whitelist for trusted nodes (bypass connection limits and rate limiting)
    - Message timestamp validation (5-minute window)
    - Pre-handshake 10-second timeout (prevents ghost connection OOM)
