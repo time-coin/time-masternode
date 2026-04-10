@@ -6289,9 +6289,9 @@ impl Blockchain {
     /// This approach: read the actual rewards from block.masternode_rewards (committed,
     /// tamper-evident), classify each recipient's tier from the registry (stable — tier
     /// changes require re-registering with a new collateral UTXO), and verify the amounts
-    /// are consistent with the tier-pool constants.  We verify AMOUNTS, not IDENTITY of
-    /// winner within a tier (fairness-rotation winner can only be verified with historical
-    /// blocks_without_reward state that is not stored on-chain).
+    /// are consistent with the tier-pool constants.  For non-Free paid tiers we ALSO verify
+    /// WHICH node won (fairness-rotation identity check, Step 3b), using blocks_without_reward
+    /// derived deterministically from on-chain block history — detects AV30 pool self-award.
     async fn validate_pool_distribution(
         &self,
         block: &Block,
@@ -6410,6 +6410,9 @@ impl Blockchain {
         // Accumulate the total paid per tier from the block's actual rewards.
         let mut tier_paid: std::collections::HashMap<MasternodeTier, u64> =
             std::collections::HashMap::new();
+        // Track the first wallet paid per tier (the pool winner for non-Free tiers).
+        let mut tier_winner: std::collections::HashMap<MasternodeTier, String> =
+            std::collections::HashMap::new();
         let mut unknown_non_producer_paid: u64 = 0;
 
         for (wallet, amount) in &block.masternode_rewards {
@@ -6419,6 +6422,7 @@ impl Blockchain {
                 match snapshot_tier_for_wallet(wallet.as_str()) {
                     Some(tier) => {
                         *tier_paid.entry(tier).or_insert(0) += amount;
+                        tier_winner.entry(tier).or_insert_with(|| wallet.clone());
                     }
                     None => {
                         // Check if this wallet is a UTXO-owner address under anti-squatter
@@ -6427,6 +6431,7 @@ impl Blockchain {
                         // None for the legitimate UTXO owner — use the pre-built collateral map.
                         if let Some(&tier) = collateral_utxo_tier_map.get(wallet.as_str()) {
                             *tier_paid.entry(tier).or_insert(0) += amount;
+                            tier_winner.entry(tier).or_insert_with(|| wallet.clone());
                         } else {
                             // Wallet not in current registry snapshot — masternode may have
                             // deregistered since the block was produced, or this node missed
@@ -6468,6 +6473,18 @@ impl Blockchain {
             .iter()
             .map(|b| b.count_ones() as usize)
             .sum();
+
+        // On-chain fairness tracking for winner identity verification (Step 3b).
+        // Scans committed block history — deterministic across all validators.
+        // Only computed when we have valid bitmap data to avoid wasted work.
+        let fairness_map: std::collections::HashMap<String, u64> =
+            if !active_bitmap_nodes.is_empty() {
+                self.masternode_registry
+                    .get_pool_reward_tracking(self)
+                    .await
+            } else {
+                std::collections::HashMap::new()
+            };
 
         // ── Step 3: verify each tier pool was distributed correctly ───────────
         // For each paid tier: the total paid to all recipients of that tier must
@@ -6708,6 +6725,116 @@ impl Blockchain {
                          block distributed {} (diff {})",
                         block.header.height, tier, pool, paid, diff
                     ));
+                }
+
+                // ── Step 3b: winner identity check (AV30 — pool self-award) ─────────
+                // Verify the correct node won the tier pool by fairness rotation.
+                // Uses bitmap-decoded candidates + on-chain blocks_without_reward history —
+                // both deterministic across all validators with no gossip dependency.
+                //
+                // Guard: only check when the actual winner wallet appears in our decoded
+                // bitmap nodes for this tier.  If it doesn't, our bitmap decoding has
+                // drifted from the producer's sort order (Free-tier churn), and we cannot
+                // trust our expected-winner calculation.
+                if !matches!(tier, MasternodeTier::Free) {
+                    if let Some(actual_wallet) = tier_winner.get(tier) {
+                        let tier_candidates: Vec<_> = active_bitmap_nodes
+                            .iter()
+                            .filter(|info| {
+                                if info.masternode.tier != *tier {
+                                    return false;
+                                }
+                                let w = if !info.reward_address.is_empty() {
+                                    info.reward_address.as_str()
+                                } else {
+                                    info.masternode.wallet_address.as_str()
+                                };
+                                w != producer_wallet.as_str()
+                            })
+                            .collect();
+
+                        let actual_in_bitmap = tier_candidates.iter().any(|info| {
+                            let w = if !info.reward_address.is_empty() {
+                                info.reward_address.as_str()
+                            } else {
+                                info.masternode.wallet_address.as_str()
+                            };
+                            w == actual_wallet.as_str()
+                                || (block.header.height >= COLLATERAL_REWARD_ENFORCEMENT_HEIGHT
+                                    && collateral_utxo_tier_map
+                                        .get(actual_wallet.as_str())
+                                        .map(|&t| t == *tier)
+                                        .unwrap_or(false))
+                        });
+
+                        if !tier_candidates.is_empty() && actual_in_bitmap {
+                            let mut ranked: Vec<_> = tier_candidates
+                                .into_iter()
+                                .map(|info| {
+                                    let bonus = fairness_map
+                                        .get(&info.masternode.address)
+                                        .copied()
+                                        .unwrap_or(0)
+                                        / 10;
+                                    (info, bonus)
+                                })
+                                .collect();
+                            ranked.sort_by(|a, b| {
+                                b.1.cmp(&a.1).then_with(|| {
+                                    a.0.masternode.address.cmp(&b.0.masternode.address)
+                                })
+                            });
+
+                            let (expected, expected_bonus) = &ranked[0];
+                            let expected_wallet = if !expected.reward_address.is_empty() {
+                                expected.reward_address.as_str()
+                            } else {
+                                expected.masternode.wallet_address.as_str()
+                            };
+
+                            // Under UTXO enforcement, payout may be redirected to the
+                            // collateral UTXO owner — accept if the tier matches.
+                            let is_utxo_redirect =
+                                block.header.height >= COLLATERAL_REWARD_ENFORCEMENT_HEIGHT
+                                    && collateral_utxo_tier_map
+                                        .get(actual_wallet.as_str())
+                                        .copied()
+                                        == Some(*tier);
+
+                            if actual_wallet.as_str() != expected_wallet && !is_utxo_redirect {
+                                // Allow a tied candidate: if the actual winner shares the
+                                // top fairness_bonus, the producer chose validly among equals.
+                                let actual_bonus = ranked
+                                    .iter()
+                                    .find(|(info, _)| {
+                                        let w = if !info.reward_address.is_empty() {
+                                            info.reward_address.as_str()
+                                        } else {
+                                            info.masternode.wallet_address.as_str()
+                                        };
+                                        w == actual_wallet.as_str()
+                                    })
+                                    .map(|(_, b)| *b);
+
+                                let tied =
+                                    actual_bonus.map(|b| b >= *expected_bonus).unwrap_or(false);
+                                if !tied {
+                                    return Err(format!(
+                                        "Block {} {:?} pool winner mismatch: fairness \
+                                         rotation selects {} (fairness_bonus={}, \
+                                         blocks_without_reward≈{}), but {} was paid — \
+                                         possible pool self-award (AV30)",
+                                        block.header.height,
+                                        tier,
+                                        expected_wallet,
+                                        expected_bonus,
+                                        expected_bonus * 10,
+                                        actual_wallet,
+                                    ));
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
