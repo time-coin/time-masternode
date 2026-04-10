@@ -3675,7 +3675,7 @@ impl Blockchain {
 
         let blocks_without_reward_map = self
             .masternode_registry
-            .get_pool_reward_tracking(self)
+            .get_reward_tracking_from_memory()
             .await;
 
         use crate::types::MasternodeTier;
@@ -5133,6 +5133,21 @@ impl Blockchain {
                 .record_event("block_added".to_string(), block.header.height as f64);
         }
 
+        // Update the in-memory blocks_without_reward counters so that
+        // get_reward_tracking_from_memory() is accurate for future blocks.
+        // O(n) in-memory write; no sled I/O here.
+        {
+            let rewarded_wallets: std::collections::HashSet<String> = block
+                .masternode_rewards
+                .iter()
+                .filter(|(_, amt)| *amt > 0)
+                .map(|(w, _)| w.clone())
+                .collect();
+            self.masternode_registry
+                .update_reward_counters(block.header.height, &rewarded_wallets)
+                .await;
+        }
+
         // Signal any waiters (e.g. block production loop) that a new block was added
         self.block_added_signal.notify_waiters();
 
@@ -6474,13 +6489,14 @@ impl Blockchain {
             .map(|b| b.count_ones() as usize)
             .sum();
 
-        // On-chain fairness tracking for winner identity verification (Step 3b).
-        // Scans committed block history — deterministic across all validators.
-        // Only computed when we have valid bitmap data to avoid wasted work.
+        // In-memory fairness tracking for winner identity verification (Step 3b).
+        // Reads the blocks_without_reward counter maintained by add_block — O(n) in-memory,
+        // no sled I/O.  Replaces the former get_pool_reward_tracking() which scanned
+        // 1000 blocks on every validation call and blocked the async runtime.
         let fairness_map: std::collections::HashMap<String, u64> =
             if !active_bitmap_nodes.is_empty() {
                 self.masternode_registry
-                    .get_pool_reward_tracking(self)
+                    .get_reward_tracking_from_memory()
                     .await
             } else {
                 std::collections::HashMap::new()

@@ -2969,6 +2969,78 @@ impl MasternodeRegistry {
         }
     }
 
+    /// Update blocks_without_reward counters for all masternodes in a single lock.
+    /// For each masternode: if its effective wallet address appears in `rewarded_wallets`,
+    /// reset its counter (record reward); otherwise increment it.
+    /// Called from add_block after a block is committed — O(n) in-memory only, no sled I/O
+    /// except for the periodic persist (every 10 blocks) which uses the background writer.
+    pub async fn update_reward_counters(
+        &self,
+        block_height: u64,
+        rewarded_wallets: &std::collections::HashSet<String>,
+    ) {
+        let persist_now = block_height % 10 == 0;
+        let mut masternodes = self.masternodes.write().await;
+        for info in masternodes.values_mut() {
+            let effective_wallet = if !info.reward_address.is_empty() {
+                info.reward_address.as_str()
+            } else {
+                info.masternode.wallet_address.as_str()
+            };
+            if rewarded_wallets.contains(effective_wallet) {
+                info.last_reward_height = block_height;
+                info.blocks_without_reward = 0;
+                // Always persist reward resets so restart recovery stays accurate
+                if let Ok(data) = bincode::serialize(info) {
+                    self.sled_insert_bg(
+                        format!("masternode:{}", info.masternode.address).into_bytes(),
+                        data,
+                    );
+                }
+            } else {
+                info.blocks_without_reward += 1;
+                if persist_now {
+                    if let Ok(data) = bincode::serialize(info) {
+                        self.sled_insert_bg(
+                            format!("masternode:{}", info.masternode.address).into_bytes(),
+                            data,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get blocks_without_reward for all masternodes from the in-memory counter.
+    /// O(n) read with no sled I/O. Use this instead of get_pool_reward_tracking /
+    /// get_verifiable_reward_tracking to avoid blocking the async runtime.
+    /// Returns a map of masternode_address → blocks_without_reward.
+    pub async fn get_reward_tracking_from_memory(
+        &self,
+    ) -> std::collections::HashMap<String, u64> {
+        let masternodes = self.masternodes.read().await;
+        masternodes
+            .iter()
+            .map(|(addr, info)| (addr.clone(), info.blocks_without_reward))
+            .collect()
+    }
+
+    /// Reconstruct blocks_without_reward counters from persisted last_reward_height.
+    /// Called once at startup after the blockchain height is known.
+    /// Avoids a full 1000-block scan by computing: current_height - last_reward_height.
+    pub async fn reconstruct_reward_counters(&self, current_height: u64) {
+        let mut masternodes = self.masternodes.write().await;
+        for info in masternodes.values_mut() {
+            if info.last_reward_height == 0 {
+                // Never rewarded within our history — treat as maximum wait
+                info.blocks_without_reward = current_height.min(1000);
+            } else {
+                info.blocks_without_reward =
+                    current_height.saturating_sub(info.last_reward_height);
+            }
+        }
+    }
+
     /// Increment blocks_without_reward for all masternodes except the one that just got rewarded
     /// Should be called after each block is produced
     pub async fn increment_blocks_without_reward(

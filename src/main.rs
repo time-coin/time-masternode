@@ -1048,6 +1048,18 @@ async fn main() {
     println!("✓ Blockchain initialized");
     println!();
 
+    // Reconstruct the blocks_without_reward counter for every masternode from the
+    // persisted last_reward_height.  This avoids a full 1000-block sled scan at
+    // startup and ensures get_reward_tracking_from_memory() is accurate from block 1.
+    {
+        let chain_height = blockchain.get_height();
+        registry.reconstruct_reward_counters(chain_height).await;
+        tracing::info!(
+            "📊 Reconstructed reward counters for masternodes at height {}",
+            chain_height
+        );
+    }
+
     // Validate chain time on startup
     match blockchain.validate_chain_time().await {
         Ok(()) => {
@@ -3385,9 +3397,10 @@ async fn main() {
 
             // Calculate sampling weights with fairness bonus
             // Fairness bonus: +1 per 10 blocks without reward, uncapped
-            // This ensures nodes that haven't produced blocks get increasing priority
+            // This ensures nodes that haven't produced blocks get increasing priority.
+            // Reads from the in-memory counter updated by add_block — O(n), no sled scan.
             let blocks_without_reward_map = block_registry
-                .get_verifiable_reward_tracking(&block_blockchain)
+                .get_reward_tracking_from_memory()
                 .await;
 
             let our_blocks_without = blocks_without_reward_map
