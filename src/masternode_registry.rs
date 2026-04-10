@@ -667,6 +667,39 @@ impl MasternodeRegistry {
                             // anchor exists when we re-register ourselves — this guard only
                             // fires in edge-case races where the anchor survived.
 
+                            // Guard: the local node can NEVER be evicted from its own collateral
+                            // via gossip UTXO check.  masternode.conf is ground truth; a remote
+                            // node can forge any wallet_address to match the UTXO output address,
+                            // and since our hot-wallet address needn't equal the cold-storage
+                            // address used to fund the collateral, the UTXO match can be wrong.
+                            // Only the local node itself (or an on-chain MasternodeReg tx) can
+                            // displace us — handled by the same-address reconnect path above.
+                            let canonical_is_local = local_ip
+                                .as_deref()
+                                .map(|l| l == canonical_ip)
+                                .unwrap_or(false);
+                            if canonical_is_local {
+                                let spam_key =
+                                    format!("hijack_warn:{}:{}", outpoint_key, incoming_ip);
+                                let last_warned = self
+                                    .collateral_migration_times
+                                    .get(&spam_key)
+                                    .map(|v| *v)
+                                    .unwrap_or(0);
+                                if now.saturating_sub(last_warned) >= 300 {
+                                    self.collateral_migration_times.insert(spam_key, now);
+                                    tracing::warn!(
+                                        "🛡️ Gossip cannot evict local masternode {} from its own \
+                                         collateral {} via UTXO check — rejected gossip from {} \
+                                         (use on-chain MasternodeReg to migrate)",
+                                        canonical_ip,
+                                        outpoint_key,
+                                        masternode.address,
+                                    );
+                                }
+                                return Err(RegistryError::CollateralAlreadyLocked);
+                            }
+
                             // Dual-claimant stalemate guard (AV20): if the canonical holder's
                             // wallet address ALSO matches the UTXO address, both nodes control
                             // the same key (duplicate masternode.conf / hardware migration).
