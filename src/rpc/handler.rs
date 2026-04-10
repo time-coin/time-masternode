@@ -2368,6 +2368,58 @@ impl RpcHandler {
             } else {
                 local_mn.total_uptime
             };
+
+            let current_height = self.blockchain.get_height();
+            let is_free =
+                matches!(local_mn.masternode.tier, crate::types::MasternodeTier::Free);
+
+            // Maturity gate: Free nodes must wait FREE_MATURITY_BLOCKS (~12h on mainnet)
+            let maturity_required = match self.network {
+                crate::NetworkType::Mainnet => {
+                    crate::constants::blockchain::FREE_MATURITY_BLOCKS
+                }
+                _ => 5,
+            };
+            let blocks_since_registration = if local_mn.registration_height > 0 {
+                current_height.saturating_sub(local_mn.registration_height)
+            } else {
+                maturity_required // treat as already mature if no registration height recorded
+            };
+            let is_mature = blocks_since_registration >= maturity_required;
+            let blocks_until_mature = if is_mature {
+                0u64
+            } else {
+                maturity_required.saturating_sub(blocks_since_registration)
+            };
+
+            // Reachability grace: newly-registered nodes get 5 min before probe is enforced
+            let in_grace_period = local_mn.first_seen_at > 0
+                && now_secs.saturating_sub(local_mn.first_seen_at)
+                    < crate::masternode_registry::REACHABILITY_GRACE_PERIOD_SECS;
+
+            // Human-readable diagnosis of why rewards may not be arriving
+            let eligibility_status = if !is_free {
+                if local_mn.is_active {
+                    "eligible".to_string()
+                } else {
+                    "inactive — not seen by enough peers".to_string()
+                }
+            } else if !is_mature {
+                format!(
+                    "maturing — {} blocks remaining (~{} min until first reward eligible)",
+                    blocks_until_mature,
+                    blocks_until_mature * 10
+                )
+            } else if in_grace_period {
+                "reachability probe pending — waiting for inbound TCP probe on port 24000"
+                    .to_string()
+            } else if !local_mn.is_publicly_reachable {
+                "ineligible — port 24000 not publicly reachable; check firewall / port forwarding"
+                    .to_string()
+            } else {
+                "eligible — competing for Free pool rewards".to_string()
+            };
+
             Ok(json!({
                 "status": "active",
                 "address": local_mn.masternode.address,
@@ -2376,14 +2428,25 @@ impl RpcHandler {
                 "uptime_start": local_mn.uptime_start,
                 "total_uptime": computed_uptime,
                 "is_active": local_mn.is_active,
+                "is_publicly_reachable": local_mn.is_publicly_reachable,
+                "registration_height": local_mn.registration_height,
+                "current_height": current_height,
+                "blocks_since_registration": blocks_since_registration,
+                "maturity_required_blocks": if is_free { maturity_required } else { 0 },
+                "blocks_until_mature": if is_free { blocks_until_mature } else { 0 },
+                "is_mature": is_mature,
+                "in_grace_period": in_grace_period,
+                "eligibility_status": eligibility_status,
+                "last_reward_height": local_mn.last_reward_height,
+                "blocks_without_reward": local_mn.blocks_without_reward,
                 "public_key": hex::encode(local_mn.masternode.public_key.to_bytes()),
                 "version": env!("CARGO_PKG_VERSION"),
                 "git_hash": option_env!("GIT_HASH").unwrap_or("unknown")
             }))
         } else {
             Ok(json!({
-                "status": "Not a masternode",
-                "message": "This node is not configured as a masternode"
+                "status": "not_a_masternode",
+                "message": "This node is not configured as a masternode (set masternode=1 in time.conf)"
             }))
         }
     }

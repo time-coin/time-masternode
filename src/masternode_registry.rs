@@ -31,7 +31,7 @@ const REACHABILITY_PROBE_TIMEOUT_SECS: u64 = 10;
 /// How long a reachability result is cached before re-probing (10 minutes)
 const REACHABILITY_RECHECK_SECS: u64 = 600;
 /// Grace period after registration before reachability is enforced for rewards (5 minutes)
-const REACHABILITY_GRACE_PERIOD_SECS: u64 = 300;
+pub const REACHABILITY_GRACE_PERIOD_SECS: u64 = 300;
 
 /// Network health status levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
