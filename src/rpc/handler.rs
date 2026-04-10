@@ -1009,6 +1009,57 @@ impl RpcHandler {
             }
         }
 
+        // For MasternodeReg transactions, immediately pre-lock the collateral UTXO so
+        // that listunspentmulti returns spendable: false right away — before the tx is
+        // confirmed in a block (~10 min).  This closes the double-spend window on both
+        // the GUI and mobile wallets.
+        if let Some(crate::types::SpecialTransactionData::MasternodeReg {
+            ref collateral_outpoint,
+            ref masternode_ip,
+            masternode_port,
+            ..
+        }) = tx.special_data
+        {
+            let parts: Vec<&str> = collateral_outpoint.split(':').collect();
+            if parts.len() == 2 {
+                if let (Ok(txid_bytes), Ok(vout)) =
+                    (hex::decode(parts[0]), parts[1].parse::<u32>())
+                {
+                    if txid_bytes.len() == 32 {
+                        let mut txid_arr = [0u8; 32];
+                        txid_arr.copy_from_slice(&txid_bytes);
+                        let outpoint = crate::types::OutPoint {
+                            txid: txid_arr,
+                            vout,
+                        };
+                        if let Ok(utxo) = self.utxo_manager.get_utxo(&outpoint).await {
+                            let mn_addr =
+                                format!("{}:{}", masternode_ip, masternode_port);
+                            let height = self.blockchain.get_height();
+                            match self.utxo_manager.lock_collateral(
+                                outpoint,
+                                mn_addr,
+                                height,
+                                utxo.value,
+                            ) {
+                                Ok(_) => tracing::info!(
+                                    "🔒 Pre-locked collateral {}:{} for pending MasternodeReg {}",
+                                    parts[0],
+                                    vout,
+                                    &txid_hex[..16]
+                                ),
+                                Err(e) => tracing::debug!(
+                                    "ℹ️ Collateral pre-lock skipped ({}): {}",
+                                    &txid_hex[..16],
+                                    e
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         tokio::spawn({
             let consensus = self.consensus.clone();
             let tx_for_consensus = tx.clone();
