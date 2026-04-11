@@ -1006,10 +1006,13 @@ impl PeerConnection {
             self.direction, self.peer_ip
         );
 
-        // Send initial handshake
+        // Send initial handshake.
+        // NOTE: We advertise version 1 during rollout so existing v1 nodes don't reject
+        // us. The minimum enforcement will be raised to 2 in a future release once all
+        // nodes have upgraded.
         let handshake = NetworkMessage::Handshake {
             magic: self.network_type.magic_bytes(),
-            protocol_version: 2,
+            protocol_version: 1,
             network: format!("{}", self.network_type).to_lowercase(),
             commit_count: env!("GIT_COMMIT_COUNT").parse::<u32>().unwrap_or(0),
         };

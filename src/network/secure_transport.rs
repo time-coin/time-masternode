@@ -267,10 +267,10 @@ impl SecureConnection {
         our_magic: [u8; 4],
         our_network: &str,
     ) -> Result<(), SecureTransportError> {
-        // Send handshake
+        // Send handshake. Advertise version 1 during rollout — see peer_connection.rs note.
         let handshake = NetworkMessage::Handshake {
             magic: our_magic,
-            protocol_version: 2,
+            protocol_version: 1,
             network: our_network.to_string(),
             commit_count: env!("GIT_COMMIT_COUNT").parse::<u32>().unwrap_or(0),
         };
