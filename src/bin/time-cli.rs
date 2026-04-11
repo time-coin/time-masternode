@@ -185,6 +185,15 @@ enum Commands {
     #[command(next_help_heading = "Network")]
     GetBlacklist,
 
+    /// Permanently ban an IP address
+    #[command(next_help_heading = "Network")]
+    Ban {
+        /// IP address to ban (e.g. 47.82.79.157)
+        ip: String,
+        /// Optional reason for the ban
+        reason: Option<String>,
+    },
+
     /// Remove an IP from the ban list and clear its violations
     #[command(next_help_heading = "Network")]
     Unban {
@@ -952,6 +961,10 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::GetNetworkInfo => ("getnetworkinfo", json!([])),
         Commands::GetPeerInfo => ("getpeerinfo", json!([])),
         Commands::GetBlacklist => ("getblacklist", json!([])),
+        Commands::Ban { ip, reason } => (
+            "ban",
+            json!([ip, reason.as_deref().unwrap_or("manual ban via CLI")]),
+        ),
         Commands::Unban { ip } => ("unban", json!([ip])),
         Commands::AddWhitelist { ip } => ("addwhitelist", json!([ip])),
         Commands::GetTxOutSetInfo => ("gettxoutsetinfo", json!([])),
@@ -1557,7 +1570,7 @@ fn print_human_readable(
                 }
             }
         }
-        Commands::Unban { .. } | Commands::AddWhitelist { .. } => {
+        Commands::Ban { .. } | Commands::Unban { .. } | Commands::AddWhitelist { .. } => {
             let msg = result
                 .get("message")
                 .and_then(|v| v.as_str())

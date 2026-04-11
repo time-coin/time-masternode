@@ -213,6 +213,7 @@ impl RpcHandler {
             "addwhitelist" => self.add_whitelist(&params_array).await,
             "removewhitelist" => self.remove_whitelist(&params_array).await,
             "getblacklist" => self.get_blacklist().await,
+            "ban" => self.ban_ip(&params_array).await,
             "unban" => self.unban(&params_array).await,
             "listreceivedbyaddress" => self.list_received_by_address(&params_array).await,
             "listtransactions" => self.list_transactions(&params_array).await,
@@ -4161,6 +4162,32 @@ impl RpcHandler {
             "temporary": temporary_list,
             "subnets": subnet_list,
             "violations": violations_list
+        }))
+    }
+
+    async fn ban_ip(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let ip_str = params.first().and_then(|v| v.as_str()).ok_or(RpcError {
+            code: -32602,
+            message: "IP address parameter required".to_string(),
+        })?;
+
+        let ip_addr = ip_str.parse::<std::net::IpAddr>().map_err(|_| RpcError {
+            code: -32602,
+            message: format!("Invalid IP address: {}", ip_str),
+        })?;
+
+        let reason = params
+            .get(1)
+            .and_then(|v| v.as_str())
+            .unwrap_or("manual ban via RPC");
+
+        let mut bl = self.blacklist.write().await;
+        bl.add_permanent_ban(ip_addr, reason);
+        tracing::info!("🔨 RPC: Permanently banned {} (reason: {})", ip_addr, reason);
+        Ok(json!({
+            "result": "success",
+            "ip": ip_str,
+            "message": format!("IP {} permanently banned", ip_str)
         }))
     }
 
