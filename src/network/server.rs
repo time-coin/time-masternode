@@ -909,12 +909,25 @@ async fn handle_peer(
                                             );
                                             break;
                                         }
-                                        if protocol_version != &1 {
-                                            tracing::warn!("🚫 Rejecting {} - unsupported protocol version: {}", peer.addr, protocol_version);
-                                            blacklist.write().await.record_violation(
-                                                ip,
-                                                &format!("Unsupported protocol version: {}", protocol_version)
+                                        // Require protocol version 2+ (CollateralLocked + Disconnect support)
+                                        if *protocol_version < 2 {
+                                            tracing::warn!(
+                                                "🚫 Rejecting {} — protocol version {} is too old \
+                                                 (minimum required: 2). Sending upgrade notice.",
+                                                peer.addr, protocol_version
                                             );
+                                            let reason = format!(
+                                                "Protocol upgrade required: your node is running \
+                                                 protocol version {} but this network requires \
+                                                 version 2 or higher. Please update your TIME \
+                                                 daemon to the latest release.",
+                                                protocol_version
+                                            );
+                                            if let Ok(frame) = crate::network::wire::serialize_frame(
+                                                &NetworkMessage::Disconnect { reason }
+                                            ) {
+                                                let _ = writer_tx.send(frame);
+                                            }
                                             break;
                                         }
                                         let our_commits = env!("GIT_COMMIT_COUNT").parse::<u32>().unwrap_or(0);
@@ -1156,6 +1169,10 @@ async fn handle_peer(
                                         UTXOState::Archived { txid, .. } => {
                                             lock_id.push(5);
                                             lock_id.extend_from_slice(txid);
+                                        }
+                                        UTXOState::CollateralLocked { masternode_address, .. } => {
+                                            lock_id.push(6);
+                                            lock_id.extend_from_slice(masternode_address.as_bytes());
                                         }
                                     }
 
@@ -2585,6 +2602,13 @@ async fn handle_peer(
                                     if let Err(e) = handler.handle_message(&msg, &context).await {
                                         tracing::warn!("[Inbound] Error handling gossip from {}: {}", peer.addr, e);
                                     }
+                                }
+                                NetworkMessage::Disconnect { reason } => {
+                                    tracing::info!(
+                                        "🔌 Peer {} sent Disconnect: {}",
+                                        peer.addr, reason
+                                    );
+                                    break;
                                 }
                                 _ => {
                                     // Fallback: delegate any unhandled message types to MessageHandler

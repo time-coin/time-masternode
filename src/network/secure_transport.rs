@@ -270,7 +270,7 @@ impl SecureConnection {
         // Send handshake
         let handshake = NetworkMessage::Handshake {
             magic: our_magic,
-            protocol_version: 1,
+            protocol_version: 2,
             network: our_network.to_string(),
             commit_count: env!("GIT_COMMIT_COUNT").parse::<u32>().unwrap_or(0),
         };

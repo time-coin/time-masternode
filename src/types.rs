@@ -224,6 +224,16 @@ pub enum UTXOState {
         txid: Hash256,
         locked_at: i64,
     },
+    /// Masternode collateral locked by on-chain TimeVote-finalized MasternodeReg.
+    /// Unlike the gossip-driven `locked_collaterals` DashMap, this state is part of
+    /// the consensus-driven UTXO state machine and persists across restarts.
+    /// The UTXO is unspendable while in this state; a CollateralUnlock tx transitions
+    /// it back to Unspent.
+    CollateralLocked {
+        masternode_address: String,
+        lock_height: u64,
+        locked_at: i64,
+    },
     SpentPending {
         txid: Hash256,
         votes: u32,
@@ -252,6 +262,17 @@ impl std::fmt::Display for UTXOState {
                     "Locked (txid: {}, locked_at: {})",
                     hex::encode(txid),
                     locked_at
+                )
+            }
+            UTXOState::CollateralLocked {
+                masternode_address,
+                lock_height,
+                locked_at,
+            } => {
+                write!(
+                    f,
+                    "CollateralLocked (masternode: {}, height: {}, locked_at: {})",
+                    masternode_address, lock_height, locked_at
                 )
             }
             UTXOState::SpentPending {

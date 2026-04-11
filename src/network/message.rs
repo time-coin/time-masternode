@@ -325,6 +325,14 @@ pub enum NetworkMessage {
         /// Human-readable explanation of the connectivity problem and how to fix it.
         message: String,
     },
+    /// Graceful disconnect notice. The sender is about to close the connection.
+    /// Recipients should log the reason and not attempt to reconnect immediately.
+    /// Sent before dropping connections due to protocol version mismatch or operator
+    /// commands so that the remote node knows why it was disconnected.
+    Disconnect {
+        /// Human-readable reason for the disconnect (e.g. "Protocol upgrade required: update to v1.5.0")
+        reason: String,
+    },
     /// Placeholder for messages from newer protocol versions that we can't parse
     UnknownMessage,
 }
@@ -508,6 +516,7 @@ impl NetworkMessage {
             NetworkMessage::GovernanceStateResponse { .. } => "GovernanceStateResponse",
             NetworkMessage::ConnectivityWarning { .. } => "ConnectivityWarning",
             NetworkMessage::MasternodeAnnouncementV4 { .. } => "MasternodeAnnouncementV4",
+            NetworkMessage::Disconnect { .. } => "Disconnect",
         }
     }
 

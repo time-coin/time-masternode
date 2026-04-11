@@ -386,6 +386,16 @@ impl UTXOStateManager {
                         hex::encode(txid)
                     );
                 }
+                UTXOState::CollateralLocked { masternode_address, .. } => {
+                    // Collateral-locked UTXO being restored during rollback
+                    tracing::warn!(
+                        "Restoring collateral-locked UTXO {} (was locked for masternode {})",
+                        outpoint,
+                        masternode_address
+                    );
+                    // Also remove from locked_collaterals DashMap
+                    self.locked_collaterals.remove(&outpoint);
+                }
             }
         }
 
@@ -438,6 +448,10 @@ impl UTXOStateManager {
                     } else {
                         Err(UtxoError::AlreadyLocked(hex::encode(existing_txid)))
                     }
+                }
+                UTXOState::CollateralLocked { .. } => {
+                    // Collateral-locked UTXOs cannot be spent until released via CollateralUnlock
+                    Err(UtxoError::LockedAsCollateral)
                 }
                 UTXOState::SpentPending { .. }
                 | UTXOState::SpentFinalized { .. }
@@ -686,13 +700,14 @@ impl UTXOStateManager {
             hasher.update(&utxo.script_pubkey);
             // Include state discriminant so nodes with different UTXO states
             // detect divergence via hash comparison and trigger reconciliation.
-            // 0=Unspent, 1=Locked, 2=SpentPending, 3=SpentFinalized, 4=Archived
+            // 0=Unspent, 1=Locked, 2=SpentPending, 3=SpentFinalized, 4=Archived, 5=CollateralLocked
             let state_disc: u8 = match self.utxo_states.get(&utxo.outpoint).as_deref() {
                 None | Some(UTXOState::Unspent) => 0,
                 Some(UTXOState::Locked { .. }) => 1,
                 Some(UTXOState::SpentPending { .. }) => 2,
                 Some(UTXOState::SpentFinalized { .. }) => 3,
                 Some(UTXOState::Archived { .. }) => 4,
+                Some(UTXOState::CollateralLocked { .. }) => 5,
             };
             hasher.update([state_disc]);
         }
@@ -707,10 +722,11 @@ impl UTXOStateManager {
         fn state_ord(s: &UTXOState) -> u8 {
             match s {
                 UTXOState::Unspent => 0,
-                UTXOState::Locked { .. } => 1,
-                UTXOState::SpentPending { .. } => 2,
-                UTXOState::SpentFinalized { .. } => 3,
-                UTXOState::Archived { .. } => 4,
+                UTXOState::CollateralLocked { .. } => 1, // Logically between Unspent and Locked
+                UTXOState::Locked { .. } => 2,
+                UTXOState::SpentPending { .. } => 3,
+                UTXOState::SpentFinalized { .. } => 4,
+                UTXOState::Archived { .. } => 5,
             }
         }
 
@@ -987,30 +1003,35 @@ impl UTXOStateManager {
             if self.locked_collaterals.contains_key(&outpoint) {
                 continue; // Already locked
             }
-            // Only lock if UTXO still exists and is unspent
-            match self.utxo_states.get(&outpoint) {
-                Some(state) if matches!(state.value(), UTXOState::Unspent) => {
-                    let locked = LockedCollateral::new(
-                        outpoint.clone(),
-                        masternode_address,
-                        lock_height,
-                        amount,
-                    );
-                    // Persist to disk if available
-                    if let Some(tree) = &self.collateral_db {
-                        let key = bincode::serialize(&outpoint).unwrap_or_default();
-                        let value = bincode::serialize(&locked).unwrap_or_default();
-                        let _ = tree.insert(key, value);
-                    }
-                    self.locked_collaterals.insert(outpoint, locked);
-                    restored += 1;
+            // Restore if UTXO is Unspent (gossip-locked) or CollateralLocked
+            // (consensus-locked via TimeVote-finalized MasternodeReg).
+            let state_ok = match self.utxo_states.get(&outpoint) {
+                Some(ref state) => matches!(
+                    state.value(),
+                    UTXOState::Unspent | UTXOState::CollateralLocked { .. }
+                ),
+                None => false,
+            };
+            if state_ok {
+                let locked = LockedCollateral::new(
+                    outpoint.clone(),
+                    masternode_address,
+                    lock_height,
+                    amount,
+                );
+                // Persist to disk if available
+                if let Some(tree) = &self.collateral_db {
+                    let key = bincode::serialize(&outpoint).unwrap_or_default();
+                    let value = bincode::serialize(&locked).unwrap_or_default();
+                    let _ = tree.insert(key, value);
                 }
-                _ => {
-                    tracing::warn!(
-                        "⚠️ Cannot restore collateral lock for {:?} — UTXO not in Unspent state",
-                        outpoint
-                    );
-                }
+                self.locked_collaterals.insert(outpoint, locked);
+                restored += 1;
+            } else {
+                tracing::warn!(
+                    "⚠️ Cannot restore collateral lock for {:?} — UTXO not in Unspent or CollateralLocked state",
+                    outpoint
+                );
             }
         }
         if restored > 0 {
@@ -1043,9 +1064,12 @@ impl UTXOStateManager {
             .locked_collaterals
             .iter()
             .filter(|e| {
+                // Keep entries whose underlying UTXO is Unspent (gossip-locked) or
+                // CollateralLocked (consensus-locked via TimeVote-finalized MasternodeReg).
+                // Remove everything else (spent, archived, unknown).
                 !matches!(
                     self.utxo_states.get(e.key()).as_deref(),
-                    Some(&UTXOState::Unspent)
+                    Some(&UTXOState::Unspent) | Some(&UTXOState::CollateralLocked { .. })
                 )
             })
             .map(|e| e.key().clone())

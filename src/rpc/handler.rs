@@ -1251,6 +1251,9 @@ impl RpcHandler {
             match self.utxo_manager.get_state(&u.outpoint) {
                 Some(crate::types::UTXOState::Unspent) => spendable += u.value,
                 Some(crate::types::UTXOState::Locked { .. }) => pending += u.value,
+                // Consensus-driven collateral lock: UTXO is ours but unspendable while registered.
+                // The DashMap check above normally catches this first; this arm is a safety net.
+                Some(crate::types::UTXOState::CollateralLocked { .. }) => locked_collateral += u.value,
                 Some(crate::types::UTXOState::SpentPending { .. }) => {} // being spent, don't count
                 Some(crate::types::UTXOState::SpentFinalized { .. }) => {} // spent, don't count
                 Some(crate::types::UTXOState::Archived { .. }) => {}     // spent & archived
@@ -1310,6 +1313,7 @@ impl RpcHandler {
                 match self.utxo_manager.get_state(&u.outpoint) {
                     Some(crate::types::UTXOState::Unspent) => spendable += u.value,
                     Some(crate::types::UTXOState::Locked { .. }) => pending += u.value,
+                    Some(crate::types::UTXOState::CollateralLocked { .. }) => locked += u.value,
                     Some(crate::types::UTXOState::SpentPending { .. }) => {} // being spent, don't count
                     Some(crate::types::UTXOState::SpentFinalized { .. }) => {} // spent, don't count
                     Some(crate::types::UTXOState::Archived { .. }) => {}     // spent & archived
@@ -4318,6 +4322,9 @@ impl RpcHandler {
                     Some(crate::types::UTXOState::Locked { .. }) => {
                         pending_balance += u.value;
                     }
+                    Some(crate::types::UTXOState::CollateralLocked { .. }) => {
+                        locked_collateral += u.value;
+                    }
                     Some(crate::types::UTXOState::SpentPending { .. }) => {} // being spent, don't count
                     Some(crate::types::UTXOState::SpentFinalized { .. }) => {} // spent, don't count
                     Some(crate::types::UTXOState::Archived { .. }) => {}     // spent & archived
@@ -4361,15 +4368,21 @@ impl RpcHandler {
 
         let collaterals: Vec<_> = locked_collaterals
             .iter()
-            // Only return locks whose UTXO is still Unspent — filters out stale gossip
-            // locks for spent UTXOs before the background sweep has had a chance to run.
+            // Only return locks whose UTXO is still Unspent (gossip-locked) or
+            // CollateralLocked (consensus-locked) — filters out stale gossip locks for
+            // spent UTXOs before the background sweep has had a chance to run.
             .filter(|lc| {
                 matches!(
                     self.utxo_manager.get_state(&lc.outpoint),
                     Some(crate::types::UTXOState::Unspent)
+                        | Some(crate::types::UTXOState::CollateralLocked { .. })
                 )
             })
             .map(|lc| {
+                let lock_type = match self.utxo_manager.get_state(&lc.outpoint) {
+                    Some(crate::types::UTXOState::CollateralLocked { .. }) => "consensus",
+                    _ => "gossip",
+                };
                 json!({
                     "outpoint": format!("{}:{}", hex::encode(lc.outpoint.txid), lc.outpoint.vout),
                     "masternode_address": lc.masternode_address,
@@ -4378,6 +4391,7 @@ impl RpcHandler {
                     "lock_height": lc.lock_height,
                     "locked_at": lc.locked_at,
                     "unlock_height": lc.unlock_height,
+                    "lock_type": lock_type,
                 })
             })
             .collect();

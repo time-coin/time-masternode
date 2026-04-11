@@ -2356,6 +2356,97 @@ impl ConsensusEngine {
         }
     }
 
+    /// After a transaction is TimeVote-finalized, apply consensus-driven collateral
+    /// state transitions for masternode lifecycle operations.
+    ///
+    /// - `MasternodeReg`: the referenced collateral outpoint transitions to
+    ///   `UTXOState::CollateralLocked`, making it unspendable for as long as the
+    ///   masternode is active.  This is the on-chain, consensus-driven alternative
+    ///   to the previous gossip-only `locked_collaterals` DashMap.
+    ///
+    /// - `CollateralUnlock`: the collateral outpoint transitions back to
+    ///   `UTXOState::Unspent`, releasing it for normal spending.
+    async fn apply_collateral_state_on_finalize(&self, tx: &Transaction, txid: Hash256) {
+        let Some(ref special_data) = tx.special_data else {
+            return;
+        };
+        let now = chrono::Utc::now().timestamp();
+        match special_data {
+            SpecialTransactionData::MasternodeReg {
+                collateral_outpoint,
+                masternode_ip,
+                ..
+            } => {
+                let parts: Vec<&str> = collateral_outpoint.split(':').collect();
+                if parts.len() == 2 {
+                    if let (Ok(txid_bytes), Ok(vout)) =
+                        (hex::decode(parts[0]), parts[1].parse::<u32>())
+                    {
+                        if txid_bytes.len() == 32 {
+                            let mut col_txid = [0u8; 32];
+                            col_txid.copy_from_slice(&txid_bytes);
+                            let outpoint = OutPoint { txid: col_txid, vout };
+                            // Height is not tracked in the UTXO state; use 0 as a placeholder.
+                            let current_height = 0u64;
+                            // Sync the in-memory locked_collaterals DashMap first
+                            // (lock_collateral checks for Unspent state, so call it before
+                            // transitioning to CollateralLocked).
+                            let _ = self.utxo_manager.lock_collateral(
+                                outpoint.clone(),
+                                masternode_ip.clone(),
+                                0,
+                                0,
+                            );
+                            let new_state = UTXOState::CollateralLocked {
+                                masternode_address: masternode_ip.clone(),
+                                lock_height: current_height,
+                                locked_at: now,
+                            };
+                            self.utxo_manager.update_state(&outpoint, new_state);
+                            tracing::info!(
+                                "🔒 [CollateralLocked] Finalized MasternodeReg tx {} \
+                                 — collateral {}:{} locked for masternode {}",
+                                hex::encode(txid),
+                                hex::encode(col_txid),
+                                vout,
+                                masternode_ip
+                            );
+                        }
+                    }
+                }
+            }
+            SpecialTransactionData::CollateralUnlock {
+                collateral_outpoint,
+                masternode_address,
+                ..
+            } => {
+                let parts: Vec<&str> = collateral_outpoint.split(':').collect();
+                if parts.len() == 2 {
+                    if let (Ok(txid_bytes), Ok(vout)) =
+                        (hex::decode(parts[0]), parts[1].parse::<u32>())
+                    {
+                        if txid_bytes.len() == 32 {
+                            let mut col_txid = [0u8; 32];
+                            col_txid.copy_from_slice(&txid_bytes);
+                            let outpoint = OutPoint { txid: col_txid, vout };
+                            self.utxo_manager.update_state(&outpoint, UTXOState::Unspent);
+                            let _ = self.utxo_manager.unlock_collateral(&outpoint);
+                            tracing::info!(
+                                "🔓 [CollateralUnlocked] Finalized CollateralUnlock tx {} \
+                                 — collateral {}:{} released for masternode {}",
+                                hex::encode(txid),
+                                hex::encode(col_txid),
+                                vout,
+                                masternode_address
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Broadcast TimeProof to all network peers (Protocol §8.2)
     pub async fn broadcast_timeproof(&self, proof: TimeProof) {
         tracing::info!(
@@ -3133,6 +3224,9 @@ impl ConsensusEngine {
                         .update_state(&outpoint, UTXOState::Unspent);
                 }
 
+                // Apply consensus-driven collateral state from MasternodeReg / CollateralUnlock
+                self.apply_collateral_state_on_finalize(&tx, txid).await;
+
                 // Broadcast finalization to all nodes so they also finalize it
                 // Include the transaction itself so nodes can add it if they don't have it
                 self.broadcast(NetworkMessage::TransactionFinalized {
@@ -3361,6 +3455,11 @@ impl ConsensusEngine {
                                         .utxo_manager
                                         .update_state(&outpoint, UTXOState::Unspent);
                                 }
+                            }
+
+                            // Apply consensus-driven collateral state from MasternodeReg / CollateralUnlock
+                            if let Some(ref tx_ref) = tx_for_broadcast {
+                                consensus_engine_clone.apply_collateral_state_on_finalize(tx_ref, txid).await;
                             }
 
                             // Try to assemble TimeProof from any votes that arrived

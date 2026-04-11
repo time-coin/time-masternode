@@ -1009,7 +1009,7 @@ impl PeerConnection {
         // Send initial handshake
         let handshake = NetworkMessage::Handshake {
             magic: self.network_type.magic_bytes(),
-            protocol_version: 1,
+            protocol_version: 2,
             network: format!("{}", self.network_type).to_lowercase(),
             commit_count: env!("GIT_COMMIT_COUNT").parse::<u32>().unwrap_or(0),
         };
