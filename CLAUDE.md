@@ -392,6 +392,25 @@ The `AttackDetector` (`src/ai/attack_detector.rs`) detects automatically and fee
 7. **Add a test** in `tests/consensus_security.rs` or `tests/security_audit.rs`.
 8. **Commit** with prefix `security:` and reference the vector ID.
 
+## Web API & Explorer
+
+Base URL: `https://time-coin.io`
+
+| Endpoint | Description |
+|---|---|
+| `/api/peers` | Mainnet peer list (JSON array of IPs) |
+| `/api/testnet/peers` | Testnet peer list |
+| `/api/explorer/mainnet/chain` | Chain stats |
+| `/api/explorer/mainnet/blocks?limit=20` | Recent blocks |
+| `/api/explorer/mainnet/blocks/{height}` | Block by height |
+| `/api/explorer/mainnet/tx/{txid}` | Transaction detail |
+| `/api/explorer/mainnet/address/{address}` | Address UTXOs and balance |
+| `/api/explorer/mainnet/masternodes` | Masternode list |
+| `/api/explorer/mainnet/search?q={query}` | Search (block/tx/address) |
+| `/api/v1/nodes/peers/mainnet/full` | Full peer registry |
+
+Replace `mainnet` with `testnet` for testnet queries. Explorer UI: `https://www.time-coin.io/explorer.html`
+
 ## Documentation References
 
 - **Protocol spec**: `docs/TIMECOIN_PROTOCOL.md` (27 normative sections)
