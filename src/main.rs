@@ -1137,6 +1137,11 @@ async fn main() {
         }
     }
 
+    // Scan for and repair any UTXO outputs that are confirmed on-chain but missing
+    // from the local sled store.  Runs synchronously before the network starts so
+    // that the tier auto-detection and wallet balance are correct on this boot.
+    blockchain.scan_and_repair_utxo_gaps().await;
+
     // Create shared peer connection registry for both client and server
     let peer_connection_registry = Arc::new(PeerConnectionRegistry::new());
 

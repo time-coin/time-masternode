@@ -10880,6 +10880,128 @@ impl Blockchain {
 
         Ok(invalid_blocks.len() as u64)
     }
+
+    /// Scan all confirmed blocks and repair any UTXO outputs that are missing from the
+    /// local sled store.  This heals indexing gaps that occur when `add_utxo` fails
+    /// silently during block processing (e.g. after a reorg or storage hiccup).
+    ///
+    /// Algorithm:
+    ///   Pass 1 — build a `spent` set: every outpoint referenced as an input in any block.
+    ///   Pass 2 — for every output in every block: if the outpoint is *not* in `spent` AND
+    ///            is not tracked by the UTXO state manager, re-insert it as Unspent.
+    ///
+    /// Returns the number of UTXOs repaired.
+    pub async fn scan_and_repair_utxo_gaps(&self) -> usize {
+        let height = self.get_height();
+        if height == 0 {
+            return 0;
+        }
+
+        tracing::info!("🔍 [UTXO-REPAIR] Scanning blocks 0-{} for indexing gaps...", height);
+
+        // Pass 1: collect every outpoint consumed as a transaction input.
+        // These are legitimately spent and should NOT be in the live UTXO set.
+        let mut spent: std::collections::HashSet<crate::types::OutPoint> =
+            std::collections::HashSet::new();
+
+        for h in 0..=height {
+            let block = match self.get_block(h) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            for tx in &block.transactions {
+                for input in &tx.inputs {
+                    // Skip coinbase sentinel (vout == u32::MAX)
+                    if input.previous_output.vout != u32::MAX {
+                        spent.insert(input.previous_output.clone());
+                    }
+                }
+            }
+        }
+
+        // Pass 2: walk every output; repair any that should be unspent but are absent.
+        let mut repaired = 0usize;
+
+        for h in 0..=height {
+            let block = match self.get_block(h) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            for tx in &block.transactions {
+                let txid = tx.txid();
+                for (vout, output) in tx.outputs.iter().enumerate() {
+                    let outpoint = crate::types::OutPoint {
+                        txid,
+                        vout: vout as u32,
+                    };
+
+                    // Legitimately spent — skip.
+                    if spent.contains(&outpoint) {
+                        continue;
+                    }
+
+                    // Already tracked (Unspent, Locked, SpentPending, SpentFinalized, or
+                    // Archived from this session) — skip.
+                    if self.utxo_manager.get_state(&outpoint).is_some() {
+                        continue;
+                    }
+
+                    // Also check raw sled in case the state map was cleared (safety net).
+                    if self.utxo_manager.get_utxo(&outpoint).await.is_ok() {
+                        continue;
+                    }
+
+                    // Gap confirmed: output is unspent per block history but absent from
+                    // the local UTXO store.  Re-insert it.
+                    let address =
+                        String::from_utf8_lossy(&output.script_pubkey).to_string();
+                    let utxo = crate::types::UTXO {
+                        outpoint: outpoint.clone(),
+                        value: output.value,
+                        script_pubkey: output.script_pubkey.clone(),
+                        address: address.clone(),
+                        masternode_key: None,
+                    };
+
+                    // restore_utxo handles any in-memory state gracefully (forces Unspent).
+                    match self.utxo_manager.restore_utxo(utxo).await {
+                        Ok(()) => {
+                            tracing::warn!(
+                                "🔧 [UTXO-REPAIR] Restored missing UTXO {}:{} \
+                                 (block {}, {} sat → {})",
+                                hex::encode(txid),
+                                vout,
+                                h,
+                                output.value,
+                                address
+                            );
+                            repaired += 1;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "⚠️ [UTXO-REPAIR] Could not restore {}:{} from block {}: {:?}",
+                                hex::encode(txid),
+                                vout,
+                                h,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        if repaired == 0 {
+            tracing::info!("✅ [UTXO-REPAIR] No gaps found — UTXO set is consistent");
+        } else {
+            tracing::warn!(
+                "✅ [UTXO-REPAIR] Repaired {} missing UTXO(s) — UTXO set is now consistent",
+                repaired
+            );
+        }
+
+        repaired
+    }
 }
 
 impl Clone for Blockchain {
