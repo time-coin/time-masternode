@@ -1666,10 +1666,37 @@ impl MasternodeRegistry {
             within_grace_period || info.is_publicly_reachable
         };
 
+        // Free-tier activity check uses a 15-minute window (1.5× the 10-minute block
+        // interval) instead of the standard 5-minute gossip-report expiry.  Gossip
+        // reports expire at 5 min but blocks arrive every 10 min, so a free node
+        // reported just before one block can drop below the ≥3-reports threshold by
+        // the next block — producing a one-node-at-a-time rotation instead of the
+        // intended split among all connected free nodes.  The extended window keeps
+        // all recently-seen free nodes simultaneously eligible so the 8 TIME pool is
+        // divided among them rather than awarded in full to a single rotating winner.
+        let free_active_window_secs: u64 = 900; // 15 minutes
+        let is_free_active = |info: &MasternodeInfo| -> bool {
+            if info.is_active {
+                return true; // Already active by normal gossip criteria
+            }
+            // Secondary check: any peer reported this node within the extended window.
+            info.peer_reports
+                .iter()
+                .any(|entry| now.saturating_sub(*entry.value()) < free_active_window_secs)
+        };
+
         // Pass 1: full filters (normal path).
+        // Free-tier uses the extended activity window; paid tiers use is_active as-is.
         let pass1: Vec<MasternodeInfo> = nodes
             .values()
-            .filter(|info| info.is_active && is_reachable(info) && is_mature(info))
+            .filter(|info| {
+                let active = if matches!(info.masternode.tier, crate::types::MasternodeTier::Free) {
+                    is_free_active(info)
+                } else {
+                    info.is_active
+                };
+                active && is_reachable(info) && is_mature(info)
+            })
             .cloned()
             .collect();
         if pass1.len() >= MIN_VIABLE_POOL {
