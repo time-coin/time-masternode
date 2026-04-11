@@ -1661,6 +1661,13 @@ impl MasternodeRegistry {
                 || current_height.saturating_sub(info.registration_height) >= maturity_required
         };
         let is_reachable = |info: &MasternodeInfo| -> bool {
+            // Free-tier nodes have no collateral and may run behind NAT (home nodes).
+            // The validator only checks Free-tier reward amounts and recipient count,
+            // not which specific nodes were paid, so excluding them for reachability
+            // causes unnecessary reward loss for legitimate home operators.
+            if matches!(info.masternode.tier, crate::types::MasternodeTier::Free) {
+                return true;
+            }
             let within_grace_period = info.first_seen_at > 0
                 && now.saturating_sub(info.first_seen_at) < REACHABILITY_GRACE_PERIOD_SECS;
             within_grace_period || info.is_publicly_reachable
