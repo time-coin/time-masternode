@@ -648,6 +648,46 @@ async fn audit_collateral_registrations(
     let all_nodes = registry.get_all().await;
     let mut evicted: Vec<String> = Vec::new();
 
+    // ── Pass 0: on-chain anchor mismatch ────────────────────────────────────
+    // The `collateral_anchor:{outpoint}` sled key is written when a valid
+    // MasternodeReg on-chain transaction is confirmed.  It is the ground truth:
+    // only the real owner could have signed that transaction.  If the current
+    // registry entry's IP differs from the anchor, the registered node is a
+    // squatter — even in the address-match stalemate case that Pass 1 can't
+    // resolve (squatter copied the victim's reward_address).
+    for info in &all_nodes {
+        if info.masternode.tier == crate::types::MasternodeTier::Free {
+            continue;
+        }
+        let outpoint = match &info.masternode.collateral_outpoint {
+            Some(op) => op.clone(),
+            None => continue,
+        };
+        let ip = info.masternode.address.clone();
+        if let Some(anchored_ip) = registry.get_collateral_anchor(&outpoint) {
+            if anchored_ip != ip && !evicted.contains(&ip) {
+                tracing::warn!(
+                    "🚨 [COLLATERAL AUDIT] On-chain anchor mismatch: registry has {} for \
+                     outpoint {} but anchor points to {} — evicting squatter and banning",
+                    ip,
+                    outpoint,
+                    anchored_ip
+                );
+                let _ = registry.unregister(&ip).await;
+                let _ = utxo_manager.unlock_collateral(&outpoint);
+                let bare = ip.split(':').next().unwrap_or(&ip);
+                if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
+                    let mut bl = blacklist.write().await;
+                    bl.add_permanent_ban(
+                        ban_ip,
+                        "collateral squatter: registry IP ≠ on-chain anchor IP (audit sweep)",
+                    );
+                }
+                evicted.push(ip);
+            }
+        }
+    }
+
     // ── Pass 1: address-mismatch squatter detection ──────────────────────────
     // For each paid-tier node, fetch its UTXO.  If the UTXO exists and its
     // output address does not match the registrant's reward_address, the

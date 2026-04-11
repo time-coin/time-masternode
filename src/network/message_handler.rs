@@ -2975,7 +2975,7 @@ impl MessageHandler {
     #[allow(clippy::too_many_arguments)]
     async fn handle_masternode_announcement(
         &self,
-        _address: String,
+        announced_address: String,
         reward_address: String,
         tier: crate::types::MasternodeTier,
         public_key: ed25519_dalek::VerifyingKey,
@@ -2986,10 +2986,20 @@ impl MessageHandler {
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         let peer_ip = self.peer_ip.clone();
+        // `announced_address` is the IP the masternode claims to operate on.
+        // For direct connections this matches `peer_ip`; for relayed announcements
+        // `peer_ip` is the relay node and `masternode_ip` is the actual masternode.
+        let masternode_ip = announced_address.clone();
+        // Detect relay: peer forwarded someone else's announcement
+        let is_relayed = masternode_ip != peer_ip;
 
         debug!(
-            "📨 [{}] Received masternode announcement from {} (tier: {:?})",
-            self.direction, peer_ip, tier
+            "📨 [{}] Received masternode announcement from {} (tier: {:?}, masternode_ip: {}{})",
+            self.direction,
+            peer_ip,
+            tier,
+            masternode_ip,
+            if is_relayed { " [relayed]" } else { "" }
         );
 
         // Certificate field ignored (certificate system removed in v1.2.0)
@@ -3167,10 +3177,120 @@ impl MessageHandler {
                                 }
                             }
 
+                            // ── On-chain anchor check (highest priority) ────────────────
+                            //
+                            // The `collateral_anchor:{outpoint}` sled key is written when a
+                            // MasternodeReg special transaction is confirmed on-chain.  It
+                            // records the ONLY IP that has ever produced a valid on-chain
+                            // signature over this collateral.  A squatter who copies the
+                            // UTXO address (address-match stalemate) cannot forge this key
+                            // because they never had the private key.
+                            //
+                            // If an anchor exists for a DIFFERENT IP than the announcer,
+                            // reject and permanently ban — this is the most definitive
+                            // squatter signal available, stronger than even V4 proof.
+                            if let Some(anchored_ip) =
+                                context.masternode_registry.get_collateral_anchor(&outpoint)
+                            {
+                                if anchored_ip != masternode_ip {
+                                    static ANCHOR_BAN: std::sync::OnceLock<
+                                        dashmap::DashMap<String, std::time::Instant>,
+                                    > = std::sync::OnceLock::new();
+                                    let wm = ANCHOR_BAN.get_or_init(dashmap::DashMap::new);
+                                    let should_log = wm
+                                        .get(&masternode_ip)
+                                        .map(|t| t.elapsed().as_secs() >= 300)
+                                        .unwrap_or(true);
+                                    if should_log {
+                                        wm.insert(masternode_ip.clone(), std::time::Instant::now());
+                                        warn!(
+                                            "🚨 [{}] ON-CHAIN ANCHOR VIOLATION: {} claims \
+                                             collateral {} but on-chain anchor belongs to {} \
+                                             — permanently banning squatter{}",
+                                            self.direction,
+                                            masternode_ip,
+                                            outpoint,
+                                            anchored_ip,
+                                            if is_relayed {
+                                                format!(" (relayed via {})", peer_ip)
+                                            } else {
+                                                String::new()
+                                            }
+                                        );
+                                    }
+                                    // Permanently ban the squatter's actual IP
+                                    let bare =
+                                        masternode_ip.split(':').next().unwrap_or(&masternode_ip);
+                                    if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
+                                        if let Some(bl) = &context.blacklist {
+                                            let mut guard = bl.write().await;
+                                            guard.add_permanent_ban(
+                                                ban_ip,
+                                                "collateral squatter: on-chain anchor belongs to different IP",
+                                            );
+                                            // If relayed: also record a violation against the relay
+                                            // for propagating squatter announcements so it purges
+                                            // the stale entry from its own registry.
+                                            if is_relayed {
+                                                let bare_relay = peer_ip
+                                                    .split(':')
+                                                    .next()
+                                                    .unwrap_or(&peer_ip);
+                                                if let Ok(relay_ip) =
+                                                    bare_relay.parse::<std::net::IpAddr>()
+                                                {
+                                                    guard.record_violation(
+                                                        relay_ip,
+                                                        "relayed on-chain anchor squatter announcement",
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        if let Some(ai) = &context.ai_system {
+                                            ai.attack_detector
+                                                .record_collateral_spoof_attempt(
+                                                    &masternode_ip,
+                                                    &outpoint.to_string(),
+                                                );
+                                        }
+                                    }
+                                    // Also evict any existing registry entry for this squatter
+                                    // so the lock is released and the legitimate owner can
+                                    // re-register on the next announcement.
+                                    if context
+                                        .masternode_registry
+                                        .get_registered_ip_for_collateral(&outpoint)
+                                        .await
+                                        .as_deref()
+                                        == Some(masternode_ip.as_str())
+                                    {
+                                        let _ = context
+                                            .masternode_registry
+                                            .unregister(&masternode_ip)
+                                            .await;
+                                        let _ =
+                                            utxo_manager.unlock_collateral(&outpoint);
+                                    }
+                                    // For relayed squatter messages: disconnect from the relay
+                                    // so it re-evaluates its registry against the anchor. For
+                                    // direct squatter connections: disconnect the squatter itself.
+                                    if is_relayed {
+                                        // Don't disconnect the relay (it's an honest peer); just
+                                        // drop the message so the relay has to re-check on reconnect.
+                                        return Ok(None);
+                                    }
+                                    return Err(format!(
+                                        "DISCONNECT: on-chain anchor squatter banned {}",
+                                        masternode_ip
+                                    ));
+                                }
+                            }
+                            // ── End on-chain anchor check ────────────────────────────
+
                             if utxo_manager.is_collateral_locked(&outpoint) {
                                 let existing = utxo_manager.get_locked_collateral(&outpoint);
                                 if let Some(ref info) = existing {
-                                    if info.masternode_address != peer_ip {
+                                    if info.masternode_address != masternode_ip {
                                         // Conflict: two different IPs claim the same collateral.
                                         //
                                         // Three-tier eviction priority (gossip only, no consensus impact):
@@ -3243,31 +3363,36 @@ impl MessageHandler {
                                                 let wm = LOCAL_V4_WARN
                                                     .get_or_init(dashmap::DashMap::new);
                                                 if wm
-                                                    .get(&peer_ip)
+                                                    .get(&masternode_ip)
                                                     .map(|t| t.elapsed().as_secs() >= 120)
                                                     .unwrap_or(true)
                                                 {
                                                     wm.insert(
-                                                        peer_ip.clone(),
+                                                        masternode_ip.clone(),
                                                         std::time::Instant::now(),
                                                     );
                                                     warn!(
                                                         "🚨 [{}] COLLATERAL HIJACK BLOCKED: {} \
                                                          tried V4 eviction of local node {} \
-                                                         for {} — blacklisting attacker",
+                                                         for {} — blacklisting attacker{}",
                                                         self.direction,
-                                                        peer_ip,
+                                                        masternode_ip,
                                                         squatter_ip,
-                                                        outpoint
+                                                        outpoint,
+                                                        if is_relayed {
+                                                            format!(" (via relay {})", peer_ip)
+                                                        } else {
+                                                            String::new()
+                                                        }
                                                     );
                                                 }
-                                                // Immediately record blacklist violation — no 30s
-                                                // enforcement-loop delay for collateral attacks.
+                                                // Immediately record blacklist violation against
+                                                // the actual attacker (masternode_ip), not the relay.
                                                 if let Some(bl) = &context.blacklist {
-                                                    let bare = peer_ip
+                                                    let bare = masternode_ip
                                                         .split(':')
                                                         .next()
-                                                        .unwrap_or(&peer_ip);
+                                                        .unwrap_or(&masternode_ip);
                                                     if let Ok(ban_ip) =
                                                         bare.parse::<std::net::IpAddr>()
                                                     {
@@ -3289,7 +3414,7 @@ impl MessageHandler {
                                                 if let Some(ai) = &context.ai_system {
                                                     ai.attack_detector
                                                         .record_collateral_spoof_attempt(
-                                                            &peer_ip,
+                                                            &masternode_ip,
                                                             &outpoint.to_string(),
                                                         );
                                                 }
@@ -3435,7 +3560,7 @@ impl MessageHandler {
                                                      for {}",
                                                     self.direction,
                                                     squatter_ip,
-                                                    peer_ip,
+                                                    masternode_ip,
                                                     outpoint
                                                 );
                                             }
@@ -3483,19 +3608,27 @@ impl MessageHandler {
                                             let warn_map = CONFLICT_WARN_TIMES
                                                 .get_or_init(dashmap::DashMap::new);
                                             let should_warn = warn_map
-                                                .get(&peer_ip)
+                                                .get(&masternode_ip)
                                                 .map(|t| t.elapsed().as_secs() >= 600)
                                                 .unwrap_or(true);
                                             if should_warn {
                                                 warn_map.insert(
-                                                    peer_ip.clone(),
+                                                    masternode_ip.clone(),
                                                     std::time::Instant::now(),
                                                 );
                                                 warn!(
                                                     "🚨 [{}] Collateral conflict: {} claimed {} \
                                                      already held by {} — gossip cannot prove \
-                                                     ownership, use on-chain MasternodeReg",
-                                                    self.direction, peer_ip, outpoint, squatter_ip
+                                                     ownership, use on-chain MasternodeReg{}",
+                                                    self.direction,
+                                                    masternode_ip,
+                                                    outpoint,
+                                                    squatter_ip,
+                                                    if is_relayed {
+                                                        format!(" (relayed via {})", peer_ip)
+                                                    } else {
+                                                        String::new()
+                                                    }
                                                 );
                                             }
                                             return Ok(None);
@@ -3507,7 +3640,7 @@ impl MessageHandler {
                                 "✅ [{}] Collateral verified for {:?} masternode {} ({} TIME)",
                                 self.direction,
                                 tier,
-                                peer_ip,
+                                masternode_ip,
                                 utxo.value as f64 / 100_000_000.0
                             );
                         }
@@ -3533,7 +3666,7 @@ impl MessageHandler {
                         .get_registered_ip_for_collateral(&outpoint)
                         .await
                     {
-                        if registry_squatter != peer_ip {
+                        if registry_squatter != masternode_ip {
                             // Re-fetch UTXO for address comparison.
                             let utxo_addr_opt = utxo_manager
                                 .get_utxo(&outpoint)
@@ -3585,21 +3718,32 @@ impl MessageHandler {
                                     > = std::sync::OnceLock::new();
                                     let wm = LOCAL_V4_WARN2.get_or_init(dashmap::DashMap::new);
                                     if wm
-                                        .get(&peer_ip)
+                                        .get(&masternode_ip)
                                         .map(|t| t.elapsed().as_secs() >= 120)
                                         .unwrap_or(true)
                                     {
-                                        wm.insert(peer_ip.clone(), std::time::Instant::now());
+                                        wm.insert(masternode_ip.clone(), std::time::Instant::now());
                                         warn!(
                                             "🚨 [{}] COLLATERAL HIJACK BLOCKED: {} tried V4 \
                                              eviction of local node {} for {} (registry path) \
-                                             — blacklisting attacker",
-                                            self.direction, peer_ip, registry_squatter, outpoint
+                                             — blacklisting attacker{}",
+                                            self.direction,
+                                            masternode_ip,
+                                            registry_squatter,
+                                            outpoint,
+                                            if is_relayed {
+                                                format!(" (via relay {})", peer_ip)
+                                            } else {
+                                                String::new()
+                                            }
                                         );
                                     }
-                                    // Immediately record blacklist violation — no 30s delay.
+                                    // Record violation against the actual attacker (masternode_ip).
                                     if let Some(bl) = &context.blacklist {
-                                        let bare = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                                        let bare = masternode_ip
+                                            .split(':')
+                                            .next()
+                                            .unwrap_or(&masternode_ip);
                                         if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
                                             let mut guard = bl.write().await;
                                             guard.record_violation(
@@ -3618,7 +3762,7 @@ impl MessageHandler {
                                     }
                                     if let Some(ai) = &context.ai_system {
                                         ai.attack_detector.record_collateral_spoof_attempt(
-                                            &peer_ip,
+                                            &masternode_ip,
                                             &outpoint.to_string(),
                                         );
                                     }
@@ -3647,12 +3791,12 @@ impl MessageHandler {
                                                 self.direction,
                                                 outpoint,
                                                 registry_squatter,
-                                                peer_ip
+                                                masternode_ip
                                             );
                                         }
                                         if let Some(ai) = &context.ai_system {
                                             ai.attack_detector.record_eviction_storm_attempt(
-                                                &peer_ip,
+                                                &masternode_ip,
                                                 &outpoint.to_string(),
                                             );
                                         }
@@ -3701,7 +3845,7 @@ impl MessageHandler {
                                              reward_address == utxo.address for {} — evicting \
                                              Free-tier squatter {} \
                                              (UTXOManager lock absent, mismatched address)",
-                                            self.direction, peer_ip, outpoint, registry_squatter
+                                            self.direction, masternode_ip, outpoint, registry_squatter
                                         );
                                         true
                                     }
@@ -3761,28 +3905,37 @@ impl MessageHandler {
                             } else {
                                 let outpoint_key = outpoint.to_string();
 
-                                // Rate-limit the WARN to once per 5 minutes per (peer_ip).
+                                // Rate-limit the WARN to once per 5 minutes per masternode_ip.
                                 // Without this, a Sybil subnet floods 200+ identical lines/second.
                                 static CONFLICT_WARN: std::sync::OnceLock<
                                     dashmap::DashMap<String, std::time::Instant>,
                                 > = std::sync::OnceLock::new();
                                 let wm = CONFLICT_WARN.get_or_init(dashmap::DashMap::new);
                                 if wm
-                                    .get(&peer_ip)
+                                    .get(&masternode_ip)
                                     .map(|t| t.elapsed().as_secs() >= 300)
                                     .unwrap_or(true)
                                 {
-                                    wm.insert(peer_ip.clone(), std::time::Instant::now());
+                                    wm.insert(masternode_ip.clone(), std::time::Instant::now());
                                     warn!(
                                         "🚨 [{}] Registry conflict: {} already holds {} — \
-                                         no valid V4 proof from {}, rejecting",
-                                        self.direction, registry_squatter, outpoint_key, peer_ip
+                                         no valid V4 proof from {}, rejecting{}",
+                                        self.direction,
+                                        registry_squatter,
+                                        outpoint_key,
+                                        masternode_ip,
+                                        if is_relayed {
+                                            format!(" (relayed via {})", peer_ip)
+                                        } else {
+                                            String::new()
+                                        }
                                     );
                                 }
 
-                                // Record a violation so the peer gets banned after repeated attempts.
+                                // Record a violation against the actual claimant (masternode_ip).
                                 if let Some(blacklist) = &context.blacklist {
-                                    let bare_ip = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                                    let bare_ip =
+                                        masternode_ip.split(':').next().unwrap_or(&masternode_ip);
                                     if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
                                         let mut bl = blacklist.write().await;
                                         bl.record_violation(
@@ -3796,8 +3949,9 @@ impl MessageHandler {
                                 // /24 subnet have claimed the same outpoint within 60 seconds,
                                 // treat it as a coordinated attack and subnet-ban them all.
                                 {
-                                    // subnet_key = "w.x.y" (first 3 octets of peer IPv4)
-                                    let bare_ip = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                                    // subnet_key = "w.x.y" (first 3 octets of masternode IPv4)
+                                    let bare_ip =
+                                        masternode_ip.split(':').next().unwrap_or(&masternode_ip);
                                     let subnet_key = bare_ip
                                         .rsplit_once('.')
                                         .map(|x| x.0)
@@ -3855,7 +4009,7 @@ impl MessageHandler {
                     let lock_height = context.blockchain.get_height();
                     if let Err(e) = utxo_manager.lock_collateral(
                         outpoint.clone(),
-                        peer_ip.clone(),
+                        masternode_ip.clone(),
                         lock_height,
                         tier.collateral(),
                     ) {
@@ -3864,12 +4018,12 @@ impl MessageHandler {
                             tracing::debug!(
                                 "🔒 [{}] Collateral for {} already locked — proceeding",
                                 self.direction,
-                                peer_ip
+                                masternode_ip
                             );
                         } else {
                             warn!(
                             "❌ [{}] Rejecting {:?} masternode from {} — failed to lock collateral: {:?}",
-                            self.direction, tier, peer_ip, e
+                            self.direction, tier, masternode_ip, e
                         );
                             return Ok(None);
                         }
@@ -3877,21 +4031,23 @@ impl MessageHandler {
                 } else {
                     warn!(
                         "⚠️ [{}] Cannot verify collateral for {} — no UTXO manager available",
-                        self.direction, peer_ip
+                        self.direction, masternode_ip
                     );
                     return Ok(None);
                 }
             } else {
                 info!(
                     "⏳ [{}] Accepting {:?} masternode {} provisionally (height {} — syncing, collateral check deferred)",
-                    self.direction, tier, peer_ip, our_height
+                    self.direction, tier, masternode_ip, our_height
                 );
             }
 
-            // Create masternode with verified collateral
+            // Create masternode with verified collateral.
+            // Use masternode_ip (announced_address) as the masternode's identity — for relayed
+            // announcements this is the actual masternode IP, not the relay's TCP source IP.
             let outpoint_for_relay = outpoint.clone();
             let mn = crate::types::Masternode::new_with_collateral(
-                peer_ip.clone(),
+                masternode_ip.clone(),
                 reward_address.clone(),
                 tier.collateral(),
                 outpoint,
@@ -3900,7 +4056,11 @@ impl MessageHandler {
                 now,
             );
 
-            let is_new = context.masternode_registry.get(&peer_ip).await.is_none();
+            let is_new = context
+                .masternode_registry
+                .get(&masternode_ip)
+                .await
+                .is_none();
 
             match context
                 .masternode_registry
@@ -3914,24 +4074,32 @@ impl MessageHandler {
                     let _ = context
                         .masternode_registry
                         .set_registration_source(
-                            &peer_ip,
+                            &masternode_ip,
                             crate::masternode_registry::RegistrationSource::OnChain(lock_h),
                         )
                         .await;
 
                     let count = context.masternode_registry.total_count().await;
                     debug!(
-                        "✅ [{}] Registered {:?} masternode {} (total: {})",
-                        self.direction, tier, peer_ip, count
+                        "✅ [{}] Registered {:?} masternode {} (total: {}{})",
+                        self.direction,
+                        tier,
+                        masternode_ip,
+                        count,
+                        if is_relayed {
+                            format!(", via relay {}", peer_ip)
+                        } else {
+                            String::new()
+                        }
                     );
                     if let Some(peer_manager) = &context.peer_manager {
-                        peer_manager.add_peer(peer_ip.clone()).await;
+                        peer_manager.add_peer(masternode_ip.clone()).await;
                     }
                     if is_new {
                         if let Some(broadcast_tx) = &context.broadcast_tx {
                             let relay = if !collateral_proof.is_empty() {
                                 crate::network::message::NetworkMessage::MasternodeAnnouncementV4 {
-                                    address: peer_ip.clone(),
+                                    address: masternode_ip.clone(),
                                     reward_address,
                                     tier,
                                     public_key,
@@ -3942,7 +4110,7 @@ impl MessageHandler {
                                 }
                             } else {
                                 crate::network::message::NetworkMessage::MasternodeAnnouncementV3 {
-                                    address: peer_ip.clone(),
+                                    address: masternode_ip.clone(),
                                     reward_address,
                                     tier,
                                     public_key,
@@ -3954,36 +4122,45 @@ impl MessageHandler {
                             let _ = broadcast_tx.send(relay);
                             debug!(
                                 "📡 [{}] Relayed new {:?} masternode {} announcement to all peers",
-                                self.direction, tier, peer_ip
+                                self.direction, tier, masternode_ip
                             );
                         }
                     }
                     // Store remote daemon start time for uptime display
                     context
                         .masternode_registry
-                        .update_daemon_started_at(&peer_ip, started_at)
+                        .update_daemon_started_at(&masternode_ip, started_at)
                         .await;
                 }
                 Err(crate::masternode_registry::RegistryError::CollateralAlreadyLocked) => {
                     warn!(
-                        "❌ [{}] Collateral hijack attempt from {} for {} — recording violation",
-                        self.direction, peer_ip, outpoint_for_relay
+                        "❌ [{}] Collateral hijack attempt from {} for {} — recording violation{}",
+                        self.direction,
+                        masternode_ip,
+                        outpoint_for_relay,
+                        if is_relayed {
+                            format!(" (relayed via {})", peer_ip)
+                        } else {
+                            String::new()
+                        }
                     );
                     if let Some(ai) = &context.ai_system {
                         ai.attack_detector.record_collateral_spoof_attempt(
-                            &peer_ip,
+                            &masternode_ip,
                             &outpoint_for_relay.to_string(),
                         );
                     }
                     if let Some(blacklist) = &context.blacklist {
-                        let bare_ip = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                        let bare_ip = masternode_ip.split(':').next().unwrap_or(&masternode_ip);
                         if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
                             let mut bl = blacklist.write().await;
                             let should_disconnect = bl.record_severe_violation(
                                 ban_ip,
                                 &format!("Collateral hijack attempt for {}", outpoint_for_relay),
                             );
-                            if should_disconnect {
+                            // Only disconnect the relay (not the masternode) if this was relayed.
+                            // For direct connections, disconnect the squatter itself.
+                            if should_disconnect && !is_relayed {
                                 return Err(format!(
                                     "DISCONNECT: collateral hijack banned {}",
                                     ban_ip
@@ -3994,12 +4171,12 @@ impl MessageHandler {
                 }
                 Err(crate::masternode_registry::RegistryError::IpCyclingRejected) => {
                     if let Some(blacklist) = &context.blacklist {
-                        let bare_ip = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                        let bare_ip = masternode_ip.split(':').next().unwrap_or(&masternode_ip);
                         if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
                             let mut bl = blacklist.write().await;
                             let should_disconnect =
                                 bl.record_violation(ban_ip, "IP cycling (AV3)");
-                            if should_disconnect {
+                            if should_disconnect && !is_relayed {
                                 return Err(format!(
                                     "DISCONNECT: IP cycling banned {}",
                                     ban_ip
@@ -4011,12 +4188,14 @@ impl MessageHandler {
                 Err(e) => {
                     warn!(
                         "❌ [{}] Failed to register masternode {}: {}",
-                        self.direction, peer_ip, e
+                        self.direction, masternode_ip, e
                     );
                 }
             }
         } else {
-            // Free tier — no collateral verification needed
+            // Free tier — no collateral verification needed.
+            // For Free tier, announced_address == masternode_ip (relay detection still applies
+            // but Free tier nodes are not authenticated so we use peer_ip as fallback).
 
             // ── AV25: Early subnet-cap drop ──────────────────────────────────
             // The attacker subnet (154.217.246.x) floods us with 50-100 Free-tier
@@ -4030,11 +4209,11 @@ impl MessageHandler {
             // per subnet so the log stays readable.
             if context
                 .masternode_registry
-                .is_free_tier_subnet_at_cap(&peer_ip)
-                && context.masternode_registry.get(&peer_ip).await.is_none()
+                .is_free_tier_subnet_at_cap(&masternode_ip)
+                && context.masternode_registry.get(&masternode_ip).await.is_none()
             {
                 let subnet_key = {
-                    let ip_only = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                    let ip_only = masternode_ip.split(':').next().unwrap_or(&masternode_ip);
                     let parts: Vec<&str> = ip_only.split('.').collect();
                     if parts.len() >= 3 {
                         format!("{}.{}.{}", parts[0], parts[1], parts[2])
@@ -4063,10 +4242,14 @@ impl MessageHandler {
             }
             // ── End AV25 early-drop ──────────────────────────────────────────
 
-            let is_new = context.masternode_registry.get(&peer_ip).await.is_none();
+            let is_new = context
+                .masternode_registry
+                .get(&masternode_ip)
+                .await
+                .is_none();
 
             let mn = crate::types::Masternode::new_legacy(
-                peer_ip.clone(),
+                masternode_ip.clone(),
                 reward_address.clone(),
                 0,
                 public_key,
@@ -4083,10 +4266,10 @@ impl MessageHandler {
                     let count = context.masternode_registry.total_count().await;
                     debug!(
                         "✅ [{}] Registered Free masternode {} (total: {})",
-                        self.direction, peer_ip, count
+                        self.direction, masternode_ip, count
                     );
                     if let Some(peer_manager) = &context.peer_manager {
-                        peer_manager.add_peer(peer_ip.clone()).await;
+                        peer_manager.add_peer(masternode_ip.clone()).await;
                     }
                     // Relay to all other peers so nodes not directly connected to this
                     // masternode still learn about it (large-network discovery).
@@ -4094,7 +4277,7 @@ impl MessageHandler {
                         if let Some(broadcast_tx) = &context.broadcast_tx {
                             let relay =
                                 crate::network::message::NetworkMessage::MasternodeAnnouncementV3 {
-                                    address: peer_ip.clone(),
+                                    address: masternode_ip.clone(),
                                     reward_address,
                                     tier,
                                     public_key,
@@ -4105,34 +4288,34 @@ impl MessageHandler {
                             let _ = broadcast_tx.send(relay);
                             debug!(
                                 "📡 [{}] Relayed new Free masternode {} announcement to all peers",
-                                self.direction, peer_ip
+                                self.direction, masternode_ip
                             );
                         }
                     }
                     // Store remote daemon start time for uptime display
                     context
                         .masternode_registry
-                        .update_daemon_started_at(&peer_ip, started_at)
+                        .update_daemon_started_at(&masternode_ip, started_at)
                         .await;
                 }
                 Err(crate::masternode_registry::RegistryError::CollateralAlreadyLocked) => {
                     warn!(
                         "❌ [{}] Free-tier collateral hijack attempt from {} — recording violation",
-                        self.direction, peer_ip
+                        self.direction, masternode_ip
                     );
                     if let Some(ai) = &context.ai_system {
                         ai.attack_detector
-                            .record_collateral_spoof_attempt(&peer_ip, "free-tier-claim");
+                            .record_collateral_spoof_attempt(&masternode_ip, "free-tier-claim");
                     }
                     if let Some(blacklist) = &context.blacklist {
-                        let bare_ip = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                        let bare_ip = masternode_ip.split(':').next().unwrap_or(&masternode_ip);
                         if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
                             let mut bl = blacklist.write().await;
                             let should_disconnect = bl.record_severe_violation(
                                 ban_ip,
                                 "Free-tier collateral hijack: tried to claim paid-tier collateral",
                             );
-                            if should_disconnect {
+                            if should_disconnect && !is_relayed {
                                 return Err(format!(
                                     "DISCONNECT: free-tier collateral hijack banned {}",
                                     ban_ip
@@ -4143,12 +4326,12 @@ impl MessageHandler {
                 }
                 Err(crate::masternode_registry::RegistryError::IpCyclingRejected) => {
                     if let Some(blacklist) = &context.blacklist {
-                        let bare_ip = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                        let bare_ip = masternode_ip.split(':').next().unwrap_or(&masternode_ip);
                         if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
                             let mut bl = blacklist.write().await;
                             let should_disconnect =
                                 bl.record_violation(ban_ip, "IP cycling (AV3)");
-                            if should_disconnect {
+                            if should_disconnect && !is_relayed {
                                 return Err(format!(
                                     "DISCONNECT: IP cycling banned {}",
                                     ban_ip
@@ -4160,7 +4343,7 @@ impl MessageHandler {
                 Err(e) => {
                     warn!(
                         "❌ [{}] Failed to register masternode {}: {}",
-                        self.direction, peer_ip, e
+                        self.direction, masternode_ip, e
                     );
                 }
             }
@@ -4178,21 +4361,23 @@ impl MessageHandler {
         if is_outbound {
             context
                 .masternode_registry
-                .set_publicly_reachable(&peer_ip, true)
+                .set_publicly_reachable(&masternode_ip, true)
                 .await;
         } else {
             // Spawn a background probe so we don't block message processing.
             // Rate-limited: try_claim_reachability_probe returns false if a probe
             // was already performed within REACHABILITY_RECHECK_SECS (10 min), so
             // we don't fire a new TCP probe on every 60-second announcement.
+            // Use masternode_ip (not peer_ip) so relayed announcements probe the
+            // actual masternode's port, not the relay's port.
             if context
                 .masternode_registry
-                .try_claim_reachability_probe(&peer_ip)
+                .try_claim_reachability_probe(&masternode_ip)
                 .await
             {
                 let registry_clone = Arc::clone(&context.masternode_registry);
                 let peer_registry_clone = Arc::clone(&context.peer_registry);
-                let probe_addr = peer_ip.clone();
+                let probe_addr = masternode_ip.clone();
                 let network = context.masternode_registry.network();
                 tokio::spawn(async move {
                     probe_masternode_reachability(
