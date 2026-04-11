@@ -181,6 +181,11 @@ enum Commands {
     #[command(next_help_heading = "Network")]
     GetPeerInfo,
 
+    /// Scan all paid-tier masternode registrations for collateral squatters.
+    /// Evicts squatters, releases their duplicate locks, and permanently bans them.
+    #[command(next_help_heading = "Network")]
+    AuditCollateral,
+
     /// List all banned IPs (permanent and temporary) with reasons
     #[command(next_help_heading = "Network")]
     GetBlacklist,
@@ -960,6 +965,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::GetBlockHash { height } => ("getblockhash", json!([height])),
         Commands::GetNetworkInfo => ("getnetworkinfo", json!([])),
         Commands::GetPeerInfo => ("getpeerinfo", json!([])),
+        Commands::AuditCollateral => ("auditcollateral", json!([])),
         Commands::GetBlacklist => ("getblacklist", json!([])),
         Commands::Ban { ip, reason } => (
             "ban",
@@ -1498,6 +1504,38 @@ fn print_human_readable(
                     println!("{:<45} {:<10} {:<10}", addr, version, subver);
                 }
                 println!("\nTotal Peers: {}", peers.len());
+            }
+        }
+        Commands::AuditCollateral => {
+            let evicted = result
+                .get("squatters_evicted")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let warnings = result
+                .get("warnings")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            println!("=== Collateral Audit Results ===");
+            println!("Squatters evicted:  {}", evicted);
+            println!("Unresolved (stalemate, V4 required): {}", warnings);
+            if let Some(list) = result.get("evicted").and_then(|v| v.as_array()) {
+                if !list.is_empty() {
+                    println!("\n--- Evicted Squatters ---");
+                    for entry in list {
+                        let ip = entry.get("ip").and_then(|v| v.as_str()).unwrap_or("");
+                        let outpoint = entry.get("outpoint").and_then(|v| v.as_str()).unwrap_or("");
+                        let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                        println!("  {} — {} — {}", ip, outpoint, reason);
+                    }
+                }
+            }
+            if let Some(list) = result.get("unresolved_warnings").and_then(|v| v.as_array()) {
+                if !list.is_empty() {
+                    println!("\n--- Unresolved Stalemates ---");
+                    for entry in list {
+                        println!("  {}", entry);
+                    }
+                }
             }
         }
         Commands::GetBlacklist => {

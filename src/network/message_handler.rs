@@ -3444,6 +3444,36 @@ impl MessageHandler {
                                                 .masternode_registry
                                                 .unregister(&squatter_ip)
                                                 .await;
+                                            // Permanently ban the evicted squatter so they cannot
+                                            // immediately re-register.  V4 proof = definitive ban;
+                                            // Tier 2 address-match = 3 violations (auto-temp-ban).
+                                            let bare_squatter = squatter_ip
+                                                .split(':')
+                                                .next()
+                                                .unwrap_or(&squatter_ip);
+                                            if let Ok(ban_ip) =
+                                                bare_squatter.parse::<std::net::IpAddr>()
+                                            {
+                                                if let Some(bl) = &context.blacklist {
+                                                    let mut guard = bl.write().await;
+                                                    if has_valid_proof {
+                                                        guard.add_permanent_ban(
+                                                            ban_ip,
+                                                            "collateral squatter evicted by V4 proof",
+                                                        );
+                                                        warn!(
+                                                            "🔨 [{}] Permanently banned squatter {} \
+                                                             (V4 proof confirmed ownership for {})",
+                                                            self.direction, ban_ip, outpoint
+                                                        );
+                                                    } else {
+                                                        // Tier 2 eviction: 3 violations → temp ban
+                                                        guard.record_violation(ban_ip, "collateral squatter (address mismatch)");
+                                                        guard.record_violation(ban_ip, "collateral squatter (address mismatch)");
+                                                        guard.record_violation(ban_ip, "collateral squatter (address mismatch)");
+                                                    }
+                                                }
+                                            }
                                             // Fall through to lock and register the legitimate owner
                                         } else {
                                             // Gossip conflicts: reject the new claimant.
@@ -3703,6 +3733,31 @@ impl MessageHandler {
                                 // Also release the UTXOManager lock so the wallet can
                                 // spend the UTXO again if the squatter held the lock.
                                 let _ = utxo_manager.unlock_collateral(&outpoint);
+                                // Permanently ban the evicted registry squatter.
+                                let bare_squatter = registry_squatter
+                                    .split(':')
+                                    .next()
+                                    .unwrap_or(&registry_squatter);
+                                if let Ok(ban_ip) = bare_squatter.parse::<std::net::IpAddr>() {
+                                    if let Some(bl) = &context.blacklist {
+                                        let mut guard = bl.write().await;
+                                        if has_valid_proof {
+                                            guard.add_permanent_ban(
+                                                ban_ip,
+                                                "collateral squatter evicted by V4 proof (registry path)",
+                                            );
+                                            warn!(
+                                                "🔨 [{}] Permanently banned registry squatter {} \
+                                                 (V4 proof confirmed ownership for {})",
+                                                self.direction, ban_ip, outpoint
+                                            );
+                                        } else {
+                                            guard.record_violation(ban_ip, "collateral squatter (address mismatch, registry path)");
+                                            guard.record_violation(ban_ip, "collateral squatter (address mismatch, registry path)");
+                                            guard.record_violation(ban_ip, "collateral squatter (address mismatch, registry path)");
+                                        }
+                                    }
+                                }
                             } else {
                                 let outpoint_key = outpoint.to_string();
 

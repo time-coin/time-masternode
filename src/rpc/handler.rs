@@ -215,6 +215,7 @@ impl RpcHandler {
             "getblacklist" => self.get_blacklist().await,
             "ban" => self.ban_ip(&params_array).await,
             "unban" => self.unban(&params_array).await,
+            "auditcollateral" => self.audit_collateral().await,
             "listreceivedbyaddress" => self.list_received_by_address(&params_array).await,
             "listtransactions" => self.list_transactions(&params_array).await,
             "listtransactionsmulti" => self.list_transactions_multi(&params_array).await,
@@ -4188,6 +4189,147 @@ impl RpcHandler {
             "result": "success",
             "ip": ip_str,
             "message": format!("IP {} permanently banned", ip_str)
+        }))
+    }
+
+    /// Run the collateral squatter audit sweep on demand.
+    ///
+    /// Scans every paid-tier registered masternode, verifies that its
+    /// `reward_address` matches the on-chain collateral UTXO output address,
+    /// and detects duplicate outpoint claims.  Confirmed squatters are evicted,
+    /// their collateral lock released, and permanently banned.
+    ///
+    /// Returns a summary of findings: squatters evicted, locks released, bans issued.
+    async fn audit_collateral(&self) -> Result<Value, RpcError> {
+        use std::collections::HashMap;
+
+        let all_nodes = self.registry.get_all().await;
+        let mut evicted: Vec<Value> = Vec::new();
+        let mut warnings: Vec<Value> = Vec::new();
+
+        // Pass 1: reward_address vs UTXO address mismatch
+        let mut evicted_ips: Vec<String> = Vec::new();
+        for info in &all_nodes {
+            if info.masternode.tier == crate::types::MasternodeTier::Free {
+                continue;
+            }
+            let outpoint = match &info.masternode.collateral_outpoint {
+                Some(op) => op.clone(),
+                None => continue,
+            };
+            let utxo = match self.utxo_manager.get_utxo(&outpoint).await {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            if utxo.address.is_empty() {
+                continue;
+            }
+            let ip = info.masternode.address.clone();
+            if info.reward_address != utxo.address {
+                let _ = self.registry.unregister(&ip).await;
+                let _ = self.utxo_manager.unlock_collateral(&outpoint);
+                let bare = ip.split(':').next().unwrap_or(&ip);
+                if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
+                    let mut bl = self.blacklist.write().await;
+                    bl.add_permanent_ban(
+                        ban_ip,
+                        "collateral squatter: reward_address ≠ UTXO owner (manual audit)",
+                    );
+                }
+                evicted_ips.push(ip.clone());
+                evicted.push(json!({
+                    "ip": ip,
+                    "outpoint": outpoint.to_string(),
+                    "reason": "reward_address does not match UTXO owner address",
+                    "registered_reward_address": info.reward_address,
+                    "utxo_owner_address": utxo.address,
+                    "action": "evicted, lock released, permanently banned"
+                }));
+            }
+        }
+
+        // Pass 2: duplicate outpoint detection
+        let mut outpoint_map: HashMap<String, Vec<crate::masternode_registry::MasternodeInfo>> =
+            HashMap::new();
+        for info in &all_nodes {
+            if info.masternode.tier == crate::types::MasternodeTier::Free {
+                continue;
+            }
+            if let Some(ref op) = info.masternode.collateral_outpoint {
+                let key = format!("{}:{}", hex::encode(op.txid), op.vout);
+                outpoint_map.entry(key).or_default().push(info.clone());
+            }
+        }
+        for (outpoint_str, claimants) in &outpoint_map {
+            if claimants.len() < 2 {
+                continue;
+            }
+            let outpoint = match claimants.first().and_then(|c| c.masternode.collateral_outpoint.clone()) {
+                Some(op) => op,
+                None => continue,
+            };
+            let utxo_addr = match self.utxo_manager.get_utxo(&outpoint).await {
+                Ok(u) if !u.address.is_empty() => u.address,
+                _ => continue,
+            };
+            let mut owner: Option<String> = None;
+            let mut squatters: Vec<String> = Vec::new();
+            let mut stalemate = false;
+            for c in claimants {
+                if c.reward_address == utxo_addr {
+                    if owner.is_none() {
+                        owner = Some(c.masternode.address.clone());
+                    } else {
+                        stalemate = true;
+                        warnings.push(json!({
+                            "outpoint": outpoint_str,
+                            "claimants": claimants.iter().map(|c| &c.masternode.address).collect::<Vec<_>>(),
+                            "warning": "address-match stalemate — V4 cryptographic proof required to resolve"
+                        }));
+                        break;
+                    }
+                } else {
+                    squatters.push(c.masternode.address.clone());
+                }
+            }
+            if !stalemate && owner.is_some() {
+                for sq_ip in &squatters {
+                    if evicted_ips.contains(sq_ip) {
+                        continue;
+                    }
+                    let _ = self.registry.unregister(sq_ip).await;
+                    let _ = self.utxo_manager.unlock_collateral(&outpoint);
+                    let bare = sq_ip.split(':').next().unwrap_or(sq_ip.as_str());
+                    if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
+                        let mut bl = self.blacklist.write().await;
+                        bl.add_permanent_ban(
+                            ban_ip,
+                            "collateral squatter: duplicate outpoint claim (manual audit)",
+                        );
+                    }
+                    evicted_ips.push(sq_ip.clone());
+                    evicted.push(json!({
+                        "ip": sq_ip,
+                        "outpoint": outpoint_str,
+                        "reason": "duplicate outpoint claim — legitimate owner has matching reward_address",
+                        "legitimate_owner": owner,
+                        "action": "evicted, lock released, permanently banned"
+                    }));
+                }
+            }
+        }
+
+        tracing::info!(
+            "🔍 RPC auditcollateral: {} squatter(s) evicted, {} warning(s)",
+            evicted.len(),
+            warnings.len()
+        );
+
+        Ok(json!({
+            "squatters_evicted": evicted.len(),
+            "warnings": warnings.len(),
+            "evicted": evicted,
+            "unresolved_warnings": warnings
         }))
     }
 

@@ -379,6 +379,35 @@ impl NetworkServer {
             tracing::info!("🛡️ Attack mitigation enforcement task started (event-driven + 30s fallback)");
         }
 
+        // Collateral audit sweep: every 5 minutes, scan all paid-tier registrations and
+        // verify each one's reward_address matches the on-chain UTXO output address.
+        // A mismatch is definitive proof that the registrant does not own the collateral
+        // (they cannot have produced the UTXO without knowing the correct address).
+        // Detected squatters are evicted, their lock released, and permanently banned.
+        {
+            let audit_registry = self.masternode_registry.clone();
+            let audit_utxo = self.utxo_manager.clone();
+            let audit_blacklist = self.blacklist.clone();
+            let audit_peer_registry = self.peer_registry.clone();
+            tokio::spawn(async move {
+                // Stagger the first run by 2 minutes to let the node finish syncing
+                // before condemning nodes whose UTXOs may not yet be in our UTXO set.
+                tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
+                loop {
+                    let squatters = audit_collateral_registrations(
+                        &audit_registry,
+                        &audit_utxo,
+                        &audit_blacklist,
+                    ).await;
+                    for ip_str in &squatters {
+                        audit_peer_registry.kick_peer(ip_str).await;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+                }
+            });
+            tracing::info!("🔍 Collateral audit sweep started (5-minute interval)");
+        }
+
         // Note: Deduplication filter handles its own cleanup with automatic rotation
 
         // Per-/24 subnet connection rate limiter: throttles inbound floods before TLS.
@@ -592,6 +621,162 @@ const MAX_TX_SIZE: usize = 100_000;
 const MAX_VOTE_SIZE: usize = 1_000;
 #[allow(dead_code)]
 const MAX_GENERAL_SIZE: usize = 50_000;
+
+/// Scan every paid-tier registered masternode and verify that its `reward_address`
+/// matches the on-chain output address of its collateral UTXO.  A mismatch is
+/// definitive proof that the registrant does not own the UTXO — they registered with
+/// a collateral outpoint they found on-chain but cannot control.
+///
+/// Side-effects on each confirmed squatter:
+///   1. Evicted from the masternode registry
+///   2. Collateral lock released (wallet coins freed)
+///   3. Permanently banned in the IP blacklist
+///
+/// Returns the list of squatter IPs that were evicted (so the caller can kick TCP
+/// connections that are still open).
+///
+/// Also detects duplicate outpoint claims: if two registry entries share the same
+/// outpoint, the one whose reward_address matches the UTXO address is kept; the
+/// other is evicted and banned.
+async fn audit_collateral_registrations(
+    registry: &Arc<crate::masternode_registry::MasternodeRegistry>,
+    utxo_manager: &Arc<crate::utxo_manager::UTXOStateManager>,
+    blacklist: &Arc<tokio::sync::RwLock<crate::network::blacklist::IPBlacklist>>,
+) -> Vec<String> {
+    use std::collections::HashMap;
+
+    let all_nodes = registry.get_all().await;
+    let mut evicted: Vec<String> = Vec::new();
+
+    // ── Pass 1: address-mismatch squatter detection ──────────────────────────
+    // For each paid-tier node, fetch its UTXO.  If the UTXO exists and its
+    // output address does not match the registrant's reward_address, the
+    // registrant cannot possibly own the UTXO.
+    for info in &all_nodes {
+        if info.masternode.tier == crate::types::MasternodeTier::Free {
+            continue;
+        }
+        let outpoint = match &info.masternode.collateral_outpoint {
+            Some(op) => op.clone(),
+            None => continue,
+        };
+        let utxo = match utxo_manager.get_utxo(&outpoint).await {
+            Ok(u) => u,
+            Err(_) => continue, // UTXO not on chain yet (sync lag) — skip
+        };
+        if utxo.address.is_empty() {
+            continue; // No address embedded — cannot prove mismatch, skip
+        }
+        let ip = info.masternode.address.clone();
+        if info.reward_address != utxo.address {
+            tracing::warn!(
+                "🚨 [COLLATERAL AUDIT] Squatter detected: {} registered {:?} with outpoint {} \
+                 but reward_address {} ≠ UTXO owner {} — evicting and banning",
+                ip,
+                info.masternode.tier,
+                outpoint,
+                info.reward_address,
+                utxo.address,
+            );
+            let _ = registry.unregister(&ip).await;
+            let _ = utxo_manager.unlock_collateral(&outpoint);
+            let bare = ip.split(':').next().unwrap_or(&ip);
+            if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
+                let mut bl = blacklist.write().await;
+                bl.add_permanent_ban(
+                    ban_ip,
+                    "collateral squatter: reward_address ≠ UTXO owner (audit sweep)",
+                );
+            }
+            evicted.push(ip);
+        }
+    }
+
+    // ── Pass 2: duplicate outpoint detection ─────────────────────────────────
+    // Two nodes may both claim the same outpoint.  The one whose reward_address
+    // matches the UTXO's on-chain address is the legitimate owner; the other is
+    // a squatter.  If both match (stalemate), a V4 proof is required — the audit
+    // cannot resolve that case and leaves it to the V4 eviction path.
+    let mut outpoint_map: HashMap<String, Vec<crate::masternode_registry::MasternodeInfo>> =
+        HashMap::new();
+    for info in &all_nodes {
+        if info.masternode.tier == crate::types::MasternodeTier::Free {
+            continue;
+        }
+        if let Some(ref op) = info.masternode.collateral_outpoint {
+            let key = format!("{}:{}", hex::encode(op.txid), op.vout);
+            outpoint_map.entry(key).or_default().push(info.clone());
+        }
+    }
+    for (outpoint_str, claimants) in &outpoint_map {
+        if claimants.len() < 2 {
+            continue;
+        }
+        // Resolve: fetch the UTXO address and pick the owner.
+        let outpoint = match claimants.first().and_then(|c| c.masternode.collateral_outpoint.clone()) {
+            Some(op) => op,
+            None => continue,
+        };
+        let utxo_addr = match utxo_manager.get_utxo(&outpoint).await {
+            Ok(u) if !u.address.is_empty() => u.address,
+            _ => continue,
+        };
+        let mut owner: Option<String> = None;
+        let mut squatters: Vec<String> = Vec::new();
+        for c in claimants {
+            if c.reward_address == utxo_addr {
+                if owner.is_none() {
+                    owner = Some(c.masternode.address.clone());
+                } else {
+                    // Both match — stalemate; V4 proof needed; skip eviction.
+                    squatters.clear();
+                    tracing::warn!(
+                        "⚠️ [COLLATERAL AUDIT] Outpoint {} claimed by {} nodes all matching \
+                         UTXO address — V4 cryptographic proof required to resolve",
+                        outpoint_str,
+                        claimants.len()
+                    );
+                    break;
+                }
+            } else {
+                squatters.push(c.masternode.address.clone());
+            }
+        }
+        if owner.is_some() {
+            for sq_ip in &squatters {
+                if evicted.contains(sq_ip) {
+                    continue; // Already handled in pass 1
+                }
+                tracing::warn!(
+                    "🚨 [COLLATERAL AUDIT] Duplicate outpoint {}: owner={:?}, squatter={}",
+                    outpoint_str,
+                    owner,
+                    sq_ip
+                );
+                let _ = registry.unregister(sq_ip).await;
+                let _ = utxo_manager.unlock_collateral(&outpoint);
+                let bare = sq_ip.split(':').next().unwrap_or(sq_ip.as_str());
+                if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
+                    let mut bl = blacklist.write().await;
+                    bl.add_permanent_ban(
+                        ban_ip,
+                        "collateral squatter: duplicate outpoint claim (audit sweep)",
+                    );
+                }
+                evicted.push(sq_ip.clone());
+            }
+        }
+    }
+
+    if !evicted.is_empty() {
+        tracing::warn!(
+            "🔍 [COLLATERAL AUDIT] Sweep complete — evicted {} squatter(s): {:?}",
+            evicted.len(),
+            evicted
+        );
+    }
+    evicted
+}
 
 #[allow(clippy::too_many_arguments)]
 #[allow(dead_code)] // Called by NetworkServer::run which is used by binary
