@@ -1059,13 +1059,30 @@ impl UTXOStateManager {
                     let key = bincode::serialize(outpoint).unwrap_or_default();
                     let _ = tree.remove(key);
                 }
-                tracing::warn!(
-                    "🗑️ [LOCK-SWEEP] Removed stale collateral lock {}:{} \
-                     (masternode: {}) — UTXO is spent or unknown",
-                    hex::encode(lock.outpoint.txid),
-                    lock.outpoint.vout,
-                    lock.masternode_address,
-                );
+
+                // If the UTXO state is Locked (a gossip-applied TX lock — invalid on a
+                // collateral UTXO), release the lock so the coins become spendable again.
+                // Genuine spends (SpentFinalized, Archived) are left untouched — those
+                // reflect real on-chain state that should not be reversed.
+                let current_state = self.utxo_states.get(outpoint).map(|s| s.clone());
+                if matches!(current_state, Some(UTXOState::Locked { .. })) {
+                    self.utxo_states.insert(outpoint.clone(), UTXOState::Unspent);
+                    tracing::warn!(
+                        "🔓 [LOCK-SWEEP] Released gossip-applied TX lock on collateral {}:{} \
+                         (masternode: {}) — UTXO restored to Unspent",
+                        hex::encode(lock.outpoint.txid),
+                        lock.outpoint.vout,
+                        lock.masternode_address,
+                    );
+                } else {
+                    tracing::warn!(
+                        "🗑️ [LOCK-SWEEP] Removed stale collateral lock {}:{} \
+                         (masternode: {}) — UTXO is spent or unknown",
+                        hex::encode(lock.outpoint.txid),
+                        lock.outpoint.vout,
+                        lock.masternode_address,
+                    );
+                }
             }
         }
         count
