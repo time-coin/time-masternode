@@ -1019,7 +1019,56 @@ impl UTXOStateManager {
                 restored
             );
         }
+
+        // Sweep for stale locks that survived the rebuild (e.g. gossip lock from before
+        // the spending block arrived, or a squatter whose UTXO is now spent).
+        let purged = self.purge_stale_collateral_locks();
+        if purged > 0 {
+            tracing::warn!(
+                "🧹 [LOCK-SWEEP] Purged {} stale collateral lock(s) after rebuild",
+                purged
+            );
+        }
+
         restored
+    }
+
+    /// Remove collateral locks whose underlying UTXO is no longer Unspent.
+    ///
+    /// Called after `rebuild_collateral_locks`, after each block is added, and
+    /// periodically in a background task to keep all nodes' lock sets consistent
+    /// with the actual UTXO set (the authoritative on-chain source of truth).
+    pub fn purge_stale_collateral_locks(&self) -> usize {
+        let stale: Vec<OutPoint> = self
+            .locked_collaterals
+            .iter()
+            .filter(|e| {
+                !matches!(
+                    self.utxo_states.get(e.key()).as_deref(),
+                    Some(&UTXOState::Unspent)
+                )
+            })
+            .map(|e| e.key().clone())
+            .collect();
+
+        let count = stale.len();
+        for outpoint in &stale {
+            if let Some((_, lock)) = self.locked_collaterals.remove(outpoint) {
+                // Remove from sled if the lock was persisted.
+                if let Some(tree) = &self.collateral_db {
+                    let key = bincode::serialize(outpoint).unwrap_or_default();
+                    let _ = tree.remove(key);
+                }
+                tracing::warn!(
+                    "🗑️ [LOCK-SWEEP] Removed stale collateral lock {}:{} \
+                     (masternode: {}) — UTXO is spent or unknown",
+                    hex::encode(lock.outpoint.txid),
+                    lock.outpoint.vout,
+                    lock.masternode_address,
+                );
+            }
+        }
+        count
     }
 }
 

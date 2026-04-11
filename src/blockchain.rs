@@ -5091,6 +5091,22 @@ impl Blockchain {
             );
         }
 
+        // Purge any collateral locks whose UTXO was spent in this block (or earlier).
+        // `spend_utxo` already releases locks it finds at call time, but gossip can race
+        // with block delivery and re-create a lock after `spend_utxo` ran.  This sweep
+        // is the belt-and-suspenders pass that makes the lock set eventually consistent
+        // with the chain.  Skipped during sync for the same reason as cleanup above.
+        if !is_syncing {
+            let purged = self.utxo_manager.purge_stale_collateral_locks();
+            if purged > 0 {
+                tracing::warn!(
+                    "🧹 [LOCK-SWEEP] Purged {} stale collateral lock(s) at height {}",
+                    purged,
+                    block.header.height
+                );
+            }
+        }
+
         tracing::debug!(
             "✓ Block {} added (txs: {}, work: {}), finalized pool cleared",
             block.header.height,

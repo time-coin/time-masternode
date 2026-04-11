@@ -1874,6 +1874,16 @@ async fn main() {
                 .utxo_manager
                 .rebuild_collateral_locks(entries);
         }
+
+        // One-shot startup purge: drop any stale locks that slipped through rebuild
+        // (e.g. gossip entries whose UTXOs are already spent on-chain).
+        let startup_purged = consensus_engine.utxo_manager.purge_stale_collateral_locks();
+        if startup_purged > 0 {
+            tracing::warn!(
+                "🧹 [STARTUP] Purged {} stale collateral lock(s) after registry rebuild",
+                startup_purged
+            );
+        }
     }
 
     // Spawn background task that updates last_block_time whenever the chain grows.
@@ -1893,6 +1903,27 @@ async fn main() {
                         .unwrap_or_default()
                         .as_secs();
                     lbt.store(now, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        });
+    }
+
+    // Spawn background collateral lock sweep (every 60 s).
+    // Removes stale locks for UTXOs that are no longer Unspent, keeping all nodes'
+    // lock sets consistent with the chain regardless of gossip race conditions.
+    {
+        let utxo_mgr = consensus_engine.utxo_manager.clone();
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let purged = utxo_mgr.purge_stale_collateral_locks();
+                if purged > 0 {
+                    tracing::warn!(
+                        "🧹 [LOCK-SWEEP] Background sweep purged {} stale collateral lock(s)",
+                        purged
+                    );
                 }
             }
         });

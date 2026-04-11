@@ -4361,6 +4361,14 @@ impl RpcHandler {
 
         let collaterals: Vec<_> = locked_collaterals
             .iter()
+            // Only return locks whose UTXO is still Unspent — filters out stale gossip
+            // locks for spent UTXOs before the background sweep has had a chance to run.
+            .filter(|lc| {
+                matches!(
+                    self.utxo_manager.get_state(&lc.outpoint),
+                    Some(crate::types::UTXOState::Unspent)
+                )
+            })
             .map(|lc| {
                 json!({
                     "outpoint": format!("{}:{}", hex::encode(lc.outpoint.txid), lc.outpoint.vout),
