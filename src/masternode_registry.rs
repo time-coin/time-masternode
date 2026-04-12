@@ -210,6 +210,11 @@ pub struct MasternodeRegistry {
     /// Key: "A.B.C" (first three octets of the IP), Value: current registered count.
     /// Limits attacker subnets from flooding the registry with many Free-tier nodes.
     free_tier_subnet_counts: Arc<DashMap<String, u32>>,
+    /// Per-IP Unix timestamp of the most recent Free-tier removal on disconnect (AV3 cycling defense).
+    /// Key: IP string, Value: Unix timestamp of removal.
+    /// Prevents rapid re-registration within FREE_TIER_RECONNECT_COOLDOWN_SECS of removal.
+    /// Also doubles as a dedup guard: concurrent disconnect tasks for the same IP skip the second one.
+    free_tier_reconnect_cooldown: Arc<DashMap<String, u64>>,
     /// Optional reference to the UTXO manager, used for collateral ownership verification.
     utxo_manager: Arc<RwLock<Option<Arc<crate::utxo_manager::UTXOStateManager>>>>,
     /// Sync-readable snapshot of active masternodes (is_active == true).
@@ -374,6 +379,7 @@ impl MasternodeRegistry {
             post_eviction_lockout: Arc::new(DashMap::new()),
             collateral_migration_counts: Arc::new(DashMap::new()),
             free_tier_subnet_counts: Arc::new(free_tier_subnet_counts),
+            free_tier_reconnect_cooldown: Arc::new(DashMap::new()),
             utxo_manager: Arc::new(RwLock::new(None)),
             cached_active: parking_lot::RwLock::new(init_active),
             cached_all: parking_lot::RwLock::new(init_all),
@@ -581,6 +587,30 @@ impl MasternodeRegistry {
 
         if masternode.collateral != required {
             return Err(RegistryError::InvalidCollateral);
+        }
+
+        // AV3: Per-IP reconnect cooldown for Free-tier nodes.
+        // Attackers cycle 60+ Free-tier IPs through rapid disconnect/reconnect to game
+        // the registry and inflate quorum denominators.  After a Free-tier node is removed
+        // on disconnect, block it from re-registering for 30 seconds.
+        if masternode.tier == crate::types::MasternodeTier::Free {
+            const FREE_TIER_RECONNECT_COOLDOWN_SECS: u64 = 30;
+            let pre_now = Self::now();
+            if let Some(removed_at) = self
+                .free_tier_reconnect_cooldown
+                .get(&masternode.address)
+            {
+                let elapsed = pre_now.saturating_sub(*removed_at);
+                if elapsed < FREE_TIER_RECONNECT_COOLDOWN_SECS {
+                    tracing::debug!(
+                        "⏳ [AV3] Free-tier {} reconnect rejected ({}s cooldown, {}s elapsed)",
+                        masternode.address,
+                        FREE_TIER_RECONNECT_COOLDOWN_SECS,
+                        elapsed
+                    );
+                    return Err(RegistryError::IpCyclingRejected);
+                }
+            }
         }
 
         // Pre-fetch the UTXO address AND local masternode address BEFORE taking the
@@ -1402,6 +1432,23 @@ impl MasternodeRegistry {
         }
 
         let now = Self::now();
+
+        // Dedup guard: multiple tokio tasks can call mark_inactive_on_disconnect for the
+        // same IP within the same second (e.g., TCP close + timeout racing).  If the IP
+        // was already processed within the last 5 seconds, skip this call silently.
+        // We check/set the cooldown map BEFORE taking the write lock so the fast path
+        // (already-removed) does zero lock work.
+        if let Some(removed_at) = self.free_tier_reconnect_cooldown.get(address) {
+            if now.saturating_sub(*removed_at) < 5 {
+                tracing::debug!(
+                    "🔁 Skipping duplicate disconnect for {} (already processed {}s ago)",
+                    address,
+                    now.saturating_sub(*removed_at)
+                );
+                return Ok(());
+            }
+        }
+
         let mut masternodes = self.masternodes.write().await;
 
         // Read properties before mutating to avoid borrow conflicts.
@@ -1437,7 +1484,11 @@ impl MasternodeRegistry {
                 *c = c.saturating_sub(1);
             }
 
-            warn!(
+            // AV3: Record removal timestamp so rapid re-registration is blocked for 30s.
+            self.free_tier_reconnect_cooldown
+                .insert(address.to_string(), now);
+
+            tracing::debug!(
                 "🔌 Masternode {} removed on disconnect (transient Free-tier node)",
                 address
             );
@@ -3817,6 +3868,7 @@ impl Clone for MasternodeRegistry {
             post_eviction_lockout: self.post_eviction_lockout.clone(),
             collateral_migration_counts: self.collateral_migration_counts.clone(),
             free_tier_subnet_counts: self.free_tier_subnet_counts.clone(),
+            free_tier_reconnect_cooldown: self.free_tier_reconnect_cooldown.clone(),
             utxo_manager: self.utxo_manager.clone(),
             cached_active: parking_lot::RwLock::new(self.cached_active.read().clone()),
             cached_all: parking_lot::RwLock::new(self.cached_all.read().clone()),

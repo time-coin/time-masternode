@@ -422,6 +422,73 @@ impl IPBlacklist {
         }
     }
 
+    /// Record a TLS-layer connection failure.
+    ///
+    /// TLS mode mismatches (e.g., a node configured for TLS connecting to a plaintext
+    /// listener) are not malicious — they are operator configuration errors.  Using the
+    /// standard `record_violation` path would permanently ban a legitimate node after
+    /// 10 retries.  This method uses a much higher threshold and caps at a 1-hour
+    /// temporary ban, never escalating to permanent.
+    ///
+    /// Returns true if the IP should be disconnected (i.e., a ban was just applied).
+    pub fn record_tls_violation(&mut self, ip: IpAddr, reason: &str) -> bool {
+        // Whitelisted IPs are always exempt.
+        if self.is_whitelisted(ip) {
+            return false;
+        }
+
+        let now = Instant::now();
+        let (count, last_time) = self.violations.entry(ip).or_insert((0, now));
+
+        // Reset after 1 hour of quiet.
+        if now.duration_since(*last_time) > Duration::from_secs(3600) {
+            *count = 0;
+        }
+
+        *count += 1;
+        *last_time = now;
+
+        let count_snap = *count;
+        self.persist_violation(ip, count_snap);
+
+        // Much more lenient thresholds than record_violation, and NEVER permanent.
+        match count_snap {
+            10 => {
+                self.add_temp_ban(ip, Duration::from_secs(300), reason);
+                tracing::warn!(
+                    "🚫 TLS: temp-banned {} for 5 minutes (10 TLS failures: {})",
+                    ip, reason
+                );
+                true
+            }
+            30 => {
+                self.add_temp_ban(ip, Duration::from_secs(3600), reason);
+                tracing::warn!(
+                    "🚫 TLS: temp-banned {} for 1 hour (30 TLS failures: {})",
+                    ip, reason
+                );
+                true
+            }
+            1..=9 | 11..=29 => {
+                tracing::debug!("⚠️  TLS failure #{} from {}: {}", count_snap, ip, reason);
+                false
+            }
+            _ => {
+                // At >30 TLS failures just keep the 1-hour ban cycling — never permanent.
+                if count_snap % 30 == 0 {
+                    self.add_temp_ban(ip, Duration::from_secs(3600), reason);
+                    tracing::warn!(
+                        "🚫 TLS: renewed 1-hour ban for {} ({} total TLS failures)",
+                        ip, count_snap
+                    );
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     /// Add a temporary ban
     pub fn add_temp_ban(&mut self, ip: IpAddr, duration: Duration, reason: &str) {
         let expiry = Instant::now() + duration;

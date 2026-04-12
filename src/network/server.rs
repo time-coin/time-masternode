@@ -980,10 +980,14 @@ async fn handle_peer(
                 // cause the node to permanently ban itself.
                 let is_self = local_ip.as_deref().map_or(false, |l| l == ip_str);
                 if !is_self {
+                    // Use the TLS-specific counter: much higher threshold, never permanent.
+                    // TLS mode mismatches are operator config errors, not attacks — using
+                    // the standard record_violation path would permanently ban legitimate
+                    // nodes after only 10 retries.
                     blacklist
                         .write()
                         .await
-                        .record_violation(ip, &format!("TLS handshake failed: {}", e));
+                        .record_tls_violation(ip, &format!("TLS handshake failed: {}", e));
                 } else {
                     tracing::debug!("🔄 Ignoring TLS failure from own IP {} (self-connection)", ip_str);
                 }

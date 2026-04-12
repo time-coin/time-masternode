@@ -4056,6 +4056,23 @@ impl MessageHandler {
                 now,
             );
 
+            // Ghost-registration guard: if the announced masternode IP is itself blacklisted
+            // (e.g., permanently banned for prior attacks), don't let it re-enter the registry
+            // through a relay path.  Banned nodes can gossip through legitimate peers and
+            // would otherwise bypass the per-connection blacklist check at the TCP layer.
+            if let Some(blacklist) = &context.blacklist {
+                let bare_ip = masternode_ip.split(':').next().unwrap_or(&masternode_ip);
+                if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
+                    if let Some(reason) = blacklist.write().await.is_blacklisted(ban_ip) {
+                        tracing::debug!(
+                            "🚫 [{}] Skipping gossip registration of blacklisted masternode {} ({})",
+                            self.direction, masternode_ip, reason
+                        );
+                        return Ok(None);
+                    }
+                }
+            }
+
             let is_new = context
                 .masternode_registry
                 .get(&masternode_ip)
@@ -4241,6 +4258,21 @@ impl MessageHandler {
                 return Ok(None);
             }
             // ── End AV25 early-drop ──────────────────────────────────────────
+
+            // Ghost-registration guard: banned nodes must not re-enter the registry
+            // via gossip relay from legitimate peers.
+            if let Some(blacklist) = &context.blacklist {
+                let bare_ip = masternode_ip.split(':').next().unwrap_or(&masternode_ip);
+                if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
+                    if let Some(reason) = blacklist.write().await.is_blacklisted(ban_ip) {
+                        tracing::debug!(
+                            "🚫 [{}] Skipping gossip registration of blacklisted Free-tier node {} ({})",
+                            self.direction, masternode_ip, reason
+                        );
+                        return Ok(None);
+                    }
+                }
+            }
 
             let is_new = context
                 .masternode_registry
