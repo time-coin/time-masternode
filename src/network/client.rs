@@ -394,10 +394,19 @@ impl NetworkClient {
                 }
             }
 
-            // PHASE 3: Periodic peer discovery with masternode priority
+            // PHASE 3: Periodic peer discovery with masternode priority.
+            // `priority_notify` is fired by `mark_inactive_on_disconnect` when a
+            // paid-tier node disconnects, so we wake immediately and reconnect instead
+            // of waiting up to 30 s for the next scheduled tick.
             let peer_discovery_interval = Duration::from_secs(30);
+            let priority_notify = masternode_registry.priority_reconnect_notify();
             loop {
-                sleep(peer_discovery_interval).await;
+                // Either wait for the regular 30-second interval OR wake immediately
+                // on a paid-tier disconnect signal from the registry.
+                let priority_wake = tokio::select! {
+                    _ = sleep(peer_discovery_interval) => false,
+                    _ = priority_notify.notified() => true,
+                };
 
                 // Clean up stale Connecting states (stuck >30s)
                 let stale = connection_manager.cleanup_stale_connecting(Duration::from_secs(30));
@@ -461,15 +470,25 @@ impl NetworkClient {
                         if connection_manager.is_reconnecting(mn_ip) {
                             continue;
                         }
-                        // Respect AI advice to avoid hammering offline nodes
-                        let advice = res.reconnection_ai.get_reconnection_advice(mn_ip, true);
-                        if !advice.should_attempt {
-                            tracing::debug!(
-                                "⏭️  [PHASE3-MN] Skipping {} (AI cooldown: {})",
-                                mn_ip,
-                                advice.reasoning
-                            );
-                            continue;
+                        // Respect AI advice to avoid hammering offline nodes.
+                        // Exception: when this iteration was triggered by a paid-tier
+                        // disconnect signal (priority_wake), bypass AI cooldown for
+                        // Bronze/Silver/Gold nodes so they reconnect in milliseconds
+                        // rather than being held back by backoff from a prior blip.
+                        let is_paid_tier = !matches!(
+                            mn_info.masternode.tier,
+                            MasternodeTier::Free
+                        );
+                        if !(priority_wake && is_paid_tier) {
+                            let advice = res.reconnection_ai.get_reconnection_advice(mn_ip, true);
+                            if !advice.should_attempt {
+                                tracing::debug!(
+                                    "⏭️  [PHASE3-MN] Skipping {} (AI cooldown: {})",
+                                    mn_ip,
+                                    advice.reasoning
+                                );
+                                continue;
+                            }
                         }
                         // Skip IPs that are currently blacklisted — avoids full TCP+TLS
                         // round-trip to banned subnets, which wastes tokio tasks + memory.

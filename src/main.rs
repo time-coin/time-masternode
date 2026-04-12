@@ -1455,6 +1455,11 @@ async fn main() {
                             }
                         }
 
+                        // Remove Free-tier nodes that have been offline for >300 s.
+                        // They are kept in the registry after disconnect for a grace
+                        // window; this call prunes the ones that never came back.
+                        health_registry.clean_stale_free_tier_nodes(300).await;
+
                         // If unhealthy, ensure inactive masternodes are in the peer
                         // discovery list. Actual reconnection is handled by Phase 3-MN
                         // in NetworkClient (runs every 30s, iterates all registered

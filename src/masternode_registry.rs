@@ -149,6 +149,15 @@ pub struct MasternodeInfo {
     /// REACHABILITY_GRACE_PERIOD_SECS before the reachability check is enforced.
     #[serde(skip)]
     pub first_seen_at: u64,
+
+    /// Unix timestamp of the last time this node was observed as active (connected).
+    /// Updated whenever is_active transitions to true.
+    /// Not persisted — starts at 0 after a daemon restart (no grace until node reconnects).
+    /// Used for the reward-eligibility grace period: a node that briefly disconnects
+    /// (e.g., due to a targeted attack) stays in the eligible pool for
+    /// ELIGIBILITY_GRACE_SECS so it doesn't lose a block reward from a momentary drop.
+    #[serde(skip)]
+    pub last_seen_at: u64,
 }
 
 /// Buffered sled write sent to the background writer task.
@@ -215,6 +224,9 @@ pub struct MasternodeRegistry {
     /// Prevents rapid re-registration within FREE_TIER_RECONNECT_COOLDOWN_SECS of removal.
     /// Also doubles as a dedup guard: concurrent disconnect tasks for the same IP skip the second one.
     free_tier_reconnect_cooldown: Arc<DashMap<String, u64>>,
+    /// Wakeup signal for the PHASE3 reconnection loop.  Fired when a paid-tier node
+    /// disconnects so PHASE3 reconnects in milliseconds instead of waiting up to 30s.
+    priority_reconnect_notify: Arc<tokio::sync::Notify>,
     /// Optional reference to the UTXO manager, used for collateral ownership verification.
     utxo_manager: Arc<RwLock<Option<Arc<crate::utxo_manager::UTXOStateManager>>>>,
     /// Sync-readable snapshot of active masternodes (is_active == true).
@@ -380,6 +392,7 @@ impl MasternodeRegistry {
             collateral_migration_counts: Arc::new(DashMap::new()),
             free_tier_subnet_counts: Arc::new(free_tier_subnet_counts),
             free_tier_reconnect_cooldown: Arc::new(DashMap::new()),
+            priority_reconnect_notify: Arc::new(tokio::sync::Notify::new()),
             utxo_manager: Arc::new(RwLock::new(None)),
             cached_active: parking_lot::RwLock::new(init_active),
             cached_all: parking_lot::RwLock::new(init_all),
@@ -390,6 +403,49 @@ impl MasternodeRegistry {
     /// can be verified during gossip registration without circular dependencies.
     pub async fn set_utxo_manager(&self, utxo_manager: Arc<crate::utxo_manager::UTXOStateManager>) {
         *self.utxo_manager.write().await = Some(utxo_manager);
+    }
+
+    /// Return the priority-reconnect notify handle so the NetworkClient can
+    /// call `notify_one()` from its PHASE3 select loop.
+    pub fn priority_reconnect_notify(&self) -> Arc<tokio::sync::Notify> {
+        self.priority_reconnect_notify.clone()
+    }
+
+    /// Remove inactive Free-tier nodes that have been offline longer than
+    /// `max_inactive_secs`.  Called periodically by the health-monitoring task
+    /// so stale Free-tier entries don't accumulate in the registry indefinitely.
+    pub async fn clean_stale_free_tier_nodes(&self, max_inactive_secs: u64) {
+        let now = Self::now();
+        let mut to_remove: Vec<String> = Vec::new();
+        {
+            let nodes = self.masternodes.read().await;
+            for (addr, info) in nodes.iter() {
+                if info.masternode.tier == crate::types::MasternodeTier::Free
+                    && !info.is_active
+                    && info.last_seen_at > 0
+                    && now.saturating_sub(info.last_seen_at) > max_inactive_secs
+                {
+                    to_remove.push(addr.clone());
+                }
+            }
+        }
+        if to_remove.is_empty() {
+            return;
+        }
+        let mut nodes = self.masternodes.write().await;
+        for addr in &to_remove {
+            nodes.remove(addr);
+            tracing::debug!(
+                "🧹 Removed stale inactive Free-tier node {} (offline >{}s)",
+                addr, max_inactive_secs
+            );
+        }
+        self.rebuild_node_caches(&nodes);
+        drop(nodes);
+        // Remove persisted entries
+        for addr in &to_remove {
+            self.sled_remove_bg(format!("masternode:{}", addr).into_bytes());
+        }
     }
 
     /// Record that a V4-proof eviction just occurred for `outpoint_key`
@@ -1310,6 +1366,7 @@ impl MasternodeRegistry {
             is_publicly_reachable: false, // Must pass reachability probe before earning rewards
             reachability_checked_at: 0,
             first_seen_at: now,
+            last_seen_at: if should_activate { now } else { 0 },
         };
 
         // Persist to disk
@@ -1471,14 +1528,22 @@ impl MasternodeRegistry {
         };
 
         if is_handshake && !has_collateral {
-            // Handshake-registered Free-tier nodes have no collateral stake and are
-            // considered transient visitors. Remove them entirely from the registry on
-            // disconnect so they cannot inflate the quorum weight denominator while absent.
-            masternodes.remove(address);
+            // Free-tier nodes: keep in registry with last_seen_at set so the
+            // ELIGIBILITY_GRACE_SECS window and clean_stale_free_tier_nodes() work correctly.
+            // Previously we removed them immediately, but that causes reward gaps when a
+            // legitimate node briefly disconnects (e.g., under a targeted disconnect attack).
+            {
+                let info = masternodes.get_mut(address).expect("checked above");
+                info.is_active = false;
+                info.last_seen_at = now;
+                if info.uptime_start > 0 {
+                    info.total_uptime += now - info.uptime_start;
+                }
+            }
             self.rebuild_node_caches(&masternodes);
             drop(masternodes);
 
-            // AV25: Decrement the per-subnet Free-tier count when the node is removed.
+            // AV25: Decrement the per-subnet Free-tier count when the node goes inactive.
             let subnet = Self::free_tier_subnet(address);
             if let Some(mut c) = self.free_tier_subnet_counts.get_mut(&subnet) {
                 *c = c.saturating_sub(1);
@@ -1489,12 +1554,11 @@ impl MasternodeRegistry {
                 .insert(address.to_string(), now);
 
             tracing::debug!(
-                "🔌 Masternode {} removed on disconnect (transient Free-tier node)",
+                "🔌 Masternode {} marked inactive on disconnect (Free-tier, kept in registry for grace period)",
                 address
             );
 
-            // Broadcast removal so peers update their active sets immediately.
-            // Write lock is already dropped above; no lock held during this await.
+            // Broadcast inactive so peers update their active sets immediately.
             if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
                 let _ = tx.send(
                     crate::network::message::NetworkMessage::MasternodeInactive {
@@ -1503,32 +1567,34 @@ impl MasternodeRegistry {
                     },
                 );
             }
-
-            // Remove from disk via background writer — avoids sync sled I/O on the
-            // tokio thread when many free-tier nodes disconnect simultaneously.
-            let key = format!("masternode:{}", address);
-            self.sled_remove_bg(key.into_bytes());
         } else if is_active {
             // On-chain registered nodes (Bronze+) paid collateral and may reconnect.
             // Mark inactive so they are excluded from vote weight until they return.
-            let info = masternodes.get_mut(address).expect("checked above");
-            info.is_active = false;
-            if info.uptime_start > 0 {
-                info.total_uptime += now - info.uptime_start;
+            {
+                let info = masternodes.get_mut(address).expect("checked above");
+                info.is_active = false;
+                info.last_seen_at = now;
+                if info.uptime_start > 0 {
+                    info.total_uptime += now - info.uptime_start;
+                }
+
+                warn!(
+                    "⚠️  Masternode {} marked inactive (connection lost) - broadcasting to network",
+                    address
+                );
+
+                // Persist while still holding the write lock (fast — bg channel).
+                self.store_masternode(address, info)?;
             }
-
-            warn!(
-                "⚠️  Masternode {} marked inactive (connection lost) - broadcasting to network",
-                address
-            );
-
-            // Persist and rebuild caches while still holding the write lock (fast — bg channel).
-            self.store_masternode(address, info)?;
             self.rebuild_node_caches(&masternodes);
 
             // Drop the write lock BEFORE awaiting on broadcast_tx so we don't hold
             // masternodes.write() across an async boundary.
             drop(masternodes);
+
+            // Fire the PHASE3 priority-reconnect signal so the reconnect loop wakes
+            // immediately instead of waiting up to 30 s for the next PHASE3 tick.
+            self.priority_reconnect_notify.notify_one();
 
             if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
                 let _ = tx.send(
@@ -1742,15 +1808,26 @@ impl MasternodeRegistry {
                 .any(|entry| now.saturating_sub(*entry.value()) < free_active_window_secs)
         };
 
+        // Grace window for paid-tier nodes: a recently-disconnected Bronze/Silver/Gold
+        // node stays eligible for rewards for 90 seconds after the connection dropped.
+        // This prevents a targeted "disconnect to steal reward" attack from succeeding
+        // if the victim reconnects within one block slot.
+        const ELIGIBILITY_GRACE_SECS: u64 = 90;
+        let is_within_grace = |info: &MasternodeInfo| -> bool {
+            !matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
+                && info.last_seen_at > 0
+                && now.saturating_sub(info.last_seen_at) < ELIGIBILITY_GRACE_SECS
+        };
+
         // Pass 1: full filters (normal path).
-        // Free-tier uses the extended activity window; paid tiers use is_active as-is.
+        // Free-tier uses the extended activity window; paid tiers use is_active or grace window.
         let pass1: Vec<MasternodeInfo> = nodes
             .values()
             .filter(|info| {
                 let active = if matches!(info.masternode.tier, crate::types::MasternodeTier::Free) {
                     is_free_active(info)
                 } else {
-                    info.is_active
+                    info.is_active || is_within_grace(info)
                 };
                 active && is_reachable(info) && is_mature(info)
             })
@@ -1763,7 +1840,7 @@ impl MasternodeRegistry {
         // Pass 2: drop reachability requirement (handles NAT-heavy networks).
         let pass2: Vec<MasternodeInfo> = nodes
             .values()
-            .filter(|info| info.is_active && is_mature(info))
+            .filter(|info| (info.is_active || is_within_grace(info)) && is_mature(info))
             .cloned()
             .collect();
         if pass2.len() >= MIN_VIABLE_POOL {
@@ -1780,7 +1857,7 @@ impl MasternodeRegistry {
         // in the block validator still prevents single-node reward monopolization.
         let pass3: Vec<MasternodeInfo> = nodes
             .values()
-            .filter(|info| info.is_active)
+            .filter(|info| info.is_active || is_within_grace(info))
             .cloned()
             .collect();
         if pass3.len() > pass1.len() {
@@ -3869,6 +3946,7 @@ impl Clone for MasternodeRegistry {
             collateral_migration_counts: self.collateral_migration_counts.clone(),
             free_tier_subnet_counts: self.free_tier_subnet_counts.clone(),
             free_tier_reconnect_cooldown: self.free_tier_reconnect_cooldown.clone(),
+            priority_reconnect_notify: self.priority_reconnect_notify.clone(),
             utxo_manager: self.utxo_manager.clone(),
             cached_active: parking_lot::RwLock::new(self.cached_active.read().clone()),
             cached_all: parking_lot::RwLock::new(self.cached_all.read().clone()),
