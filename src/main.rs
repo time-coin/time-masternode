@@ -1196,7 +1196,31 @@ async fn main() {
     // Register this node if running as masternode
     let masternode_address = masternode_info.as_ref().map(|mn| mn.address.clone());
 
-    if let Some(mn) = masternode_info {
+    if let Some(mut mn) = masternode_info {
+        // If tier auto-detection failed at startup (UTXO not in local storage), try to
+        // recover the correct tier from the registry DB that was loaded from disk.
+        // This handles collateral UTXOs that are spent/archived in the UTXO set but
+        // were previously anchored via an on-chain MasternodeReg transaction.
+        if mn.tier == types::MasternodeTier::Free {
+            if let Some(ref outpoint) = mn.collateral_outpoint.clone() {
+                if let Some(existing) = registry.get(&mn.address).await {
+                    let existing_tier = existing.masternode.tier;
+                    if existing_tier != types::MasternodeTier::Free
+                        && existing.masternode.collateral_outpoint.as_ref() == Some(outpoint)
+                    {
+                        tracing::info!(
+                            "✓ Recovered {:?} tier from on-disk registry for {} \
+                             (collateral UTXO unavailable at startup — using persisted registration)",
+                            existing_tier,
+                            mn.address
+                        );
+                        mn.tier = existing_tier;
+                        mn.collateral = existing_tier.collateral();
+                    }
+                }
+            }
+        }
+
         match registry
             .register(mn.clone(), mn.wallet_address.clone())
             .await
