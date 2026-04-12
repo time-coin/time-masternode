@@ -1115,8 +1115,14 @@ impl MasternodeRegistry {
                 // do that. This closes the attack where a remote peer floods V4 announces
                 // claiming a legitimate node's IP with different collateral outpoints,
                 // causing the real on-chain collateral to be queued for unlock.
+                //
+                // V3 announcements (old code, no collateral_outpoint field) arrive with
+                // new_outpoint = None. These are NOT an attack — the node is simply
+                // re-announcing without proof. The None → preserve-existing path at line
+                // 1149 handles them correctly; we must not reject them here.
                 if old_outpoint != new_outpoint
                     && old_outpoint.is_some()
+                    && new_outpoint.is_some()
                     && matches!(existing.registration_source, RegistrationSource::OnChain(_))
                 {
                     static CHURN_WARN: std::sync::OnceLock<

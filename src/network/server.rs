@@ -1105,9 +1105,13 @@ async fn handle_peer(
                         } else {
                             tracing::debug!("🔌 Connection from {} ended before handshake: {}", peer.addr, e);
                         }
-                        // Sending a frame with an oversized length header is a trivial
-                        // 4-byte denial-of-service: penalise so repeat offenders get banned.
-                        if e.contains("Frame too large") {
+                        // Pre-handshake oversized frame: trivial 4-byte DoS — penalise.
+                        // Post-handshake: the peer completed our protocol handshake, so it is
+                        // a legitimate TIME node. A large frame after handshake most likely
+                        // means the peer is running older code with different frame-size limits
+                        // or a TLS/plaintext framing mismatch.  Recording a violation would
+                        // ban a peer we need for sync/fork-resolution.
+                        if e.contains("Frame too large") && !handshake_done {
                             blacklist.write().await.record_violation(
                                 ip,
                                 &format!("Oversized frame header: {}", e),

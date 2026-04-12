@@ -8841,6 +8841,21 @@ impl Blockchain {
             hex::encode(&our_hash[..8])
         );
 
+        // Pick a random consensus peer to distribute fork-resolution load.
+        // Always using index 0 causes repeated failures if that peer has a bad
+        // connection; rotating means the next attempt tries a different peer.
+        let peer_pick_idx = {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos() as usize;
+            if consensus_peers.is_empty() {
+                0
+            } else {
+                nanos % consensus_peers.len()
+            }
+        };
+
         // Case 1: Longest chain is longer than us - sync to it
         if consensus_height > our_height {
             tracing::debug!(
@@ -8848,9 +8863,9 @@ impl Blockchain {
                 consensus_height,
                 our_height,
                 consensus_peers.len(),
-                consensus_peers[0]
+                consensus_peers[peer_pick_idx]
             );
-            return Some((consensus_height, consensus_peers[0].clone()));
+            return Some((consensus_height, consensus_peers[peer_pick_idx].clone()));
         }
 
         // Case 2: Same height but different hash - fork at same height!
@@ -8925,7 +8940,7 @@ impl Blockchain {
                 hex::encode(&our_hash[..8]),
                 hex::encode(&consensus_hash[..8]),
             );
-            return Some((consensus_height, consensus_peers[0].clone()));
+            return Some((consensus_height, consensus_peers[peer_pick_idx].clone()));
         }
 
         // Case 3: We're ahead of all known peers
@@ -8970,12 +8985,12 @@ impl Blockchain {
                         e,
                         consensus_height
                     );
-                    return Some((consensus_height, consensus_peers[0].clone()));
+                    return Some((consensus_height, consensus_peers[peer_pick_idx].clone()));
                 }
                 Err(e) => {
                     tracing::error!("❌ Failed to verify our top block {}: {}", our_height, e);
                     // On unexpected error, sync to consensus to be safe
-                    return Some((consensus_height, consensus_peers[0].clone()));
+                    return Some((consensus_height, consensus_peers[peer_pick_idx].clone()));
                 }
             }
         }
