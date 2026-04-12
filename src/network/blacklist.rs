@@ -385,8 +385,9 @@ impl IPBlacklist {
         *last_time = now;
 
         let count_snap = *count;
-        tracing::warn!("⚠️  Violation #{} from {}: {}", count_snap, ip, reason);
 
+        // Only log at ban-trigger thresholds to avoid journal spam.
+        // Per-message violation logging is done by the caller where context is richer.
         // Persist updated violation count
         self.persist_violation(ip, count_snap);
 
@@ -395,23 +396,23 @@ impl IPBlacklist {
             3 => {
                 // 3rd violation: 1 minute ban
                 self.add_temp_ban(ip, Duration::from_secs(60), reason);
-                tracing::warn!("🚫 Auto-banned {} for 1 minute (3 violations)", ip);
+                tracing::warn!("🚫 Auto-banned {} for 1 minute (3 violations: {})", ip, reason);
                 true
             }
             5 => {
                 // 5th violation: 5 minute ban
                 self.add_temp_ban(ip, Duration::from_secs(300), reason);
-                tracing::warn!("🚫 Auto-banned {} for 5 minutes (5 violations)", ip);
+                tracing::warn!("🚫 Auto-banned {} for 5 minutes (5 violations: {})", ip, reason);
                 true
             }
             10 => {
                 // 10th violation: permanent ban
                 self.add_permanent_ban(ip, reason);
-                tracing::warn!("🚫 PERMANENTLY BANNED {} (10 violations)", ip);
+                tracing::warn!("🚫 PERMANENTLY BANNED {} (10 violations: {})", ip, reason);
                 true
             }
             1 | 2 | 4 | 6..=9 => {
-                // Warning only, don't disconnect yet
+                tracing::debug!("⚠️  Violation #{} from {}: {}", count_snap, ip, reason);
                 false
             }
             _ => {

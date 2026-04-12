@@ -1321,6 +1321,19 @@ async fn handle_peer(
                             tracing::debug!("📦 Parsed message type from {}: {:?}", peer.addr, std::mem::discriminant(&msg));
 
                             // Phase 2.2: Rate limiting and blacklist enforcement
+                            //
+                            // Per-connection flood counter: tracks how many messages on THIS
+                            // connection have been dropped by the rate limiter.  Used to:
+                            //   • Suppress duplicate log lines (only log the first in a burst,
+                            //     then summarize with a "suppressed N" log every 60 s).
+                            //   • Escalate to `record_severe_violation` when the connection is
+                            //     clearly being used for DoS rather than normal re-registration.
+                            //
+                            // (declared here so the macro can capture it by &mut ref)
+                            let mut rl_drop_count: u32 = 0;
+                            let mut rl_last_log = std::time::Instant::now()
+                                - std::time::Duration::from_secs(61);
+
                             // Define helper macro for rate limit checking with auto-ban
                             macro_rules! check_rate_limit {
                                 ($msg_type:expr) => {{
@@ -1328,14 +1341,47 @@ async fn handle_peer(
                                     let mut blacklist_guard = blacklist.write().await;
 
                                     if !limiter.check($msg_type, &ip_str) {
-                                        tracing::warn!("⚠️  Rate limit exceeded for {} from {}: {}", $msg_type, peer.addr, ip_str);
+                                        rl_drop_count += 1;
 
-                                        // Record violation and check if should be banned
-                                        let should_ban = blacklist_guard.record_violation(ip,
-                                            &format!("Rate limit exceeded: {}", $msg_type));
+                                        // Log at most once per 60 s per connection to avoid
+                                        // flooding the journal with thousands of identical lines.
+                                        let now = std::time::Instant::now();
+                                        if now.duration_since(rl_last_log).as_secs() >= 60
+                                            || rl_drop_count == 1
+                                        {
+                                            if rl_drop_count > 1 {
+                                                tracing::warn!(
+                                                    "⚠️  Rate limit exceeded for {} from {} \
+                                                     ({} msgs suppressed in last 60s)",
+                                                    $msg_type, peer.addr, rl_drop_count - 1
+                                                );
+                                            } else {
+                                                tracing::warn!(
+                                                    "⚠️  Rate limit exceeded for {} from {}",
+                                                    $msg_type, peer.addr
+                                                );
+                                            }
+                                            rl_last_log = now;
+                                            rl_drop_count = 0;
+                                        }
+
+                                        // After 10 dropped messages on a single connection,
+                                        // this is a mass-flood, not a reconnect race.
+                                        // Use record_severe_violation to bypass the whitelist
+                                        // exemption and escalate the ban faster.
+                                        let should_ban = if rl_drop_count >= 10 {
+                                            blacklist_guard.record_severe_violation(ip,
+                                                &format!("Mass flood: {} ({}+ msgs dropped)", $msg_type, rl_drop_count))
+                                        } else {
+                                            blacklist_guard.record_violation(ip,
+                                                &format!("Rate limit exceeded: {}", $msg_type))
+                                        };
 
                                         if should_ban {
-                                            tracing::warn!("🚫 Disconnecting {} due to rate limit violations", peer.addr);
+                                            tracing::warn!(
+                                                "🚫 Disconnecting {} due to rate limit flood ({} dropped)",
+                                                peer.addr, rl_drop_count
+                                            );
                                             drop(blacklist_guard);
                                             drop(limiter);
                                             peer_registry.kick_peer(&ip_str).await;
