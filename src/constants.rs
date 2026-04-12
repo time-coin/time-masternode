@@ -102,6 +102,22 @@ pub mod blockchain {
     /// that gossip-squats a UTXO it doesn't own cannot redirect rewards to itself.
     /// Free-tier nodes (no collateral) are unaffected.
     pub const COLLATERAL_REWARD_ENFORCEMENT_HEIGHT: u64 = 750;
+
+    /// Fork height at which the improved fairness-rotation formula activates (v2).
+    ///
+    /// Before this height: fairness_bonus = blocks_without_reward / 10
+    ///   → nodes paid 0–9 blocks ago all tie (bonus=0); the alphabetically-first IP
+    ///     wins every tiebreak, allowing the same node to win dozens of consecutive
+    ///     times when all nodes have blocks_without_reward < 10.
+    ///
+    /// At and after this height: fairness_bonus = blocks_without_reward (direct)
+    ///   → a node paid 1 block ago has bonus=1, a node paid 5 blocks ago has bonus=5.
+    ///     The highest-waiting node wins; recently-paid nodes go to the back of the
+    ///     queue immediately instead of only after 10 blocks.
+    ///
+    /// Both the block producer and the validator must apply the same formula.
+    /// All mainnet nodes must upgrade before this height to avoid a consensus split.
+    pub const FAIRNESS_V2_HEIGHT: u64 = 1730;
 }
 
 /// Network protocol constants

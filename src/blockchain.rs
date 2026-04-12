@@ -3688,6 +3688,8 @@ impl Blockchain {
             // ── All-Free mode ─────────────────────────────────────────────────
             // All 95 TIME (total_reward) split equally among up to 25 free nodes,
             // sorted by fairness bonus so nodes waiting longest are paid first.
+            let use_v2_fairness = next_height
+                >= crate::constants::blockchain::FAIRNESS_V2_HEIGHT;
             let mut free_nodes: Vec<_> = eligible_pool
                 .iter()
                 .map(|mn| {
@@ -3695,7 +3697,14 @@ impl Blockchain {
                         .get(&mn.masternode.address)
                         .copied()
                         .unwrap_or(0);
-                    let fairness_bonus = blocks_without / 10;
+                    // v2: direct counter so recently-paid nodes drop to the back
+                    // immediately.  v1 divisor of /10 created a 10-block dead zone
+                    // where all nodes tied and the alphabetically-first IP always won.
+                    let fairness_bonus = if use_v2_fairness {
+                        blocks_without
+                    } else {
+                        blocks_without / 10
+                    };
                     (mn, fairness_bonus)
                 })
                 .collect();
@@ -3773,6 +3782,8 @@ impl Blockchain {
             for tier in &tiers {
                 let tier_pool = tier.pool_allocation();
 
+                let use_v2_fairness = next_height
+                    >= crate::constants::blockchain::FAIRNESS_V2_HEIGHT;
                 let mut tier_nodes: Vec<_> = eligible_pool
                     .iter()
                     .filter(|mn| mn.masternode.tier == *tier)
@@ -3781,7 +3792,11 @@ impl Blockchain {
                             .get(&mn.masternode.address)
                             .copied()
                             .unwrap_or(0);
-                        let fairness_bonus = blocks_without / 10;
+                        let fairness_bonus = if use_v2_fairness {
+                            blocks_without
+                        } else {
+                            blocks_without / 10
+                        };
                         (mn, fairness_bonus)
                     })
                     .collect();
@@ -6760,7 +6775,7 @@ impl Blockchain {
                 }
 
                 // ── Step 3b: winner identity check (AV30 — pool self-award) ─────────
-                // Verify the correct node won the tier pool by fairness rotation.
+                // Verify the correct node(s) won the tier pool by fairness rotation.
                 // Uses bitmap-decoded candidates + on-chain blocks_without_reward history —
                 // both deterministic across all validators with no gossip dependency.
                 //
@@ -6768,6 +6783,20 @@ impl Blockchain {
                 // bitmap nodes for this tier.  If it doesn't, our bitmap decoding has
                 // drifted from the producer's sort order (Free-tier churn), and we cannot
                 // trust our expected-winner calculation.
+                //
+                // FAIRNESS_V2_HEIGHT: use direct blocks_without_reward counter instead
+                // of /10 to eliminate the 10-block dead zone where all recently-paid
+                // nodes tied and the alphabetically-first IP always won.
+                let use_v2_fairness = block.header.height
+                    >= crate::constants::blockchain::FAIRNESS_V2_HEIGHT;
+                let bonus_for = |blocks_without: u64| -> u64 {
+                    if use_v2_fairness {
+                        blocks_without
+                    } else {
+                        blocks_without / 10
+                    }
+                };
+
                 if !matches!(tier, MasternodeTier::Free) {
                     if let Some(actual_wallet) = tier_winner.get(tier) {
                         let tier_candidates: Vec<_> = active_bitmap_nodes
@@ -6803,12 +6832,11 @@ impl Blockchain {
                             let mut ranked: Vec<_> = tier_candidates
                                 .into_iter()
                                 .map(|info| {
-                                    let bonus = fairness_map
+                                    let raw = fairness_map
                                         .get(&info.masternode.address)
                                         .copied()
-                                        .unwrap_or(0)
-                                        / 10;
-                                    (info, bonus)
+                                        .unwrap_or(0);
+                                    (info, bonus_for(raw))
                                 })
                                 .collect();
                             ranked.sort_by(|a, b| {
@@ -6863,6 +6891,101 @@ impl Blockchain {
                                         expected_bonus * 10,
                                         actual_wallet,
                                     ));
+                                }
+                            }
+                        }
+                    }
+                } else if use_v2_fairness {
+                    // ── Step 3b-Free: free-tier recipient ordering check ─────────────
+                    // With v2 fairness active, verify that no recently-paid free-tier
+                    // address (blocks_without_reward == 0) appears in the reward list
+                    // while other free-tier bitmap nodes have blocks_without_reward > 0.
+                    //
+                    // This closes the "producer excludes other free-tier nodes" attack:
+                    // a producer running modified code can omit other free-tier nodes
+                    // from their eligible pool, paying only their own node.  With this
+                    // check, if the bitmap shows node B has waited longer than node A,
+                    // a block that pays A but not B is rejected.
+                    //
+                    // Guard: only enforce when all recipients appear in the bitmap
+                    // (bitmap drift would give a false positive if we see nodes the
+                    // producer didn't — check below ensures we only reject when we
+                    // are confident about the ordering).
+                    let free_tier_recipients: std::collections::HashSet<&str> = block
+                        .masternode_rewards
+                        .iter()
+                        .filter(|(_, amt)| *amt > 0)
+                        .filter_map(|(wallet, _)| {
+                            // Only include addresses we know are Free-tier in the bitmap
+                            active_bitmap_nodes.iter().find(|info| {
+                                info.masternode.tier == MasternodeTier::Free && {
+                                    let w = if !info.reward_address.is_empty() {
+                                        info.reward_address.as_str()
+                                    } else {
+                                        info.masternode.wallet_address.as_str()
+                                    };
+                                    w == wallet.as_str()
+                                }
+                            }).map(|_| wallet.as_str())
+                        })
+                        .collect();
+
+                    if !free_tier_recipients.is_empty() {
+                        // Compute the fairness-sorted free-tier candidate list from the bitmap.
+                        let mut free_candidates: Vec<_> = active_bitmap_nodes
+                            .iter()
+                            .filter(|info| info.masternode.tier == MasternodeTier::Free)
+                            .map(|info| {
+                                let raw = fairness_map
+                                    .get(&info.masternode.address)
+                                    .copied()
+                                    .unwrap_or(0);
+                                (info, raw) // raw counter (v2 direct)
+                            })
+                            .collect();
+                        free_candidates.sort_by(|a, b| {
+                            b.1.cmp(&a.1).then_with(|| {
+                                a.0.masternode.address.cmp(&b.0.masternode.address)
+                            })
+                        });
+
+                        let n = free_tier_recipients.len().min(MAX_FREE_TIER_RECIPIENTS);
+                        // Check if any recipient has blocks_without_reward == 0
+                        // while a non-recipient in the same bitmap has > 0.
+                        let max_waiting = free_candidates.iter().map(|(_, r)| *r).max().unwrap_or(0);
+                        if max_waiting > 0 {
+                            for wallet in &free_tier_recipients {
+                                let recipient_raw = free_candidates
+                                    .iter()
+                                    .find(|(info, _)| {
+                                        let w = if !info.reward_address.is_empty() {
+                                            info.reward_address.as_str()
+                                        } else {
+                                            info.masternode.wallet_address.as_str()
+                                        };
+                                        w == *wallet
+                                    })
+                                    .map(|(_, r)| *r)
+                                    .unwrap_or(0);
+
+                                if recipient_raw == 0 {
+                                    // This wallet was paid last block (blocks_without_reward=0).
+                                    // Check if it should have been skipped in favour of waiting nodes.
+                                    // Only reject when there are MORE waiting candidates than paid recipients
+                                    // (i.e., at least one waiting node was left unpaid).
+                                    let waiting_count = free_candidates
+                                        .iter()
+                                        .filter(|(_, r)| *r > 0)
+                                        .count();
+                                    if waiting_count >= n {
+                                        return Err(format!(
+                                            "Block {} Free-tier fairness violation: {} was paid \
+                                             (blocks_without_reward=0) while {} other node(s) with \
+                                             higher blocks_without_reward were skipped — \
+                                             possible free-tier pool monopolisation",
+                                            block.header.height, wallet, waiting_count,
+                                        ));
+                                    }
                                 }
                             }
                         }

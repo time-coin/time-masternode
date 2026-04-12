@@ -978,7 +978,7 @@ async fn handle_peer(
                 // Never record violations against our own IP — self-connections (the node
                 // briefly attempting to connect to itself via the peer list) must not
                 // cause the node to permanently ban itself.
-                let is_self = local_ip.as_deref().map_or(false, |l| l == ip_str);
+                let is_self = local_ip.as_deref().is_some_and(|l| l == ip_str);
                 if !is_self {
                     // Use the TLS-specific counter: much higher threshold, never permanent.
                     // TLS mode mismatches are operator config errors, not attacks — using
