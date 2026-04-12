@@ -31,9 +31,7 @@ const RATE_LIMIT_WINDOW_SECS: i64 = 60; // Rate limit window (1 minute)
 const MAX_REQUESTS_PER_MINUTE: u32 = 100; // Max requests per peer per minute
 const MIN_MASTERNODE_STAKE: u64 = 1_000 * 100_000_000; // 1000 TIME in satoshis
 
-/// TODO: Implement reputation-based peer banning in Phase 2 enhancement
 const REPUTATION_THRESHOLD_BAN: i32 = -50; // Ban peers below this score
-/// TODO: Apply penalty when detecting peer misbehavior (invalid blocks, spam, etc.)
 const REPUTATION_PENALTY_MISBEHAVIOR: i32 = -20; // Penalty for misbehaving peer
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,19 +325,6 @@ impl PeerManager {
             .iter()
             .filter(|p| p.is_masternode)
             .count()
-    }
-
-    /// Broadcast a message to all connected peers (deprecated - use NetworkServer broadcast instead)
-    #[allow(dead_code)]
-    pub async fn broadcast(&self, msg: crate::network::message::NetworkMessage) {
-        // This would be implemented by the network layer
-        // For now, we'll just log it
-        tracing::debug!(
-            "Would broadcast message to {} peers",
-            self.peers.read().await.len()
-        );
-        // TODO: Implement actual broadcast through network connections
-        let _ = msg; // Suppress unused warning
     }
 
     /// Request peer list from a connected peer

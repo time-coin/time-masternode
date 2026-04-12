@@ -9485,7 +9485,10 @@ impl Blockchain {
                 );
 
                 // Use AI fork resolver to make intelligent decision
-                let peer_tip_block = all_blocks.iter().max_by_key(|b| b.header.height).unwrap();
+                let peer_tip_block = match all_blocks.iter().max_by_key(|b| b.header.height) {
+                    Some(b) => b,
+                    None => return Ok(()), // no peer blocks — nothing to resolve
+                };
                 let peer_tip_hash = peer_tip_block.hash();
                 let our_tip_hash = self.get_block_hash(our_height)?;
 

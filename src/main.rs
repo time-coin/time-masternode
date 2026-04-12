@@ -1221,245 +1221,36 @@ async fn main() {
             }
         }
 
-        match registry
+        // Try registration; on squatter conflict, evict and retry once.
+        let registration_ok = match registry
             .register(mn.clone(), mn.wallet_address.clone())
             .await
         {
-            Ok(()) => {
-                // Mark this as our local masternode
-                registry.set_local_masternode(mn.address.clone()).await;
-
-                // Local masternode must be OnChain so it persists across
-                // peer disconnects (Handshake nodes are removed on disconnect).
-                if mn.tier != types::MasternodeTier::Free {
-                    let _ = registry
-                        .set_registration_source(
-                            &mn.address,
-                            crate::masternode_registry::RegistrationSource::OnChain(
-                                blockchain.get_height(),
-                            ),
-                        )
-                        .await;
-                }
-
-                // Store empty certificate in registry (certificate system removed)
-                registry.set_local_certificate([0u8; 64]).await;
-
-                // Set signing key: use masternodeprivkey from time.conf if provided,
-                // otherwise fall back to the wallet's auto-generated key
-                let signing_key = if let Some(ref mn_key) = masternode_signing_key {
-                    tracing::info!("✓ Using masternodeprivkey for consensus signing");
-                    mn_key.clone()
-                } else {
-                    tracing::info!("✓ Using wallet key for consensus signing (no masternodeprivkey in time.conf)");
-                    wallet.signing_key().clone()
-                };
-                if let Err(e) =
-                    consensus_engine.set_identity(mn.address.clone(), signing_key.clone())
-                {
-                    eprintln!("⚠️ Failed to set consensus identity: {}", e);
-                }
-
-                // Always set the wallet key for transaction signing.
-                // The identity key (above) may be masternodeprivkey, which is only used
-                // for consensus operations (votes, proofs, block signing).
-                // Transaction inputs must be signed with the wallet key so the derived
-                // address matches the UTXOs' script_pubkey.
-                if let Err(e) =
-                    consensus_engine.set_wallet_signing_key(wallet.signing_key().clone())
-                {
-                    eprintln!("⚠️ Failed to set wallet signing key: {}", e);
-                }
-
-                // Pre-seed the pubkey cache with our own wallet address so that
-                // self-sends (consolidation, merge) can encrypt memos immediately
-                // on a freshly started node without waiting for a prior transaction.
-                consensus_engine.utxo_manager.register_pubkey(
-                    &mn.wallet_address,
-                    wallet.signing_key().verifying_key().to_bytes(),
-                );
-
-                tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
-                tracing::info!("✓ Consensus engine identity configured with wallet key");
-
-                // Lock collateral UTXO so it shows as locked in wallet balance
-                if mn.tier != types::MasternodeTier::Free {
-                    if let Some(ref outpoint) = mn.collateral_outpoint {
-                        let lock_height = blockchain.get_height();
-                        if let Err(e) = consensus_engine.utxo_manager.lock_local_collateral(
-                            outpoint.clone(),
-                            mn.address.clone(),
-                            lock_height,
-                            mn.tier.collateral(),
-                        ) {
-                            tracing::warn!("⚠️ Failed to lock local collateral UTXO: {:?}", e);
-                        } else {
-                            tracing::info!(
-                                "🔒 Locked collateral UTXO for {} tier",
-                                format!("{:?}", mn.tier)
-                            );
-                        }
-                    }
-                }
-
-                // Rebuild collateral locks for ALL known masternodes (not just local)
-                // This restores in-memory locks lost across restarts
-                {
-                    let all_masternodes = registry.list_all().await;
-                    let lock_height = blockchain.get_height();
-                    let entries: Vec<_> = all_masternodes
-                        .iter()
-                        .filter(|info| info.masternode.address != mn.address) // Skip local (already locked above)
-                        .filter(|info| {
-                            // Don't re-lock outpoints we just released as stale —
-                            // old registry entries can otherwise undo the stale-release.
-                            !info
-                                .masternode
-                                .collateral_outpoint
-                                .as_ref()
-                                .map(|op| stale_local_outpoints.contains(op))
-                                .unwrap_or(false)
-                        })
-                        .filter_map(|info| {
-                            info.masternode.collateral_outpoint.as_ref().map(|op| {
-                                (
-                                    op.clone(),
-                                    info.masternode.address.clone(),
-                                    lock_height,
-                                    info.masternode.tier.collateral(),
-                                )
-                            })
-                        })
-                        .collect();
-                    if !entries.is_empty() {
-                        consensus_engine
-                            .utxo_manager
-                            .rebuild_collateral_locks(entries);
-                    }
-                }
-
-                // Broadcast masternode announcement will happen after initial sync completes
-                // (see announcement task below)
-            }
+            Ok(()) => true,
             Err(crate::masternode_registry::RegistryError::CollateralAlreadyLocked) => {
                 // A gossip squatter holds our collateral in the local registry.
-                // We know this collateral belongs to us (UTXO scan confirmed it).
-                // Evict the squatter now so we show up correctly in the local registry
-                // and the dashboard, then broadcast a V4 proof to claim it on peers.
-                let squatter_addr = if let Some(ref outpoint) = mn.collateral_outpoint {
-                    registry.find_holder_of_outpoint(outpoint).await
-                } else {
-                    None
-                };
-
-                if let Some(ref sq) = squatter_addr {
-                    tracing::warn!(
-                        "🛡️ Evicting gossip squatter {} from local registry (collateral belongs to us)",
-                        sq
-                    );
-                    let _ = registry.unregister(sq).await;
+                // Evict the squatter so we show up correctly in the local registry
+                // and dashboard, then broadcast a V4 proof to claim it on peers.
+                if let Some(ref outpoint) = mn.collateral_outpoint {
+                    if let Some(sq) = registry.find_holder_of_outpoint(outpoint).await {
+                        tracing::warn!(
+                            "🛡️ Evicting gossip squatter {} from local registry (collateral belongs to us)",
+                            sq
+                        );
+                        let _ = registry.unregister(&sq).await;
+                    }
                 }
+                // Clear any stale self-entry (e.g. from a previous collateral migration).
+                // Safe: we're about to immediately re-register with the current outpoint.
+                let _ = registry.unregister(&mn.address).await;
 
-                // Clear any stale registry entry for our own IP (e.g., from a previous
-                // collateral migration that was never cleaned up).  Without this, the
-                // Collateral-Churn guard in register() sees our IP already on-chain with a
-                // *different* outpoint and blocks the re-registration.  It's safe to remove
-                // our own stale entry here because we're about to immediately re-register
-                // with the current conf outpoint, and reconstruct_reward_counters() will
-                // rebuild the in-memory counters from blockchain state afterwards.
-                let _ = registry.unregister(&mn.address).await; // ok if NotFound
-
-                // Re-register — squatter and its canonical anchor are now gone
                 match registry
                     .register(mn.clone(), mn.wallet_address.clone())
                     .await
                 {
                     Ok(_) => {
                         tracing::info!("✅ Local masternode re-registered after evicting squatter");
-                        registry.set_local_masternode(mn.address.clone()).await;
-
-                        // Mark as OnChain so it persists across peer disconnects
-                        if mn.tier != types::MasternodeTier::Free {
-                            let _ = registry
-                                .set_registration_source(
-                                    &mn.address,
-                                    crate::masternode_registry::RegistrationSource::OnChain(
-                                        blockchain.get_height(),
-                                    ),
-                                )
-                                .await;
-                        }
-
-                        registry.set_local_certificate([0u8; 64]).await;
-
-                        // Configure consensus identity (same logic as normal Ok path)
-                        let signing_key = if let Some(ref mn_key) = masternode_signing_key {
-                            mn_key.clone()
-                        } else {
-                            wallet.signing_key().clone()
-                        };
-                        if let Err(e) =
-                            consensus_engine.set_identity(mn.address.clone(), signing_key)
-                        {
-                            eprintln!("⚠️ Failed to set consensus identity: {}", e);
-                        }
-                        if let Err(e) =
-                            consensus_engine.set_wallet_signing_key(wallet.signing_key().clone())
-                        {
-                            eprintln!("⚠️ Failed to set wallet signing key: {}", e);
-                        }
-                        consensus_engine.utxo_manager.register_pubkey(
-                            &mn.wallet_address,
-                            wallet.signing_key().verifying_key().to_bytes(),
-                        );
-
-                        // Lock collateral UTXO so it shows as locked in wallet balance
-                        if mn.tier != types::MasternodeTier::Free {
-                            if let Some(ref outpoint) = mn.collateral_outpoint {
-                                let lock_height = blockchain.get_height();
-                                if let Err(e) = consensus_engine.utxo_manager.lock_local_collateral(
-                                    outpoint.clone(),
-                                    mn.address.clone(),
-                                    lock_height,
-                                    mn.tier.collateral(),
-                                ) {
-                                    tracing::warn!(
-                                        "⚠️ Failed to lock local collateral UTXO: {:?}",
-                                        e
-                                    );
-                                } else {
-                                    tracing::info!(
-                                        "🔒 Locked collateral UTXO for {:?} tier",
-                                        mn.tier
-                                    );
-                                }
-                            }
-                        }
-
-                        // Rebuild collateral locks for all known masternodes
-                        {
-                            let all_masternodes = registry.list_all().await;
-                            let lock_height = blockchain.get_height();
-                            let entries: Vec<_> = all_masternodes
-                                .iter()
-                                .filter(|info| info.masternode.address != mn.address)
-                                .filter_map(|info| {
-                                    info.masternode.collateral_outpoint.as_ref().map(|op| {
-                                        (
-                                            op.clone(),
-                                            info.masternode.address.clone(),
-                                            lock_height,
-                                            info.masternode.tier.collateral(),
-                                        )
-                                    })
-                                })
-                                .collect();
-                            if !entries.is_empty() {
-                                consensus_engine
-                                    .utxo_manager
-                                    .rebuild_collateral_locks(entries);
-                            }
-                        }
+                        true
                     }
                     Err(e2) => {
                         tracing::warn!(
@@ -1467,7 +1258,9 @@ async fn main() {
                              will retry via V4 broadcast",
                             e2
                         );
+                        // Still mark as local so the V4 broadcast can claim it on peers.
                         registry.set_local_masternode(mn.address.clone()).await;
+                        false
                     }
                 }
             }
@@ -1475,7 +1268,103 @@ async fn main() {
                 tracing::error!("❌ Failed to register masternode: {}", e);
                 std::process::exit(1);
             }
-        }
+        };
+
+        if registration_ok {
+            // Mark this as our local masternode
+            registry.set_local_masternode(mn.address.clone()).await;
+
+            // Local masternode must be OnChain so it persists across
+            // peer disconnects (Handshake nodes are removed on disconnect).
+            if mn.tier != types::MasternodeTier::Free {
+                let _ = registry
+                    .set_registration_source(
+                        &mn.address,
+                        crate::masternode_registry::RegistrationSource::OnChain(
+                            blockchain.get_height(),
+                        ),
+                    )
+                    .await;
+            }
+
+            // Store empty certificate in registry (certificate system removed)
+            registry.set_local_certificate([0u8; 64]).await;
+
+            // Set signing key: use masternodeprivkey from time.conf if provided,
+            // otherwise fall back to the wallet's auto-generated key.
+            let signing_key = if let Some(ref mn_key) = masternode_signing_key {
+                tracing::info!("✓ Using masternodeprivkey for consensus signing");
+                mn_key.clone()
+            } else {
+                tracing::info!("✓ Using wallet key for consensus signing (no masternodeprivkey in time.conf)");
+                wallet.signing_key().clone()
+            };
+            if let Err(e) = consensus_engine.set_identity(mn.address.clone(), signing_key) {
+                eprintln!("⚠️ Failed to set consensus identity: {}", e);
+            }
+            // Transaction inputs must be signed with the wallet key so the derived
+            // address matches the UTXOs' script_pubkey.
+            if let Err(e) = consensus_engine.set_wallet_signing_key(wallet.signing_key().clone()) {
+                eprintln!("⚠️ Failed to set wallet signing key: {}", e);
+            }
+            // Pre-seed the pubkey cache so self-sends can encrypt memos immediately.
+            consensus_engine.utxo_manager.register_pubkey(
+                &mn.wallet_address,
+                wallet.signing_key().verifying_key().to_bytes(),
+            );
+
+            tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
+            tracing::info!("✓ Consensus engine identity configured with wallet key");
+
+            // Lock collateral UTXO so it shows as locked in wallet balance
+            if mn.tier != types::MasternodeTier::Free {
+                if let Some(ref outpoint) = mn.collateral_outpoint {
+                    let lock_height = blockchain.get_height();
+                    if let Err(e) = consensus_engine.utxo_manager.lock_local_collateral(
+                        outpoint.clone(),
+                        mn.address.clone(),
+                        lock_height,
+                        mn.tier.collateral(),
+                    ) {
+                        tracing::warn!("⚠️ Failed to lock local collateral UTXO: {:?}", e);
+                    } else {
+                        tracing::info!("🔒 Locked collateral UTXO for {:?} tier", mn.tier);
+                    }
+                }
+            }
+
+            // Rebuild collateral locks for all OTHER masternodes (not local — already locked above).
+            // Don't re-lock outpoints we just released as stale.
+            {
+                let all_masternodes = registry.list_all().await;
+                let lock_height = blockchain.get_height();
+                let entries: Vec<_> = all_masternodes
+                    .iter()
+                    .filter(|info| info.masternode.address != mn.address)
+                    .filter(|info| {
+                        !info
+                            .masternode
+                            .collateral_outpoint
+                            .as_ref()
+                            .map(|op| stale_local_outpoints.contains(op))
+                            .unwrap_or(false)
+                    })
+                    .filter_map(|info| {
+                        info.masternode.collateral_outpoint.as_ref().map(|op| {
+                            (
+                                op.clone(),
+                                info.masternode.address.clone(),
+                                lock_height,
+                                info.masternode.tier.collateral(),
+                            )
+                        })
+                    })
+                    .collect();
+                if !entries.is_empty() {
+                    consensus_engine.utxo_manager.rebuild_collateral_locks(entries);
+                }
+            }
+        } // end if registration_ok
 
         // Start peer exchange task (for masternode discovery)
         let peer_connection_registry_clone = peer_connection_registry.clone();

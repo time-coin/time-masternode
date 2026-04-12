@@ -2664,59 +2664,11 @@ async fn handle_peer(
                                         }
                                     });
                                 }
-                                NetworkMessage::TransactionVoteRequest { txid } => {
-                                    check_message_size!(MAX_VOTE_SIZE, "VoteRequest");
+                                NetworkMessage::TransactionVoteRequest { .. }
+                                | NetworkMessage::TransactionVoteResponse { .. } => {
+                                    // Deprecated legacy vote protocol — superseded by TimeVoteRequest/Response.
+                                    // These are no-ops: the response never updated consensus state.
                                     check_rate_limit!("vote");
-
-                                    // Spawn vote processing (non-blocking - runs concurrently with block production)
-                                    let txid_val = *txid;
-                                    let peer_addr_str = peer.addr.to_string();
-                                    let ip_str_clone = ip_str.clone();
-                                    let consensus_clone = Arc::clone(&consensus);
-                                    let peer_registry_clone = Arc::clone(&peer_registry);
-
-                                    tokio::spawn(async move {
-                                        tracing::debug!("🗳️  Vote request from {} for TX {}", peer_addr_str, hex::encode(txid_val));
-
-                                        // Get our preference (Accept/Reject) for this transaction
-                                        let preference = if consensus_clone.tx_pool.is_pending(&txid_val) || consensus_clone.tx_pool.get_pending(&txid_val).is_some() {
-                                            "Accept".to_string()
-                                        } else {
-                                            "Reject".to_string()
-                                        };
-
-                                        // Send our vote immediately
-                                        let vote_response = NetworkMessage::TransactionVoteResponse {
-                                            txid: txid_val,
-                                            preference,
-                                        };
-                                        let _ = peer_registry_clone.send_to_peer(&ip_str_clone, vote_response).await;
-
-                                        tracing::debug!("✅ Vote response sent for TX {}", hex::encode(txid_val));
-                                    });
-                                }
-                                NetworkMessage::TransactionVoteResponse { txid, preference } => {
-                                    check_message_size!(MAX_VOTE_SIZE, "VoteResponse");
-                                    check_rate_limit!("vote");
-
-                                    // Received a vote from a peer
-                                    tracing::debug!("📥 Vote from {} for TX {}: {}", peer.addr, hex::encode(txid), preference);
-
-                                    // Update our timevote consensus with this vote
-                                    // Convert preference string to Preference enum
-                                    let pref = match preference.as_str() {
-                                        "Accept" => crate::consensus::Preference::Accept,
-                                        "Reject" => crate::consensus::Preference::Reject,
-                                        _ => {
-                                            tracing::warn!("Invalid preference: {}", preference);
-                                            // Skip processing this invalid vote
-                                            continue;
-                                        }
-                                    };
-
-                                    // Submit vote to timevote consensus
-                                    // Legacy VoteBroadcast path - real votes come via TimeVoteResponse
-                                    tracing::debug!("✅ Vote recorded for TX {} (preference: {:?})", hex::encode(txid), pref);
                                 }
                                 NetworkMessage::FinalityVoteBroadcast { vote } => {
                                     check_message_size!(MAX_VOTE_SIZE, "FinalityVote");
