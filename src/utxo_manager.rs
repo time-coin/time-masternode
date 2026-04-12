@@ -1006,8 +1006,10 @@ impl UTXOStateManager {
                     restored += 1;
                 }
                 _ => {
-                    tracing::warn!(
-                        "⚠️ Cannot restore collateral lock for {:?} — UTXO not in Unspent state",
+                    // UTXO is spent/archived — collateral cleanup will deregister
+                    // this masternode after 3 consecutive missed checks (~30 min).
+                    tracing::debug!(
+                        "Cannot restore collateral lock for {:?} — UTXO not Unspent (will be cleaned up)",
                         outpoint
                     );
                 }
