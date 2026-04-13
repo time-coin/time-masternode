@@ -1229,23 +1229,31 @@ impl RpcHandler {
 
         let utxos = self.utxo_manager.list_utxos_by_address(&filter_addr).await;
 
-        // Determine local node IP for collateral lock ownership filtering
-        let local_mn_ip = self
+        // Collect the masternode addresses for every node that uses this wallet.
+        // An operator may run multiple masternodes (e.g. two Bronze nodes) from the
+        // same wallet address — a collateral lock from any of them counts as "our" lock.
+        let our_mn_addresses: std::collections::HashSet<String> = self
             .registry
-            .get_local_masternode()
+            .list_all()
             .await
-            .map(|mn| mn.masternode.address.clone());
+            .into_iter()
+            .filter(|info| {
+                info.masternode.wallet_address == filter_addr
+                    || (!info.reward_address.is_empty() && info.reward_address == filter_addr)
+            })
+            .map(|info| info.masternode.address)
+            .collect();
 
         let mut spendable: u64 = 0;
         let mut locked_collateral: u64 = 0;
         let mut pending: u64 = 0;
 
         for u in &utxos {
-            // Only count a collateral lock as "locked" if our own node placed it.
+            // Only count a collateral lock as "locked" if one of our own nodes placed it.
             // Foreign masternodes can gossip any outpoint as their collateral; if one
             // of those is in our UTXO set we must not hide it from our spendable balance.
             if let Some(lock) = self.utxo_manager.get_locked_collateral(&u.outpoint) {
-                if local_mn_ip.as_deref() == Some(&lock.masternode_address) {
+                if our_mn_addresses.contains(&lock.masternode_address) {
                     locked_collateral += u.value;
                     continue;
                 }
