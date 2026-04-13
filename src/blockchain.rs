@@ -6950,29 +6950,28 @@ impl Blockchain {
                         });
 
                         let n = free_tier_recipients.len().min(MAX_FREE_TIER_RECIPIENTS);
-                        // Check if any recipient has blocks_without_reward == 0
-                        // while a non-recipient in the same bitmap has > 0.
+                        // Helper: get the blocks_without_reward counter for a wallet in the bitmap.
+                        let counter_for = |wallet: &str| -> u64 {
+                            free_candidates
+                                .iter()
+                                .find(|(info, _)| {
+                                    let w = if !info.reward_address.is_empty() {
+                                        info.reward_address.as_str()
+                                    } else {
+                                        info.masternode.wallet_address.as_str()
+                                    };
+                                    w == wallet
+                                })
+                                .map(|(_, r)| *r)
+                                .unwrap_or(0)
+                        };
+
+                        // ── Check A: counter=0 recipient while counter>0 nodes were skipped ──
+                        // (original check — catches "recently paid beats long-waiter" attack)
                         let max_waiting = free_candidates.iter().map(|(_, r)| *r).max().unwrap_or(0);
                         if max_waiting > 0 {
                             for wallet in &free_tier_recipients {
-                                let recipient_raw = free_candidates
-                                    .iter()
-                                    .find(|(info, _)| {
-                                        let w = if !info.reward_address.is_empty() {
-                                            info.reward_address.as_str()
-                                        } else {
-                                            info.masternode.wallet_address.as_str()
-                                        };
-                                        w == *wallet
-                                    })
-                                    .map(|(_, r)| *r)
-                                    .unwrap_or(0);
-
-                                if recipient_raw == 0 {
-                                    // This wallet was paid last block (blocks_without_reward=0).
-                                    // Check if it should have been skipped in favour of waiting nodes.
-                                    // Only reject when there are MORE waiting candidates than paid recipients
-                                    // (i.e., at least one waiting node was left unpaid).
+                                if counter_for(wallet) == 0 {
                                     let waiting_count = free_candidates
                                         .iter()
                                         .filter(|(_, r)| *r > 0)
@@ -6987,6 +6986,58 @@ impl Blockchain {
                                         ));
                                     }
                                 }
+                            }
+                        }
+
+                        // ── Check B: fewer recipients than equally-ranked candidates ─────────
+                        // Catches the case where all free-tier nodes have the same counter
+                        // (e.g., all were paid together last block → all counter=0), and the
+                        // producer only includes one of them.  Since every candidate is equally
+                        // deserving, excluding any of them is unjustified.
+                        //
+                        // Only fire when there are strictly more bitmap candidates than
+                        // recipients AND at least one excluded candidate has counter >=
+                        // the minimum counter of any included recipient (equally deserving).
+                        let candidate_count = free_candidates.len().min(MAX_FREE_TIER_RECIPIENTS);
+                        if free_tier_recipients.len() < candidate_count {
+                            let min_recipient_counter = free_tier_recipients
+                                .iter()
+                                .map(|w| counter_for(w))
+                                .min()
+                                .unwrap_or(0);
+
+                            let excluded_equally_deserving: Vec<&str> = free_candidates
+                                .iter()
+                                .filter(|(info, raw)| {
+                                    let w = if !info.reward_address.is_empty() {
+                                        info.reward_address.as_str()
+                                    } else {
+                                        info.masternode.wallet_address.as_str()
+                                    };
+                                    !free_tier_recipients.contains(w) && *raw >= min_recipient_counter
+                                })
+                                .map(|(info, _)| {
+                                    if !info.reward_address.is_empty() {
+                                        info.reward_address.as_str()
+                                    } else {
+                                        info.masternode.wallet_address.as_str()
+                                    }
+                                })
+                                .collect();
+
+                            if !excluded_equally_deserving.is_empty() {
+                                return Err(format!(
+                                    "Block {} Free-tier fairness violation: {} of {} eligible \
+                                     node(s) were paid while {} equally-deserving node(s) \
+                                     (counter>={}) were excluded — \
+                                     possible free-tier pool monopolisation (excluded: {:?})",
+                                    block.header.height,
+                                    free_tier_recipients.len(),
+                                    candidate_count,
+                                    excluded_equally_deserving.len(),
+                                    min_recipient_counter,
+                                    &excluded_equally_deserving[..excluded_equally_deserving.len().min(3)],
+                                ));
                             }
                         }
                     }
