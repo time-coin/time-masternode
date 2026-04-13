@@ -340,7 +340,8 @@ impl RpcHandler {
             "average_finality_time_ms": avg_finality_ms,
             "block_time_seconds": 600,
             "emission_satoshis_per_block": self.blockchain.get_current_block_reward(),
-            "emission_time_per_block": self.blockchain.get_current_block_reward() as f64 / 100_000_000.0
+            "emission_time_per_block": self.blockchain.get_current_block_reward() as f64 / 100_000_000.0,
+            "storage_version": crate::constants::STORAGE_VERSION
         }))
     }
 
