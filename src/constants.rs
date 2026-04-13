@@ -88,21 +88,11 @@ pub mod blockchain {
     ///
     /// **Block 1737** (2026-04-13): free-tier fairness violation (AV35) — a modified
     /// producer paid only 1 of 5 equally-deserving free-tier nodes (counter≥1000 for
-    /// all candidates). The Check B fairness guard (added in the same release as
-    /// FAIRNESS_V2_HEIGHT) correctly rejects block 1737, but it was deployed while that
-    /// block was already accepted by a minority of pre-upgrade peers. Raising this
-    /// constant to 1737 lets honest nodes at height 1736 accept block 1737 and re-join
-    /// the majority chain. All blocks at height ≥ 1738 are fully validated.
+    /// all candidates). The fairness guard correctly rejects block 1737, but it was
+    /// deployed while that block was already accepted by a minority of pre-upgrade peers.
+    /// Raising this constant to 1737 lets honest nodes at height 1736 accept block 1737
+    /// and re-join the majority chain. All blocks at height ≥ 1738 are fully validated.
     pub const POOL_VALIDATION_MIN_HEIGHT: u64 = 1737;
-
-    /// Fork height at which collateral reward-address enforcement activates.
-    ///
-    /// After this height, a paid-tier masternode's reward is redirected to the
-    /// collateral UTXO's output address when the registered reward_address differs.
-    /// This eliminates the economic incentive for collateral squatting: a node
-    /// that gossip-squats a UTXO it doesn't own cannot redirect rewards to itself.
-    /// Free-tier nodes (no collateral) are unaffected.
-    pub const COLLATERAL_REWARD_ENFORCEMENT_HEIGHT: u64 = 750;
 
     /// Fork height at which free-tier reward eligibility switches from gossip-based
     /// to on-chain registration.
@@ -147,21 +137,6 @@ pub mod blockchain {
     /// FREE_TIER_ONCHAIN_HEIGHT=2160.  Adjust before deployment if needed.
     pub const STRICT_REWARD_CALC_HEIGHT: u64 = 2500;
 
-    /// Fork height at which the improved fairness-rotation formula activates (v2).
-    ///
-    /// Before this height: fairness_bonus = blocks_without_reward / 10
-    ///   → nodes paid 0–9 blocks ago all tie (bonus=0); the alphabetically-first IP
-    ///     wins every tiebreak, allowing the same node to win dozens of consecutive
-    ///     times when all nodes have blocks_without_reward < 10.
-    ///
-    /// At and after this height: fairness_bonus = blocks_without_reward (direct)
-    ///   → a node paid 1 block ago has bonus=1, a node paid 5 blocks ago has bonus=5.
-    ///     The highest-waiting node wins; recently-paid nodes go to the back of the
-    ///     queue immediately instead of only after 10 blocks.
-    ///
-    /// Both the block producer and the validator must apply the same formula.
-    /// All mainnet nodes must upgrade before this height to avoid a consensus split.
-    pub const FAIRNESS_V2_HEIGHT: u64 = 1730;
 }
 
 /// Network protocol constants

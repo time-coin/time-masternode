@@ -24,8 +24,7 @@
 //! - Every payout address appears at most once (duplicates merged).
 
 use crate::constants::blockchain::{
-    COLLATERAL_REWARD_ENFORCEMENT_HEIGHT, FAIRNESS_V2_HEIGHT, FREE_TIER_ONCHAIN_HEIGHT,
-    MAX_FREE_TIER_RECIPIENTS, PRODUCER_REWARD_SATOSHIS,
+    FREE_TIER_ONCHAIN_HEIGHT, MAX_FREE_TIER_RECIPIENTS, PRODUCER_REWARD_SATOSHIS,
 };
 use crate::masternode_registry::MasternodeInfo;
 use crate::types::MasternodeTier;
@@ -69,9 +68,9 @@ pub struct RewardInput<'a> {
 /// Returns `(payout_address, satoshis)` pairs.  The producer entry is first.
 /// Returns an empty vec only if `active_nodes` is empty (no masternodes at all).
 ///
-/// This function is intentionally async because paid-tier collateral enforcement
-/// (active at/after `COLLATERAL_REWARD_ENFORCEMENT_HEIGHT`) requires a UTXO lookup
-/// to redirect rewards from the registered wallet to the UTXO owner's address.
+/// This function is intentionally async because paid-tier rewards are always
+/// redirected to the collateral UTXO owner's address, which requires a UTXO
+/// lookup to resolve (eliminates the economic incentive for collateral squatting).
 pub async fn compute(input: &RewardInput<'_>, utxo_manager: &UTXOStateManager) -> Vec<(String, u64)> {
     let height = input.height;
     let producer_wallet = input.producer_wallet;
@@ -84,14 +83,8 @@ pub async fn compute(input: &RewardInput<'_>, utxo_manager: &UTXOStateManager) -
         return vec![];
     }
 
-    let use_v2_fairness = height >= FAIRNESS_V2_HEIGHT;
-    let bonus_for = |blocks_without: u64| -> u64 {
-        if use_v2_fairness {
-            blocks_without
-        } else {
-            blocks_without / 10
-        }
-    };
+    // Fairness bonus is the raw blocks_without_reward counter (v2 formula, always active).
+    let bonus_for = |blocks_without: u64| -> u64 { blocks_without };
 
     // Whether any non-producer paid-tier node is active (determines distribution mode).
     let has_paid_tier_nodes = active_nodes.iter().any(|mn| {
@@ -237,22 +230,20 @@ pub async fn compute(input: &RewardInput<'_>, utxo_manager: &UTXOStateManager) -
         let mut distributed = 0u64;
 
         for (mn, _) in tier_nodes.iter().take(recipient_count) {
-            let registered_dest = payout_addr(mn).to_string();
-
-            // After COLLATERAL_REWARD_ENFORCEMENT_HEIGHT paid-tier rewards flow to the
-            // collateral UTXO owner, not the registered wallet.  This eliminates the
-            // economic incentive for collateral squatting (AV4).
-            let dest = if !is_free && height >= COLLATERAL_REWARD_ENFORCEMENT_HEIGHT {
+            // Paid-tier rewards always flow to the collateral UTXO owner's address,
+            // not the registered wallet.  This eliminates the economic incentive for
+            // collateral squatting (AV4): whoever owns the UTXO key receives the reward.
+            let dest = if !is_free {
                 if let Some(ref outpoint) = mn.masternode.collateral_outpoint {
                     match utxo_manager.get_utxo(outpoint).await {
                         Ok(utxo) if !utxo.address.is_empty() => utxo.address,
-                        _ => registered_dest,
+                        _ => payout_addr(mn).to_string(),
                     }
                 } else {
-                    registered_dest
+                    payout_addr(mn).to_string()
                 }
             } else {
-                registered_dest
+                payout_addr(mn).to_string()
             };
 
             push_reward(&mut rewards, dest, per_node);

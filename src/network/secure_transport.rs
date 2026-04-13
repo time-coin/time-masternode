@@ -270,7 +270,7 @@ impl SecureConnection {
         // Send handshake
         let handshake = NetworkMessage::Handshake {
             magic: our_magic,
-            protocol_version: 1,
+            protocol_version: 2,
             network: our_network.to_string(),
             commit_count: env!("GIT_COMMIT_COUNT").parse::<u32>().unwrap_or(0),
         };
@@ -281,10 +281,16 @@ impl SecureConnection {
         match self.receive_message().await? {
             NetworkMessage::Handshake {
                 magic,
-                protocol_version: _,
+                protocol_version,
                 network,
                 commit_count: _,
             } => {
+                if protocol_version < 2 {
+                    return Err(SecureTransportError::HandshakeFailed(format!(
+                        "Peer protocol version {} is too old; minimum is 2",
+                        protocol_version
+                    )));
+                }
                 if magic != our_magic {
                     return Err(SecureTransportError::HandshakeFailed(format!(
                         "Magic bytes mismatch: expected {:?}, got {:?}",

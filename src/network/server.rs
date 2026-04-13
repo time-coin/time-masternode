@@ -1142,11 +1142,11 @@ async fn handle_peer(
                                             );
                                             break;
                                         }
-                                        if protocol_version != &1 {
-                                            tracing::warn!("🚫 Rejecting {} - unsupported protocol version: {}", peer.addr, protocol_version);
+                                        if *protocol_version < 2 {
+                                            tracing::warn!("🚫 Rejecting {} - protocol version {} is too old (minimum: 2)", peer.addr, protocol_version);
                                             blacklist.write().await.record_violation(
                                                 ip,
-                                                &format!("Unsupported protocol version: {}", protocol_version)
+                                                &format!("Protocol version {} below minimum 2", protocol_version)
                                             );
                                             break;
                                         }

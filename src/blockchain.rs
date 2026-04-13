@@ -3691,20 +3691,13 @@ impl Blockchain {
             // After FREE_TIER_ONCHAIN_HEIGHT, eligible_pool is pre-filtered to
             // on-chain-registered nodes only (see below), so unregistered nodes
             // cannot appear in the bitmap or collect rewards.
-            let use_v2_fairness = next_height
-                >= crate::constants::blockchain::FAIRNESS_V2_HEIGHT;
             let mut free_nodes: Vec<_> = eligible_pool
                 .iter()
                 .map(|mn| {
-                    let blocks_without = blocks_without_reward_map
+                    let fairness_bonus = blocks_without_reward_map
                         .get(&mn.masternode.address)
                         .copied()
                         .unwrap_or(0);
-                    let fairness_bonus = if use_v2_fairness {
-                        blocks_without
-                    } else {
-                        blocks_without / 10
-                    };
                     (mn, fairness_bonus)
                 })
                 .collect();
@@ -3782,22 +3775,14 @@ impl Blockchain {
             for tier in &tiers {
                 let tier_pool = tier.pool_allocation();
 
-                let use_v2_fairness = next_height
-                    >= crate::constants::blockchain::FAIRNESS_V2_HEIGHT;
-
                 let mut tier_nodes: Vec<_> = eligible_pool
                     .iter()
                     .filter(|mn| mn.masternode.tier == *tier)
                     .map(|mn| {
-                        let blocks_without = blocks_without_reward_map
+                        let fairness_bonus = blocks_without_reward_map
                             .get(&mn.masternode.address)
                             .copied()
                             .unwrap_or(0);
-                        let fairness_bonus = if use_v2_fairness {
-                            blocks_without
-                        } else {
-                            blocks_without / 10
-                        };
                         (mn, fairness_bonus)
                     })
                     .collect();
@@ -3881,15 +3866,11 @@ impl Blockchain {
                     } else {
                         mn.masternode.wallet_address.clone()
                     };
-                    // After COLLATERAL_REWARD_ENFORCEMENT_HEIGHT, paid-tier rewards are
-                    // always sent to the collateral UTXO's output address.  This removes
-                    // the economic incentive for collateral squatting: a squatter that
-                    // gossip-registers someone else's UTXO cannot redirect the reward to
-                    // their own wallet — it always flows to the UTXO owner.
-                    let dest = if !is_free_tier
-                        && next_height
-                            >= constants::blockchain::COLLATERAL_REWARD_ENFORCEMENT_HEIGHT
-                    {
+                    // Paid-tier rewards always flow to the collateral UTXO owner's
+                    // address, not the registered wallet.  This removes the economic
+                    // incentive for collateral squatting: whoever owns the UTXO key
+                    // receives the reward, regardless of who gossip-registered the anchor.
+                    let dest = if !is_free_tier {
                         if let Some(ref outpoint) = mn.masternode.collateral_outpoint {
                             if let Ok(utxo) = self.utxo_manager.get_utxo(outpoint).await {
                                 if !utxo.address.is_empty() && utxo.address != registered_dest {
@@ -6563,8 +6544,8 @@ impl Blockchain {
         calculated_fees: u64,
     ) -> Result<(), String> {
         use crate::constants::blockchain::{
-            COLLATERAL_REWARD_ENFORCEMENT_HEIGHT, GOLD_POOL_SATOSHIS, MAX_FREE_TIER_RECIPIENTS,
-            POOL_VALIDATION_MIN_HEIGHT, PRODUCER_REWARD_SATOSHIS, SATOSHIS_PER_TIME,
+            GOLD_POOL_SATOSHIS, MAX_FREE_TIER_RECIPIENTS, POOL_VALIDATION_MIN_HEIGHT,
+            PRODUCER_REWARD_SATOSHIS, SATOSHIS_PER_TIME,
         };
         use crate::types::MasternodeTier;
 
@@ -6607,43 +6588,33 @@ impl Blockchain {
         };
 
         // ── Collateral UTXO owner map (anti-squatter enforcement) ────────────
-        // After COLLATERAL_REWARD_ENFORCEMENT_HEIGHT, produce_block redirects paid-tier
-        // rewards to the collateral UTXO's output address rather than the registered
-        // reward_address.  A squatter controlling the gossip anchor cannot profit: the
-        // reward always flows to whoever owns the UTXO key.
+        // Paid-tier rewards always flow to the collateral UTXO's output address.
+        // A squatter controlling the gossip anchor cannot profit: the reward always
+        // flows to whoever owns the UTXO key.
         //
-        // Validators must accept these redirected payments.  We pre-build a map from
-        // UTXO-owner address → tier so that Step 2 and Step 5 can classify them correctly
-        // even when tier_for_wallet(utxo_owner_addr) returns None (because the squatter,
-        // not the UTXO owner, holds the registry anchor).
+        // We pre-build a map from UTXO-owner address → tier so that Steps 2 and 5
+        // can classify these addresses correctly even when tier_for_wallet returns
+        // None (the squatter, not the UTXO owner, holds the registry anchor).
         //
-        // IMPORTANT (AV6 / bitmap positional drift): we build this map from ALL known
-        // paid-tier masternodes in all_infos, NOT from the bitmap-decoded subset.
-        // The bitmap positions are relative to the PRODUCER'S registry sort order at
-        // production time; our local sort order may differ (Free-tier gossip churn
-        // adds/removes nodes, shifting every subsequent bit position).  If we built the
-        // map only from bitmap-decoded nodes, legitimate UTXO owner addresses would be
-        // missing whenever our sort order diverged — causing valid blocks to be rejected
-        // with "NOT in active-masternodes bitmap" even for legitimate recipients.
-        let collateral_utxo_tier_map: std::collections::HashMap<String, MasternodeTier> =
-            if block.header.height >= COLLATERAL_REWARD_ENFORCEMENT_HEIGHT {
-                let mut map = std::collections::HashMap::new();
-                for info in &all_infos {
-                    if info.masternode.tier == MasternodeTier::Free {
-                        continue; // Free tier has no collateral UTXO
-                    }
-                    if let Some(ref outpoint) = info.masternode.collateral_outpoint {
-                        if let Ok(utxo) = self.utxo_manager.get_utxo(outpoint).await {
-                            if !utxo.address.is_empty() {
-                                map.insert(utxo.address, info.masternode.tier);
-                            }
+        // IMPORTANT (AV6 / bitmap positional drift): built from ALL known paid-tier
+        // masternodes in all_infos, NOT only bitmap-decoded nodes, to avoid false
+        // rejections when our local registry sort order has drifted from the producer's.
+        let collateral_utxo_tier_map: std::collections::HashMap<String, MasternodeTier> = {
+            let mut map = std::collections::HashMap::new();
+            for info in &all_infos {
+                if info.masternode.tier == MasternodeTier::Free {
+                    continue; // Free tier has no collateral UTXO
+                }
+                if let Some(ref outpoint) = info.masternode.collateral_outpoint {
+                    if let Ok(utxo) = self.utxo_manager.get_utxo(outpoint).await {
+                        if !utxo.address.is_empty() {
+                            map.insert(utxo.address, info.masternode.tier);
                         }
                     }
                 }
-                map
-            } else {
-                std::collections::HashMap::new()
-            };
+            }
+            map
+        };
 
         // ── Step 2: partition block.masternode_rewards into producer vs tier pools ──
         // Each entry in masternode_rewards is a (TIME_wallet_address, satoshis) pair
@@ -6691,9 +6662,8 @@ impl Blockchain {
                     }
                     None => {
                         // Check if this wallet is a UTXO-owner address under anti-squatter
-                        // enforcement (block.height >= COLLATERAL_REWARD_ENFORCEMENT_HEIGHT).
-                        // A squatter holds the registry anchor, so the wallet lookup returns
-                        // None for the legitimate UTXO owner — use the pre-built collateral map.
+                        // enforcement. A squatter holds the registry anchor, so the wallet lookup
+                        // returns None for the legitimate UTXO owner — use the pre-built collateral map.
                         if let Some(&tier) = collateral_utxo_tier_map.get(wallet.as_str()) {
                             *tier_paid.entry(tier).or_insert(0) += amount;
                             tier_winner.entry(tier).or_insert_with(|| wallet.clone());
@@ -7088,20 +7058,6 @@ impl Blockchain {
                 // bitmap nodes for this tier.  If it doesn't, our bitmap decoding has
                 // drifted from the producer's sort order (Free-tier churn), and we cannot
                 // trust our expected-winner calculation.
-                //
-                // FAIRNESS_V2_HEIGHT: use direct blocks_without_reward counter instead
-                // of /10 to eliminate the 10-block dead zone where all recently-paid
-                // nodes tied and the alphabetically-first IP always won.
-                let use_v2_fairness = block.header.height
-                    >= crate::constants::blockchain::FAIRNESS_V2_HEIGHT;
-                let bonus_for = |blocks_without: u64| -> u64 {
-                    if use_v2_fairness {
-                        blocks_without
-                    } else {
-                        blocks_without / 10
-                    }
-                };
-
                 if !matches!(tier, MasternodeTier::Free) {
                     if let Some(actual_wallet) = tier_winner.get(tier) {
                         let tier_candidates: Vec<_> = active_bitmap_nodes
@@ -7126,11 +7082,10 @@ impl Blockchain {
                                 info.masternode.wallet_address.as_str()
                             };
                             w == actual_wallet.as_str()
-                                || (block.header.height >= COLLATERAL_REWARD_ENFORCEMENT_HEIGHT
-                                    && collateral_utxo_tier_map
-                                        .get(actual_wallet.as_str())
-                                        .map(|&t| t == *tier)
-                                        .unwrap_or(false))
+                                || collateral_utxo_tier_map
+                                    .get(actual_wallet.as_str())
+                                    .map(|&t| t == *tier)
+                                    .unwrap_or(false)
                         });
 
                         if !tier_candidates.is_empty() && actual_in_bitmap {
@@ -7141,7 +7096,7 @@ impl Blockchain {
                                         .get(&info.masternode.address)
                                         .copied()
                                         .unwrap_or(0);
-                                    (info, bonus_for(raw))
+                                    (info, raw)
                                 })
                                 .collect();
                             ranked.sort_by(|a, b| {
@@ -7157,14 +7112,12 @@ impl Blockchain {
                                 expected.masternode.wallet_address.as_str()
                             };
 
-                            // Under UTXO enforcement, payout may be redirected to the
-                            // collateral UTXO owner — accept if the tier matches.
-                            let is_utxo_redirect =
-                                block.header.height >= COLLATERAL_REWARD_ENFORCEMENT_HEIGHT
-                                    && collateral_utxo_tier_map
-                                        .get(actual_wallet.as_str())
-                                        .copied()
-                                        == Some(*tier);
+                            // Payout may be redirected to the collateral UTXO owner —
+                            // accept if the tier matches.
+                            let is_utxo_redirect = collateral_utxo_tier_map
+                                .get(actual_wallet.as_str())
+                                .copied()
+                                == Some(*tier);
 
                             if actual_wallet.as_str() != expected_wallet && !is_utxo_redirect {
                                 // Allow a tied candidate: if the actual winner shares the
@@ -7186,21 +7139,19 @@ impl Blockchain {
                                 if !tied {
                                     return Err(format!(
                                         "Block {} {:?} pool winner mismatch: fairness \
-                                         rotation selects {} (fairness_bonus={}, \
-                                         blocks_without_reward≈{}), but {} was paid — \
-                                         possible pool self-award (AV30)",
+                                         rotation selects {} (blocks_without_reward={}), \
+                                         but {} was paid — possible pool self-award (AV30)",
                                         block.header.height,
                                         tier,
                                         expected_wallet,
                                         expected_bonus,
-                                        expected_bonus * 10,
                                         actual_wallet,
                                     ));
                                 }
                             }
                         }
                     }
-                } else if use_v2_fairness {
+                } else {
                     // ── Step 3b-Free: free-tier recipient ordering check ──────────────
                     // With v2 fairness active, verify that no recently-paid free-tier
                     // address (blocks_without_reward == 0) appears in the reward list
@@ -7440,12 +7391,12 @@ impl Blockchain {
                     .collect();
 
                 // Also include the producer's wallet — producer is always eligible
-                // (they produced the block, so they were clearly active)
+                // (they produced the block, so they were clearly active).
+                // Also include collateral UTXO owner addresses: paid-tier rewards are
+                // always redirected to the UTXO owner, so those addresses are eligible
+                // even if they don't appear directly in the bitmap.
                 let mut eligible = active_wallets.clone();
                 eligible.insert(producer_wallet.clone());
-                // After COLLATERAL_REWARD_ENFORCEMENT_HEIGHT, rewards for paid-tier nodes
-                // are redirected to the UTXO owner's address.  Add those addresses so
-                // validators don't flag them as "not in bitmap" injection attempts.
                 for utxo_owner in collateral_utxo_tier_map.keys() {
                     eligible.insert(utxo_owner.clone());
                 }
