@@ -481,6 +481,7 @@ impl RpcHandler {
                 "timeoffset": 0,
                 "pingtime": pingtime,
                 "version": 110000,
+                "storage_version": crate::constants::STORAGE_VERSION,
                 "is_masternode": true,
                 "tier": format!("{:?}", mn.masternode.tier),
                 "active": mn.is_active,

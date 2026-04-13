@@ -750,18 +750,21 @@ start_service() {
 
 create_firewall_rules() {
     print_step "Configuring firewall..."
-    
+
     if command -v ufw &> /dev/null; then
         print_info "UFW firewall detected"
-        
-        # Allow P2P port
+
+        # Allow P2P port (node-to-node communication)
         ufw allow $P2P_PORT/tcp comment "TIME Coin P2P ($NETWORK)"
-        
+
+        # Allow RPC port (wallet and CLI connections)
+        ufw allow $RPC_PORT/tcp comment "TIME Coin RPC ($NETWORK)"
+
         print_success "Firewall rules added"
-        print_info "P2P port $P2P_PORT opened for $NETWORK"
+        print_info "P2P port $P2P_PORT and RPC port $RPC_PORT opened for $NETWORK"
     else
         print_warn "UFW not installed, skipping firewall configuration"
-        print_info "Manually open port $P2P_PORT/tcp for P2P networking"
+        print_info "Manually open ports $P2P_PORT/tcp (P2P) and $RPC_PORT/tcp (RPC)"
     fi
 }
 
