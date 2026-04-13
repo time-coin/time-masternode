@@ -29,10 +29,12 @@ fi
 if [[ "$NETWORK" == "mainnet" ]]; then
     P2P_PORT="24000"
     RPC_PORT="24001"
+    WS_PORT="24002"
     TESTNET_FLAG="0"
 else
     P2P_PORT="24100"
     RPC_PORT="24101"
+    WS_PORT="24102"
     TESTNET_FLAG="1"
 fi
 
@@ -71,8 +73,9 @@ print_header() {
     echo -e "${BLUE}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${BLUE}Network Configuration:${NC}"
-    echo "  • P2P Port: $P2P_PORT"
-    echo "  • RPC Port: $RPC_PORT"
+    echo "  • P2P Port:       $P2P_PORT"
+    echo "  • RPC Port:       $RPC_PORT"
+    echo "  • WebSocket Port: $WS_PORT"
     echo "  • Data Directory: $DATA_DIR"
     echo ""
 }
@@ -748,6 +751,87 @@ start_service() {
     fi
 }
 
+setup_swap() {
+    print_step "Configuring swap space..."
+
+    local SWAPFILE="/swapfile"
+    # Minimum swap required for compiling Rust — 2.2 GB keeps the linker from OOM-killing.
+    local MIN_SWAP_MB=2252
+
+    # Total RAM and free disk (in MB)
+    local RAM_MB
+    RAM_MB=$(free -m | awk '/^Mem:/{print $2}')
+    local DISK_MB
+    DISK_MB=$(df -m / | awk 'NR==2 {print $4}')
+
+    print_info "RAM: ${RAM_MB} MB  |  Disk free: ${DISK_MB} MB"
+
+    # ── Optimal swap formula (mirrors swap.sh) ──────────────────
+    local SWAP_MB
+    if [ "$RAM_MB" -lt 2048 ]; then
+        SWAP_MB=$((RAM_MB * 2))        # Low-RAM: double it
+    elif [ "$RAM_MB" -lt 8192 ]; then
+        SWAP_MB=$RAM_MB                # Mid-RAM: equal swap
+    else
+        SWAP_MB=4096                   # High-RAM: cap at 4 GB
+    fi
+
+    # Cap at 25% of free disk to avoid filling the volume
+    local MAX_SWAP_MB=$((DISK_MB / 4))
+    if [ "$SWAP_MB" -gt "$MAX_SWAP_MB" ]; then
+        SWAP_MB=$MAX_SWAP_MB
+    fi
+
+    # Raise to minimum — must be enough to compile without OOM
+    if [ "$SWAP_MB" -lt "$MIN_SWAP_MB" ]; then
+        SWAP_MB=$MIN_SWAP_MB
+    fi
+
+    # Check we actually have enough disk for this swap file
+    if [ "$SWAP_MB" -gt "$DISK_MB" ]; then
+        print_warn "Not enough disk space for ${SWAP_MB} MB swap (only ${DISK_MB} MB free)"
+        print_warn "Skipping swap setup — compilation may fail on low-RAM systems"
+        return
+    fi
+
+    # Skip if current swap is already large enough
+    local CURRENT_SWAP_MB
+    CURRENT_SWAP_MB=$(free -m | awk '/^Swap:/{print $2}')
+    if [ "$CURRENT_SWAP_MB" -ge "$SWAP_MB" ]; then
+        print_info "Existing swap is ${CURRENT_SWAP_MB} MB (>= ${SWAP_MB} MB required) — skipping"
+        return
+    fi
+
+    # ── Remove existing swap ─────────────────────────────────────
+    if swapon --show | grep -q "^"; then
+        print_info "Removing existing swap (${CURRENT_SWAP_MB} MB)..."
+        swapoff -a
+        if [ -f "$SWAPFILE" ]; then
+            rm -f "$SWAPFILE"
+        fi
+        sed -i.bak '/swap/d' /etc/fstab
+    fi
+
+    # ── Create new swap file ─────────────────────────────────────
+    print_info "Creating ${SWAP_MB} MB swap file at ${SWAPFILE}..."
+    fallocate -l ${SWAP_MB}M "$SWAPFILE" 2>/dev/null \
+        || dd if=/dev/zero of="$SWAPFILE" bs=1M count="$SWAP_MB" status=none
+    chmod 600 "$SWAPFILE"
+    mkswap "$SWAPFILE" > /dev/null
+    swapon "$SWAPFILE"
+    echo "$SWAPFILE none swap sw 0 0" >> /etc/fstab
+
+    # ── Kernel tuning ────────────────────────────────────────────
+    sysctl -q vm.swappiness=10
+    sysctl -q vm.vfs_cache_pressure=50
+    cat > /etc/sysctl.d/99-timecoin-swap.conf <<EOF
+vm.swappiness=10
+vm.vfs_cache_pressure=50
+EOF
+
+    print_success "Swap configured: ${SWAP_MB} MB"
+}
+
 create_firewall_rules() {
     print_step "Configuring firewall..."
 
@@ -760,11 +844,14 @@ create_firewall_rules() {
         # Allow RPC port (wallet and CLI connections)
         ufw allow $RPC_PORT/tcp comment "TIME Coin RPC ($NETWORK)"
 
+        # Allow WebSocket port (real-time wallet notifications)
+        ufw allow $WS_PORT/tcp comment "TIME Coin WebSocket ($NETWORK)"
+
         print_success "Firewall rules added"
-        print_info "P2P port $P2P_PORT and RPC port $RPC_PORT opened for $NETWORK"
+        print_info "Opened: P2P $P2P_PORT, RPC $RPC_PORT, WebSocket $WS_PORT"
     else
         print_warn "UFW not installed, skipping firewall configuration"
-        print_info "Manually open ports $P2P_PORT/tcp (P2P) and $RPC_PORT/tcp (RPC)"
+        print_info "Manually open: $P2P_PORT/tcp (P2P), $RPC_PORT/tcp (RPC), $WS_PORT/tcp (WebSocket)"
     fi
 }
 
@@ -775,8 +862,9 @@ print_summary() {
     echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${BLUE}Network: ${NETWORK^^}${NC}"
-    echo "  • P2P Port: $P2P_PORT"
-    echo "  • RPC Port: $RPC_PORT (localhost only, auth enabled)"
+    echo "  • P2P Port:       $P2P_PORT"
+    echo "  • RPC Port:       $RPC_PORT (auth enabled)"
+    echo "  • WebSocket Port: $WS_PORT"
     if [[ -n "$REWARD_ADDRESS" ]]; then
         echo "  • Reward Address: $REWARD_ADDRESS"
     fi
@@ -850,10 +938,13 @@ main() {
     
     # Create directories (service runs as root)
     create_directories
-    
+
+    # Configure swap — must happen before building so the compiler has enough memory
+    setup_swap
+
     # Check for existing blockchain data that may be incompatible
     reset_blockchain_data
-    
+
     # Build and install
     build_binaries
     install_binaries
