@@ -4851,27 +4851,40 @@ impl Blockchain {
             // This is the authoritative check — it runs for every code path that
             // commits a non-genesis block (fork handling, reorg, sync, gap-fill).
             // Zero-amount entries in masternode_rewards are padding and must NOT count.
+            //
+            // During bootstrap (sparse participation), the eligible pool may be smaller
+            // than 3 — in that case we require ≥ eligible_pool_size instead of ≥3.
+            // The bitmap is chain-verified so this cannot be gamed: an attacker cannot
+            // shrink the eligible pool below 3 without first being the only registered
+            // on-chain masternode.
             {
-                const MIN_PAID_RECIPIENTS: usize = 3;
+                let bitmap_eligible: usize = block
+                    .header
+                    .active_masternodes_bitmap
+                    .iter()
+                    .map(|b| b.count_ones() as usize)
+                    .sum();
+                let min_paid_recipients = if bitmap_eligible >= 3 { 3 } else { bitmap_eligible.max(1) };
                 let paid: std::collections::HashSet<&str> = block
                     .masternode_rewards
                     .iter()
                     .filter(|(_, amt)| *amt > 0)
                     .map(|(a, _)| a.as_str())
                     .collect();
-                if paid.len() < MIN_PAID_RECIPIENTS {
+                if paid.len() < min_paid_recipients {
                     tracing::warn!(
-                        "🛡️ add_block: rejecting block {} — only {} paid recipient(s), need ≥{}",
+                        "🛡️ add_block: rejecting block {} — only {} paid recipient(s), need ≥{} ({} in bitmap)",
                         block.header.height,
                         paid.len(),
-                        MIN_PAID_RECIPIENTS
+                        min_paid_recipients,
+                        bitmap_eligible,
                     );
                     return Err(format!(
                         "Block {} rejected: only {} unique reward recipient(s), need ≥{}. \
                          Zero-amount padding does not count.",
                         block.header.height,
                         paid.len(),
-                        MIN_PAID_RECIPIENTS
+                        min_paid_recipients
                     ));
                 }
             }
@@ -6672,23 +6685,30 @@ impl Blockchain {
         // rejected by add_block() leaves all honest nodes permanently stuck at
         // height 0, unable to advance.
         if block.header.height >= 1 {
-            const MIN_PAID_RECIPIENTS: usize = 3;
+            let bitmap_eligible: usize = block
+                .header
+                .active_masternodes_bitmap
+                .iter()
+                .map(|b| b.count_ones() as usize)
+                .sum();
+            let min_paid_recipients = if bitmap_eligible >= 3 { 3 } else { bitmap_eligible.max(1) };
             let paid: std::collections::HashSet<&str> = block
                 .masternode_rewards
                 .iter()
                 .filter(|(_, amt)| *amt > 0)
                 .map(|(a, _)| a.as_str())
                 .collect();
-            if paid.len() < MIN_PAID_RECIPIENTS {
+            if paid.len() < min_paid_recipients {
                 if !producer_addr.is_empty() {
                     self.record_reward_violation(producer_addr).await;
                 }
                 return Err(format!(
-                    "Proposal rejected: block {} has only {} paid recipient(s), need ≥{}. \
+                    "Proposal rejected: block {} has only {} paid recipient(s), need ≥{} ({} in bitmap). \
                      Not voting for reward-hijack proposal.",
                     block.header.height,
                     paid.len(),
-                    MIN_PAID_RECIPIENTS
+                    min_paid_recipients,
+                    bitmap_eligible,
                 ));
             }
         }

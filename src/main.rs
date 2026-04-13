@@ -3843,7 +3843,11 @@ async fn main() {
                     // which signals block_added_signal. We await that signal with a timeout
                     // instead of polling, so consensus completes instantly when votes arrive.
 
-                    let consensus_timeout = if blocks_behind > 0 {
+                    let consensus_timeout = if blocks_behind > 50 {
+                        std::time::Duration::from_secs(2) // Far behind: rapid catch-up
+                    } else if blocks_behind > 10 {
+                        std::time::Duration::from_secs(5) // Slightly behind: fast catch-up
+                    } else if blocks_behind > 0 {
                         std::time::Duration::from_secs(10) // Behind: shorter timeout
                     } else {
                         std::time::Duration::from_secs(15) // Normal: wait for consensus signal
