@@ -2424,24 +2424,9 @@ impl RpcHandler {
             let is_free =
                 matches!(local_mn.masternode.tier, crate::types::MasternodeTier::Free);
 
-            // Maturity gate: Free nodes must wait FREE_MATURITY_BLOCKS (~12h on mainnet)
-            let maturity_required = match self.network {
-                crate::NetworkType::Mainnet => {
-                    crate::constants::blockchain::FREE_MATURITY_BLOCKS
-                }
-                _ => 5,
-            };
-            let blocks_since_registration = if local_mn.registration_height > 0 {
-                current_height.saturating_sub(local_mn.registration_height)
-            } else {
-                maturity_required // treat as already mature if no registration height recorded
-            };
-            let is_mature = blocks_since_registration >= maturity_required;
-            let blocks_until_mature = if is_mature {
-                0u64
-            } else {
-                maturity_required.saturating_sub(blocks_since_registration)
-            };
+            // No maturity gate — all on-chain registered nodes are immediately eligible.
+            let is_mature = true;
+            let blocks_until_mature = 0u64;
 
             // Reachability grace: newly-registered nodes get 5 min before probe is enforced
             let in_grace_period = local_mn.first_seen_at > 0
@@ -2482,9 +2467,9 @@ impl RpcHandler {
                 "is_publicly_reachable": local_mn.is_publicly_reachable,
                 "registration_height": local_mn.registration_height,
                 "current_height": current_height,
-                "blocks_since_registration": blocks_since_registration,
-                "maturity_required_blocks": if is_free { maturity_required } else { 0 },
-                "blocks_until_mature": if is_free { blocks_until_mature } else { 0 },
+                "blocks_since_registration": current_height.saturating_sub(local_mn.registration_height),
+                "maturity_required_blocks": 0,
+                "blocks_until_mature": blocks_until_mature,
                 "is_mature": is_mature,
                 "in_grace_period": in_grace_period,
                 "eligibility_status": eligibility_status,

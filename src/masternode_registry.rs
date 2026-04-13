@@ -109,8 +109,6 @@ pub struct MasternodeInfo {
     pub blocks_without_reward: u64, // Counter: increments each block, resets when reward received
 
     /// Block height at which this masternode was first registered.
-    /// Used for the anti-sybil maturity gate: Free-tier nodes must wait
-    /// FREE_MATURITY_BLOCKS before becoming eligible for rewards.
     #[serde(default)]
     pub registration_height: u64,
 
@@ -1728,14 +1726,10 @@ impl MasternodeRegistry {
             .collect()
     }
 
-    /// Get mature Free-tier masternodes eligible for the participation pool.
-    /// On testnet, all active Free nodes are eligible (no maturity gate).
-    /// On mainnet, Free nodes must have been registered for ≥FREE_MATURITY_BLOCKS.
+    /// Get Free-tier masternodes eligible for the participation pool.
+    /// All on-chain registered Free nodes are eligible immediately — no maturity gate.
     pub async fn get_eligible_free_nodes(&self, current_height: u64) -> Vec<MasternodeInfo> {
-        let maturity_required = match self.network {
-            crate::NetworkType::Mainnet => crate::constants::blockchain::FREE_MATURITY_BLOCKS,
-            crate::NetworkType::Testnet => 0,
-        };
+        let maturity_required: u64 = 0;
         self.masternodes
             .read()
             .await
@@ -1767,10 +1761,7 @@ impl MasternodeRegistry {
     /// the ≥3-recipient rule still guards against single-node reward monopolization.
     pub async fn get_eligible_pool_nodes(&self, current_height: u64) -> Vec<MasternodeInfo> {
         const MIN_VIABLE_POOL: usize = 3;
-        let maturity_required = match self.network {
-            crate::NetworkType::Mainnet => crate::constants::blockchain::FREE_MATURITY_BLOCKS,
-            crate::NetworkType::Testnet => 0,
-        };
+        let maturity_required: u64 = 0;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1880,12 +1871,9 @@ impl MasternodeRegistry {
         if !matches!(info.masternode.tier, crate::types::MasternodeTier::Free) {
             return true; // Paid tiers always eligible
         }
-        let maturity_required = match network {
-            crate::NetworkType::Mainnet => crate::constants::blockchain::FREE_MATURITY_BLOCKS,
-            crate::NetworkType::Testnet => 0,
-        };
-        info.registration_height == 0
-            || current_height.saturating_sub(info.registration_height) >= maturity_required
+        // No maturity gate — all on-chain registered nodes are immediately eligible.
+        let _ = (network, current_height);
+        true
     }
 
     /// Set registration height for a masternode (called once when first block is seen)
@@ -2152,34 +2140,40 @@ impl MasternodeRegistry {
     /// - Leader selection: only nodes in previous block's bitmap are eligible
     /// - Removal: nodes that don't vote → excluded from bitmap → can't be selected
     ///
-    /// Bitmap format: 1 bit per masternode in deterministic sorted order
+    /// Bitmap format: 1 bit per masternode, ordered by ascending `slot_id`.
+    ///
+    /// `slot_id` is assigned permanently at registration and never changes, so
+    /// the bitmap position of each node is stable across all nodes on any chain
+    /// state — eliminating the AV6 position-drift attack.
+    ///
     /// Bit = 1: masternode voted on this block (active participant)
     /// Bit = 0: masternode did not vote (inactive or offline)
     pub async fn create_active_bitmap_from_voters(&self, voters: &[String]) -> (Vec<u8>, usize) {
         let masternodes = self.masternodes.read().await;
 
-        // Create deterministic sorted list of all masternodes
-        let mut sorted_mns: Vec<MasternodeInfo> = masternodes.values().cloned().collect();
-        sorted_mns.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
+        // Sort by slot_id (permanent, chain-derived — no drift).
+        // Nodes without a slot_id (slot_id == u32::MAX) are excluded from the bitmap;
+        // they are unconfirmed and should not be eligible for rewards.
+        let mut sorted_mns: Vec<MasternodeInfo> = masternodes
+            .values()
+            .filter(|mn| mn.masternode.slot_id != u32::MAX)
+            .cloned()
+            .collect();
+        sorted_mns.sort_by_key(|mn| mn.masternode.slot_id);
 
         if sorted_mns.is_empty() {
             return (vec![], 0);
         }
 
-        // Convert voters to HashSet for fast lookup
         let voter_set: std::collections::HashSet<String> = voters.iter().cloned().collect();
 
-        // Create bitmap: 1 bit per masternode
         let num_bits = sorted_mns.len();
-        let num_bytes = num_bits.div_ceil(8); // Round up to nearest byte
+        let num_bytes = num_bits.div_ceil(8);
         let mut bitmap = vec![0u8; num_bytes];
 
         let mut active_count = 0;
         for (i, mn) in sorted_mns.iter().enumerate() {
-            // Active if voted on this block
-            let voted = voter_set.contains(&mn.masternode.address);
-
-            if voted {
+            if voter_set.contains(&mn.masternode.address) {
                 let byte_index = i / 8;
                 let bit_index = 7 - (i % 8); // Big-endian: MSB first
                 bitmap[byte_index] |= 1 << bit_index;
@@ -2198,21 +2192,25 @@ impl MasternodeRegistry {
         (bitmap, active_count)
     }
 
-    /// Get active masternodes from a block's bitmap
-    /// Returns list of masternodes where bitmap bit = 1
+    /// Decode the active-masternodes bitmap.
+    ///
+    /// Returns the masternodes whose bit is set to 1, in slot_id order.
+    /// The order MUST match `create_active_bitmap_from_voters` exactly.
     pub async fn get_active_from_bitmap(&self, bitmap: &[u8]) -> Vec<MasternodeInfo> {
         let masternodes = self.masternodes.read().await;
 
-        // Create deterministic sorted list (same order as bitmap)
-        let mut sorted_mns: Vec<MasternodeInfo> = masternodes.values().cloned().collect();
-        sorted_mns.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
+        // Same sort order as create_active_bitmap_from_voters.
+        let mut sorted_mns: Vec<MasternodeInfo> = masternodes
+            .values()
+            .filter(|mn| mn.masternode.slot_id != u32::MAX)
+            .cloned()
+            .collect();
+        sorted_mns.sort_by_key(|mn| mn.masternode.slot_id);
 
-        // Extract active ones based on bitmap
         let mut active = Vec::new();
         for (i, mn) in sorted_mns.iter().enumerate() {
             let byte_index = i / 8;
-            let bit_index = 7 - (i % 8); // Big-endian: MSB first
-
+            let bit_index = 7 - (i % 8);
             if byte_index < bitmap.len() && (bitmap[byte_index] & (1 << bit_index)) != 0 {
                 active.push(mn.clone());
             }

@@ -6,15 +6,17 @@
 /// Genesis block checkpoints — hardcoded hashes like Bitcoin's checkpoints.
 /// Nodes reject any genesis block whose hash doesn't match these values.
 pub mod genesis {
-    /// Testnet genesis block hash — locked in 2026-03-07 with 7-node testnet
-    pub const TESTNET_GENESIS_HASH: Option<&str> =
-        Some("866273966c0f380e3f71360d4cd59933f2e8c936b02f4c2774b9fd0e913f0ebb");
+    /// Testnet genesis block hash — set to None until the clean genesis is produced.
+    pub const TESTNET_GENESIS_HASH: Option<&str> = None;
 
-    /// Mainnet genesis block hash — treasury-only genesis (v1.4.9)
-    /// 100 TIME → treasury pool; masternodes first rewarded in block 1
-    pub const MAINNET_GENESIS_HASH: Option<&str> =
-        Some("84ef74a8860ef3540e52b2bc30f74c6b0cd22a3822286e4ec4fcaf1e3c60c0d1");
+    /// Mainnet genesis block hash — set to None until the clean genesis is produced.
+    pub const MAINNET_GENESIS_HASH: Option<&str> = None;
 }
+
+/// Storage schema version. Increment whenever on-disk serialization changes
+/// (block/tx/UTXO format, key layout, etc.). Nodes on a mismatched version
+/// fail fast with a clear error message instead of silently corrupting state.
+pub const STORAGE_VERSION: u32 = 2;
 
 /// Blockchain protocol constants
 pub mod blockchain {
@@ -43,11 +45,6 @@ pub mod blockchain {
 
     pub const MIN_POOL_PAYOUT_SATOSHIS: u64 = SATOSHIS_PER_TIME; // 1 TIME minimum per recipient
     pub const MAX_FREE_TIER_RECIPIENTS: usize = 25; // Max recipients for Free tier per block
-
-    /// Anti-sybil maturity gate: Free nodes must be online this many blocks before
-    /// becoming eligible for VRF sortition and the participation pool.
-    /// Only enforced on mainnet (testnet = 0 for rapid development iteration).
-    pub const FREE_MATURITY_BLOCKS: u64 = 72; // ~12 hours at 10 min/block
 
     /// Maximum block size for validation — blocks from peers up to this size are accepted.
     /// Set to 4 MB to accommodate blocks produced before the assembly cap was enforced.
@@ -79,63 +76,6 @@ pub mod blockchain {
 
     /// Number of recent blocks to cache in memory
     pub const BLOCK_CACHE_SIZE: usize = 100;
-
-    /// Pool distribution validation is skipped for blocks at or below this height.
-    ///
-    /// **Blocks 676–681** (2026-04-05): consensus split caused by non-deterministic
-    /// `tier_for_wallet` when an operator shared the same wallet address across Silver
-    /// and Free tier registrations. Fixed by deterministic tier logic (commit 8d2086a).
-    ///
-    /// **Block 1737** (2026-04-13): free-tier fairness violation (AV35) — a modified
-    /// producer paid only 1 of 5 equally-deserving free-tier nodes (counter≥1000 for
-    /// all candidates). The fairness guard correctly rejects block 1737, but it was
-    /// deployed while that block was already accepted by a minority of pre-upgrade peers.
-    /// Raising this constant to 1737 lets honest nodes at height 1736 accept block 1737
-    /// and re-join the majority chain. All blocks at height ≥ 1738 are fully validated.
-    pub const POOL_VALIDATION_MIN_HEIGHT: u64 = 1737;
-
-    /// Fork height at which free-tier reward eligibility switches from gossip-based
-    /// to on-chain registration.
-    ///
-    /// Before this height: free-tier eligibility is determined by gossip (who is
-    /// currently connected), which can be gamed by a VRF leader disconnecting other
-    /// free nodes before producing a block (AV35 / targeted-disconnect attack).
-    ///
-    /// At and after this height: only nodes that have submitted a `FreeNodeRegistration`
-    /// special transaction AND waited FREE_MATURITY_BLOCKS are eligible for free-tier
-    /// rewards.  The eligible set is computed deterministically from on-chain state,
-    /// so producer and validator always agree — the attack surface collapses to zero.
-    ///
-    /// Operators running free-tier nodes must submit a `freetierregister` transaction
-    /// before this height and wait for maturity.  The daemon auto-submits on startup
-    /// if `masternode=1` and no collateral is configured.
-    pub const FREE_TIER_ONCHAIN_HEIGHT: u64 = 2160;
-
-    /// Minimum transaction fee for a FreeNodeRegistration special transaction.
-    /// Creates a small economic barrier against spam-registering many fake nodes.
-    /// Fee is collected by the block producer as normal; nothing is burned.
-    pub const FREE_TIER_REG_FEE_SATOSHIS: u64 = 100_000_000; // 1 TIME
-
-    /// Fork height at which the deterministic `RewardCalculator` replaces the
-    /// heuristic pool-distribution validator.
-    ///
-    /// Before this height: `validate_pool_distribution` uses a multi-step heuristic
-    /// with several escape hatches (deregistered recipients → loose ceiling check,
-    /// bitmap drift → pool treated as rolled up).  A misbehaving producer can exploit
-    /// these to pay incorrect recipients while amounts appear valid.
-    ///
-    /// At and after this height: validators call `reward_calculator::compute()` with
-    /// the bitmap-decoded active-node set, compute the EXACT expected reward list, and
-    /// reject any block where actual ≠ expected.  There are no escape hatches.
-    ///
-    /// This height must be set to a future mainnet block where:
-    ///   1. All nodes have upgraded (reward_calculator module present).
-    ///   2. Free-tier on-chain registration is stable (FREE_TIER_ONCHAIN_HEIGHT active).
-    ///   3. Paid-tier registry is stable (collateral outpoints stable in UTXO set).
-    ///
-    /// Currently set to 2500 — approximately 340 blocks (~2.4 days) after
-    /// FREE_TIER_ONCHAIN_HEIGHT=2160.  Adjust before deployment if needed.
-    pub const STRICT_REWARD_CALC_HEIGHT: u64 = 2500;
 
 }
 

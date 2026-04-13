@@ -278,6 +278,32 @@ impl Blockchain {
         let consensus_health =
             Arc::new(ConsensusHealthMonitor::new(ConsensusHealthConfig::default()));
 
+        // Storage version check — fail fast if the on-disk schema is from an older version.
+        // This prevents silently operating on data that was serialised in an incompatible format.
+        let stored_version = storage
+            .get(b"storage_version")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize::<u32>(&bytes).ok());
+        match stored_version {
+            None => {
+                // Fresh database or pre-versioned database that has no blocks yet —
+                // stamp the current version so future starts validate correctly.
+                if let Ok(bytes) = bincode::serialize(&crate::constants::STORAGE_VERSION) {
+                    let _ = storage.insert(b"storage_version", bytes);
+                }
+            }
+            Some(v) if v == crate::constants::STORAGE_VERSION => { /* version matches, continue */ }
+            Some(v) => {
+                panic!(
+                    "Storage schema mismatch: database is version {}, code expects version {}. \
+                     Delete the data directory and resync from genesis.",
+                    v,
+                    crate::constants::STORAGE_VERSION
+                );
+            }
+        }
+
         // Load chain height from database
         let loaded_height = storage
             .get("chain_height".as_bytes())
@@ -595,8 +621,12 @@ impl Blockchain {
                                     e
                                 );
                             }
-                            // Rebuild treasury balance (5 TIME per block, including genesis)
-                            self.treasury_deposit(constants::blockchain::TREASURY_POOL_SATOSHIS);
+                            // Sync treasury balance from the block header (authoritative).
+                            let t = block.header.treasury_balance;
+                            self.treasury_balance.store(t, std::sync::atomic::Ordering::Relaxed);
+                            if let Ok(bytes) = bincode::serialize(&t) {
+                                let _ = self.storage.insert("treasury_balance", bytes);
+                            }
                         }
                         Err(e) => {
                             tracing::error!(
@@ -868,14 +898,17 @@ impl Blockchain {
             .flush()
             .map_err(|e| format!("Failed to flush hardcoded genesis: {}", e))?;
         self.current_height.store(0, Ordering::Release);
-        // For mainnet: full block reward goes to treasury (no masternode rewards at genesis)
-        if matches!(self.network_type, NetworkType::Mainnet) {
-            self.treasury_deposit(genesis.header.block_reward);
-            tracing::info!(
-                "🏦 Deposited {} TIME to treasury from genesis block reward",
-                genesis.header.block_reward / 100_000_000
-            );
+        // Sync treasury balance from the genesis block header.
+        let t = genesis.header.treasury_balance;
+        self.treasury_balance.store(t, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(bytes) = bincode::serialize(&t) {
+            let _ = self.storage.insert("treasury_balance", bytes);
         }
+        tracing::info!(
+            "🏦 Genesis treasury balance: {} TIME ({} satoshis)",
+            t / 100_000_000,
+            t
+        );
         tracing::info!(
             "🎉 Hardcoded {:?} genesis stored: {}",
             self.network_type,
@@ -3811,15 +3844,10 @@ impl Blockchain {
                     }
                 }
 
-                // After FREE_TIER_ONCHAIN_HEIGHT, only on-chain-registered free-tier nodes
-                // are eligible.  Gossip-visible but unregistered nodes are stripped out so
+                // Free-tier nodes must have an on-chain MasternodeRegistration TX.
+                // Gossip-visible but unregistered nodes are stripped out here so
                 // the producer cannot include sybil/fake free-tier nodes in the bitmap.
-                // Nodes that voted (gossip-visible) AND are registered receive rewards.
-                // Nodes that are offline (not in eligible_pool) never appear here regardless.
-                if matches!(tier, MasternodeTier::Free)
-                    && next_height
-                        >= crate::constants::blockchain::FREE_TIER_ONCHAIN_HEIGHT
-                {
+                if matches!(tier, MasternodeTier::Free) {
                     let before = tier_nodes.len();
                     tier_nodes.retain(|(mn, _)| {
                         self.is_free_tier_registered(&mn.masternode.address)
@@ -3827,8 +3855,7 @@ impl Blockchain {
                     let filtered = before - tier_nodes.len();
                     if filtered > 0 {
                         tracing::info!(
-                            "💰 Block {}: excluded {} unregistered Free node(s) from distribution \
-                             (FREE_TIER_ONCHAIN_HEIGHT active)",
+                            "💰 Block {}: excluded {} unregistered Free node(s) from distribution",
                             next_height, filtered
                         );
                     }
@@ -4176,6 +4203,11 @@ impl Blockchain {
             .create_active_bitmap_from_voters(&voters)
             .await;
 
+        // Compute the treasury_balance for this block: prev_treasury + 5 TIME per block.
+        // Governance spends are committed separately; for production we start with the deposit.
+        let new_treasury_balance = self.treasury_balance.load(std::sync::atomic::Ordering::Relaxed)
+            + constants::blockchain::TREASURY_POOL_SATOSHIS;
+
         let mut block = Block {
             header: BlockHeader {
                 version: 1,
@@ -4190,6 +4222,7 @@ impl Blockchain {
                 masternode_tiers: tier_counts,
                 active_masternodes_bitmap: active_bitmap.clone(),
                 liveness_recovery: Some(false), // Will be set below if needed
+                treasury_balance: new_treasury_balance,
                 ..Default::default()
             },
             transactions: all_txs,
@@ -4901,8 +4934,16 @@ impl Blockchain {
             self.process_special_transactions(&block).await;
         }
 
-        // Deposit treasury allocation for this block (5 TIME per block, including genesis)
-        self.treasury_deposit(constants::blockchain::TREASURY_POOL_SATOSHIS);
+        // Sync the local treasury balance from the block's committed header value.
+        // This is the authoritative source — we don't accumulate locally; we trust the chain.
+        {
+            let new_treasury = block.header.treasury_balance;
+            self.treasury_balance
+                .store(new_treasury, std::sync::atomic::Ordering::Relaxed);
+            if let Ok(bytes) = bincode::serialize(&new_treasury) {
+                let _ = self.storage.insert("treasury_balance", bytes);
+            }
+        }
 
         // Check for governance proposals whose voting window closes at this height.
         // Skip during initial sync to avoid executing proposals against a partially-built
@@ -6013,22 +6054,16 @@ impl Blockchain {
         self.is_masternode_registered(node_address)
     }
 
-    /// Returns all mature on-chain masternode registrations at `current_height`.
-    /// A registration is mature when `current_height >= registration_height + FREE_MATURITY_BLOCKS`.
-    pub fn get_onchain_registered_nodes(&self, current_height: u64) -> Vec<crate::types::MasternodeOnchainInfo> {
-        use crate::constants::blockchain::FREE_MATURITY_BLOCKS;
+    /// Returns all on-chain masternode registrations.
+    /// The `current_height` parameter is kept for API compatibility but no longer used
+    /// to gate eligibility — all confirmed registrations are immediately eligible.
+    pub fn get_onchain_registered_nodes(&self, _current_height: u64) -> Vec<crate::types::MasternodeOnchainInfo> {
         let prefix = b"mnreg:";
         self.storage
             .scan_prefix(prefix)
             .filter_map(|item| {
                 let (_, v) = item.ok()?;
-                let info: crate::types::MasternodeOnchainInfo =
-                    bincode::deserialize(&v).ok()?;
-                if current_height >= info.registration_height + FREE_MATURITY_BLOCKS {
-                    Some(info)
-                } else {
-                    None
-                }
+                bincode::deserialize(&v).ok()
             })
             .collect()
     }
@@ -6186,6 +6221,31 @@ impl Blockchain {
             ));
         }
 
+        // Validate treasury_balance: must equal prev_treasury + TREASURY_POOL_SATOSHIS.
+        // Governance disbursements reduce the balance; we accept any value ≤ expected
+        // to allow for future governance spends without breaking consensus.
+        if block.header.height > 0 {
+            if let Ok(prev_block) = self.get_block_by_height(block.header.height - 1).await {
+                let expected_treasury = prev_block
+                    .header
+                    .treasury_balance
+                    .saturating_add(treasury_share);
+                // Allow equal (no disbursement) or lower (governance spend this block).
+                // A higher value would mean the block created treasury funds from thin air.
+                if block.header.treasury_balance > expected_treasury {
+                    return Err(format!(
+                        "Block {} treasury_balance {} exceeds maximum expected {} \
+                         (prev {} + {} per-block)",
+                        block.header.height,
+                        block.header.treasury_balance,
+                        expected_treasury,
+                        prev_block.header.treasury_balance,
+                        treasury_share,
+                    ));
+                }
+            }
+        }
+
         // Transaction 1 should be reward distribution
         let reward_dist = &block.transactions[1];
 
@@ -6322,20 +6382,7 @@ impl Blockchain {
         block: &Block,
         calculated_fees: u64,
     ) -> Result<(), String> {
-        use crate::constants::blockchain::{
-            GOLD_POOL_SATOSHIS, MAX_FREE_TIER_RECIPIENTS, POOL_VALIDATION_MIN_HEIGHT,
-            PRODUCER_REWARD_SATOSHIS, SATOSHIS_PER_TIME,
-        };
         use crate::types::MasternodeTier;
-
-        // Skip pool validation for historical blocks produced before the
-        // deterministic-tier fix (commit 8d2086a, 2026-04-05). Blocks in the
-        // range 676-681 may legitimately over-distribute a tier pool due to
-        // wallet overlap between Silver and Free registrations; re-validating
-        // them with the corrected logic would permanently fork minority nodes.
-        if block.header.height < POOL_VALIDATION_MIN_HEIGHT {
-            return Ok(());
-        }
 
         let producer_addr = &block.header.leader;
         if producer_addr.is_empty() || block.masternode_rewards.is_empty() {
@@ -6366,113 +6413,7 @@ impl Blockchain {
             None => return Ok(()),
         };
 
-        // ── Collateral UTXO owner map (anti-squatter enforcement) ────────────
-        // Paid-tier rewards always flow to the collateral UTXO's output address.
-        // A squatter controlling the gossip anchor cannot profit: the reward always
-        // flows to whoever owns the UTXO key.
-        //
-        // We pre-build a map from UTXO-owner address → tier so that Steps 2 and 5
-        // can classify these addresses correctly even when tier_for_wallet returns
-        // None (the squatter, not the UTXO owner, holds the registry anchor).
-        //
-        // IMPORTANT (AV6 / bitmap positional drift): built from ALL known paid-tier
-        // masternodes in all_infos, NOT only bitmap-decoded nodes, to avoid false
-        // rejections when our local registry sort order has drifted from the producer's.
-        let collateral_utxo_tier_map: std::collections::HashMap<String, MasternodeTier> = {
-            let mut map = std::collections::HashMap::new();
-            for info in &all_infos {
-                if info.masternode.tier == MasternodeTier::Free {
-                    continue; // Free tier has no collateral UTXO
-                }
-                if let Some(ref outpoint) = info.masternode.collateral_outpoint {
-                    if let Ok(utxo) = self.utxo_manager.get_utxo(outpoint).await {
-                        if !utxo.address.is_empty() {
-                            map.insert(utxo.address, info.masternode.tier);
-                        }
-                    }
-                }
-            }
-            map
-        };
-
-        // ── Step 2: partition block.masternode_rewards into producer vs tier pools ──
-        // Each entry in masternode_rewards is a (TIME_wallet_address, satoshis) pair
-        // committed in the block.  Look up each non-producer wallet's tier from the
-        // registry (stable property) so we can verify the pool amounts.
-        //
-        // IMPORTANT: use the already-captured all_infos snapshot rather than a live
-        // tier_for_wallet call.  The two operations are semantically equivalent but a
-        // live call reads the registry AFTER the snapshot, introducing a TOCTOU race:
-        // a masternode that gossip-registers between the snapshot and this loop would be
-        // classified as "known" here (keeping unknown_non_producer_paid == 0) but would
-        // NOT appear in all_infos, causing the Step 5 is_known_masternode fallback to
-        // return false and hard-reject a fully valid block.
-        // Using the snapshot keeps Steps 2 and 5 consistent: if a wallet is unknown in
-        // all_infos it will be counted as unknown_non_producer_paid here, which causes
-        // Step 5 to be skipped entirely (the correct, lenient path for unknown addresses).
-        let snapshot_tier_for_wallet = |wallet: &str| -> Option<MasternodeTier> {
-            all_infos
-                .iter()
-                .filter(|info| {
-                    info.masternode.wallet_address == wallet
-                        || (!info.reward_address.is_empty() && info.reward_address == wallet)
-                })
-                .map(|info| info.masternode.tier)
-                .max_by_key(|tier| *tier as u64)
-        };
-
-        let mut producer_received: u64 = 0;
-        // Accumulate the total paid per tier from the block's actual rewards.
-        let mut tier_paid: std::collections::HashMap<MasternodeTier, u64> =
-            std::collections::HashMap::new();
-        // Track the first wallet paid per tier (the pool winner for non-Free tiers).
-        let mut tier_winner: std::collections::HashMap<MasternodeTier, String> =
-            std::collections::HashMap::new();
-        let mut unknown_non_producer_paid: u64 = 0;
-
-        for (wallet, amount) in &block.masternode_rewards {
-            if wallet == &producer_wallet {
-                producer_received += amount;
-            } else {
-                match snapshot_tier_for_wallet(wallet.as_str()) {
-                    Some(tier) => {
-                        *tier_paid.entry(tier).or_insert(0) += amount;
-                        tier_winner.entry(tier).or_insert_with(|| wallet.clone());
-                    }
-                    None => {
-                        // Check if this wallet is a UTXO-owner address under anti-squatter
-                        // enforcement. A squatter holds the registry anchor, so the wallet lookup
-                        // returns None for the legitimate UTXO owner — use the pre-built collateral map.
-                        if let Some(&tier) = collateral_utxo_tier_map.get(wallet.as_str()) {
-                            *tier_paid.entry(tier).or_insert(0) += amount;
-                            tier_winner.entry(tier).or_insert_with(|| wallet.clone());
-                        } else {
-                            // Wallet not in current registry snapshot — masternode may have
-                            // deregistered since the block was produced, or this node missed
-                            // the gossip announcement.  Accept the payment as long as it
-                            // doesn't exceed the largest single pool.  Step 5 bitmap check
-                            // is skipped when unknown_non_producer_paid > 0.
-                            unknown_non_producer_paid += amount;
-                            if *amount > GOLD_POOL_SATOSHIS {
-                                return Err(format!(
-                                    "Block {} unknown recipient {} received {} satoshis, \
-                                     exceeds max tier pool {}",
-                                    block.header.height, wallet, amount, GOLD_POOL_SATOSHIS
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Pre-compute the active masternodes from the bitmap ONCE.
-        // Used in both Step 3 (pool distribution) and Step 5 (recipient check).
-        // The bitmap is positional: bit i corresponds to the masternode at sorted
-        // position i in the PRODUCER'S registry at block production time.  When our
-        // registry has diverged (e.g., Free-tier gossip migrations added/moved nodes),
-        // our sorted positions differ from the producer's and the decoded set is wrong.
-        // We detect and handle this gracefully in Steps 3 and 5 below.
+        // Decode the bitmap to find which masternodes were active (slot_id keyed, no drift).
         let active_bitmap_nodes: Vec<crate::masternode_registry::MasternodeInfo> =
             if !block.header.active_masternodes_bitmap.is_empty() {
                 self.masternode_registry
@@ -6488,10 +6429,7 @@ impl Blockchain {
             .map(|b| b.count_ones() as usize)
             .sum();
 
-        // In-memory fairness tracking for winner identity verification (Step 3b).
-        // Reads the blocks_without_reward counter maintained by add_block — O(n) in-memory,
-        // no sled I/O.  Replaces the former get_pool_reward_tracking() which scanned
-        // 1000 blocks on every validation call and blocked the async runtime.
+        // Fairness tracking for reward_calculator (O(n) in-memory, no sled I/O).
         let fairness_map: std::collections::HashMap<String, u64> =
             if !active_bitmap_nodes.is_empty() {
                 self.masternode_registry
@@ -6501,733 +6439,80 @@ impl Blockchain {
                 std::collections::HashMap::new()
             };
 
-        // ── Strict deterministic path (STRICT_REWARD_CALC_HEIGHT) ───────────────
-        // After this height every validator runs reward_calculator::compute() with
-        // the same bitmap-decoded active nodes and compares the result exactly to
-        // block.masternode_rewards.  No escape hatches — any deviation is proof of
-        // producer misbehaviour.  Returns early (Ok or Err) so the legacy heuristic
-        // steps below are skipped entirely for these heights.
-        if block.header.height >= crate::constants::blockchain::STRICT_REWARD_CALC_HEIGHT {
-            // Reject if the bitmap encodes nodes our registry doesn't know.
-            // After FREE_TIER_ONCHAIN_HEIGHT the set of valid masternodes is fully
-            // on-chain — an unknown node in the bitmap means the producer fabricated it.
-            if active_bitmap_nodes.len() < bitmap_active_count {
-                return Err(format!(
-                    "Block {} bitmap contains {} active bits but local registry resolved \
-                     only {} nodes — producer may have inserted unknown masternodes",
-                    block.header.height,
-                    bitmap_active_count,
-                    active_bitmap_nodes.len(),
-                ));
-            }
-
-            // Build the on-chain-registered Free-tier set (empty below FREE_TIER_ONCHAIN_HEIGHT,
-            // but STRICT_REWARD_CALC_HEIGHT >= FREE_TIER_ONCHAIN_HEIGHT by definition).
-            let free_tier_registered: std::collections::HashSet<String> = active_bitmap_nodes
-                .iter()
-                .filter(|info| info.masternode.tier == MasternodeTier::Free)
-                .filter(|info| self.is_free_tier_registered(&info.masternode.address))
-                .map(|info| info.masternode.address.clone())
-                .collect();
-
-            let calc_input = crate::reward_calculator::RewardInput {
-                height: block.header.height,
-                producer_wallet: &producer_wallet,
-                active_nodes: &active_bitmap_nodes,
-                fairness_map: &fairness_map,
-                fees: calculated_fees,
-                total_reward: block.header.block_reward,
-                free_tier_registered: &free_tier_registered,
-            };
-
-            let expected =
-                crate::reward_calculator::compute(&calc_input, &self.utxo_manager).await;
-
-            let expected_norm = crate::reward_calculator::normalize(&expected);
-            let actual_norm = crate::reward_calculator::normalize(&block.masternode_rewards);
-
-            if expected_norm != actual_norm {
-                // Build a concise diff for the error message.
-                let mut diff: Vec<String> = Vec::new();
-                for (addr, &exp_amt) in &expected_norm {
-                    let act_amt = actual_norm.get(addr).copied().unwrap_or(0);
-                    if act_amt != exp_amt {
-                        diff.push(format!(
-                            "{} expected {} got {}",
-                            &addr[..addr.len().min(12)],
-                            exp_amt,
-                            act_amt
-                        ));
-                    }
-                }
-                for (addr, &act_amt) in &actual_norm {
-                    if !expected_norm.contains_key(addr.as_str()) {
-                        diff.push(format!(
-                            "{} unexpected {}",
-                            &addr[..addr.len().min(12)],
-                            act_amt
-                        ));
-                    }
-                }
-                return Err(format!(
-                    "Block {} reward manipulation: calculator expected {} recipients, \
-                     block has {} recipients. Discrepancies: {}",
-                    block.header.height,
-                    expected_norm.len(),
-                    actual_norm.len(),
-                    diff.join("; "),
-                ));
-            }
-
-            tracing::debug!(
-                "Block {} strict reward validation passed ({} recipients)",
+        // Reject if the bitmap encodes nodes our registry doesn't know.
+        // The set of valid masternodes is fully on-chain — an unknown node in the
+        // bitmap means the producer fabricated it.
+        if active_bitmap_nodes.len() < bitmap_active_count {
+            return Err(format!(
+                "Block {} bitmap contains {} active bits but local registry resolved \
+                 only {} nodes — producer may have inserted unknown masternodes",
                 block.header.height,
-                expected_norm.len(),
-            );
-            return Ok(());
+                bitmap_active_count,
+                active_bitmap_nodes.len(),
+            ));
         }
 
-        // ── Step 3: verify each tier pool was distributed correctly ───────────
-        // For each paid tier: the total paid to all recipients of that tier must
-        // equal the tier's canonical pool allocation.
-        // For each unpaid tier (no recipients): that pool must have rolled up to
-        // the producer — we track this to verify the producer's total below.
-        //
-        // IMPORTANT: If any reward recipients are no longer in the registry
-        // (deregistered since the block was produced, or from old pool-sharing era),
-        // we cannot accurately reconstruct per-tier totals — fall back to a loose
-        // block-reward-ceiling check instead of strict per-tier verification.
-
-        let mut rolled_up_to_producer: u64 = 0;
-        // When the fallback path fires (deregistered recipients present), we can't
-        // determine exactly how much rolled up to the producer.  Use 0 as the minimum
-        // (producer must have received at least PRODUCER_REWARD) and the full block
-        // reward as the maximum (e.g. all-Free blocks distribute 95 TIME to non-producers).
-        let mut rolled_up_to_producer_max_override: Option<u64> = None;
-
-        // ── All-Free early check ──────────────────────────────────────────────
-        // When no paid-tier nodes exist AND the producer received less than their
-        // standard reward, this is an all-Free block: 95 TIME is split evenly among
-        // Free-tier nodes.  The per-tier pool check below would incorrectly reject
-        // this (Free tier pool = 8 TIME, not 95 TIME), so we must detect and validate
-        // it BEFORE the per-tier loop.
-        let paid_tier_total: u64 = tier_paid
+        // Build the on-chain-registered Free-tier set (all registered = eligible).
+        let free_tier_registered: std::collections::HashSet<String> = active_bitmap_nodes
             .iter()
-            .filter(|(t, _)| **t != MasternodeTier::Free)
-            .map(|(_, v)| *v)
-            .sum();
+            .filter(|info| info.masternode.tier == MasternodeTier::Free)
+            .filter(|info| self.is_free_tier_registered(&info.masternode.address))
+            .map(|info| info.masternode.address.clone())
+            .collect();
 
-        if producer_received < PRODUCER_REWARD_SATOSHIS
-            && paid_tier_total == 0
-            && unknown_non_producer_paid == 0
-        {
-            let free_paid = tier_paid.get(&MasternodeTier::Free).copied().unwrap_or(0);
-            let total_distributed = producer_received + free_paid;
-            // block.header.block_reward is already net of treasury (= base_reward - treasury_share),
-            // so the all-Free block should distribute exactly block_reward satoshis — no further
-            // treasury deduction.
-            let expected_total = block.header.block_reward;
-            let tolerance = MAX_FREE_TIER_RECIPIENTS as u64;
-            if total_distributed.abs_diff(expected_total) > tolerance {
-                return Err(format!(
-                    "Block {} all-Free distribution: total paid {} satoshis, \
-                     expected {} (block_reward - treasury)",
-                    block.header.height, total_distributed, expected_total
-                ));
-            }
-            let active_recipients = block
-                .masternode_rewards
-                .iter()
-                .filter(|(_, v)| *v > 0)
-                .count();
-            if active_recipients > MAX_FREE_TIER_RECIPIENTS {
-                return Err(format!(
-                    "Block {} all-Free: {} recipients exceeds max {}",
-                    block.header.height, active_recipients, MAX_FREE_TIER_RECIPIENTS
-                ));
-            }
-            tracing::debug!(
-                "Block {} validated as all-Free: {} TIME to {} recipients",
-                block.header.height,
-                total_distributed / SATOSHIS_PER_TIME,
-                active_recipients,
-            );
-            return Ok(());
-        }
+        let calc_input = crate::reward_calculator::RewardInput {
+            height: block.header.height,
+            producer_wallet: &producer_wallet,
+            active_nodes: &active_bitmap_nodes,
+            fairness_map: &fairness_map,
+            fees: calculated_fees,
+            total_reward: block.header.block_reward,
+            free_tier_registered: &free_tier_registered,
+        };
 
-        if unknown_non_producer_paid > 0 {
-            // Some recipients have deregistered — we can only verify the total
-            // non-producer payout is within the block reward.
-            //
-            // NOTE: We intentionally use block.header.block_reward (already validated
-            // to equal BLOCK_REWARD - treasury + fees) as the ceiling here rather than
-            // total_tier_budget (65 TIME).  The old 65 TIME cap was wrong for blocks
-            // produced in "all-Free" conditions (network degradation, few paid-tier nodes
-            // online): in those blocks the full 95 TIME is distributed among Free-tier
-            // nodes, so the non-producer total legitimately exceeds the tier budget.
-            // The per-recipient GOLD_POOL_SATOSHIS cap (line above) still limits any
-            // single unknown payout to 25 TIME, preserving the key sybil bound.
-            let total_non_producer_paid: u64 =
-                tier_paid.values().sum::<u64>() + unknown_non_producer_paid;
-            if total_non_producer_paid > block.header.block_reward {
-                return Err(format!(
-                    "Block {} total non-producer payout {} exceeds block reward {}",
-                    block.header.height, total_non_producer_paid, block.header.block_reward
-                ));
-            }
-            // Keep rolled_up_to_producer=0 for the MIN check (we don't know actual rollup,
-            // so only require producer received base PRODUCER_REWARD).
-            // Override MAX check to allow up to full block reward rolled up.
-            rolled_up_to_producer_max_override = Some(block.header.block_reward);
-            tracing::debug!(
-                "Block {} has {} satoshis paid to unknown (deregistered) recipients — \
-                 skipping strict per-tier pool verification, using loose producer max",
-                block.header.height,
-                unknown_non_producer_paid,
-            );
-        } else {
-            for tier in &[
-                MasternodeTier::Gold,
-                MasternodeTier::Silver,
-                MasternodeTier::Bronze,
-                MasternodeTier::Free,
-            ] {
-                let pool = tier.pool_allocation();
-                let paid = tier_paid.get(tier).copied().unwrap_or(0);
+        let expected =
+            crate::reward_calculator::compute(&calc_input, &self.utxo_manager).await;
 
-                if paid == 0 {
-                    // A tier pool may only roll up to the producer if the block producer
-                    // did not have any active masternodes of that tier in its view.
-                    //
-                    // IMPORTANT: Use the block's committed bitmap — NOT live gossip state —
-                    // to determine which masternodes were active.  Gossip-based `is_active`
-                    // flags differ between nodes (especially after nodes come back online
-                    // but haven't participated in consensus yet), causing the same valid
-                    // block to be rejected by validators whose gossip state differs from
-                    // the producer's.  The bitmap is the canonical, tamper-evident record
-                    // of which masternodes the producer observed as consensus participants.
-                    //
-                    // If the bitmap is absent (old block), fall back to gossip `list_by_tier`.
-                    let non_producer_tier_nodes: usize = if !active_bitmap_nodes.is_empty() {
-                        // Use pre-computed bitmap decode (avoids redundant async call).
-                        active_bitmap_nodes
-                            .iter()
-                            .filter(|info| {
-                                info.masternode.tier == *tier && {
-                                    let wallet = if !info.reward_address.is_empty() {
-                                        &info.reward_address
-                                    } else {
-                                        &info.masternode.wallet_address
-                                    };
-                                    wallet != producer_addr && wallet.as_str() != producer_wallet
-                                }
-                            })
-                            .count()
-                    } else if !block.header.active_masternodes_bitmap.is_empty() {
-                        // Bitmap present but decoded to zero nodes (empty registry?).
-                        0
-                    } else {
-                        // Old block without bitmap — fall back to gossip state.
-                        let tier_nodes = self.masternode_registry.list_by_tier(*tier).await;
-                        tier_nodes
-                            .iter()
-                            .filter(|info| {
-                                let wallet = if !info.reward_address.is_empty() {
-                                    &info.reward_address
-                                } else {
-                                    &info.masternode.wallet_address
-                                };
-                                wallet != producer_addr && wallet.as_str() != producer_wallet
-                            })
-                            .count()
-                    };
-                    if non_producer_tier_nodes > 0 {
-                        // Cross-check: if the bitmap is present, verify that at least
-                        // one of the identified tier nodes actually appears as a paid
-                        // reward recipient in the block.  If none do, our positional
-                        // decoding is likely wrong (registry diverged from producer's
-                        // sorted order due to Free-tier gossip churn) — the phantom
-                        // "active" count is an artefact of wrong bit positions.
-                        // Accept the rollup and let Step 4 verify the producer total.
-                        //
-                        // For old blocks (no bitmap) we always hard-fail: the gossip
-                        // fallback is inherently unreliable, so we only relax the check
-                        // when the bitmap drift signal is available.
-                        let drift_detected = !block.header.active_masternodes_bitmap.is_empty()
-                            && {
-                                let reward_wallets: std::collections::HashSet<&str> = block
-                                    .masternode_rewards
-                                    .iter()
-                                    .filter(|(_, amt)| *amt > 0)
-                                    .map(|(w, _)| w.as_str())
-                                    .collect();
-                                !active_bitmap_nodes.iter().any(|info| {
-                                    if info.masternode.tier != *tier {
-                                        return false;
-                                    }
-                                    let w = if !info.reward_address.is_empty() {
-                                        &info.reward_address
-                                    } else {
-                                        &info.masternode.wallet_address
-                                    };
-                                    w != producer_addr
-                                        && w.as_str() != producer_wallet
-                                        && reward_wallets.contains(w.as_str())
-                                })
-                            };
-                        if drift_detected {
-                            tracing::warn!(
-                                "Block {} {:?}-tier: bitmap shows {} active non-producer \
-                                 node(s) but none appear in block rewards — bitmap position \
-                                 drift (registry diverged from producer's), treating pool \
-                                 as rolled up to producer",
-                                block.header.height,
-                                tier,
-                                non_producer_tier_nodes,
-                            );
-                            rolled_up_to_producer += pool;
-                            continue;
-                        }
-                        return Err(format!(
-                            "Block {} {:?}-tier pool not distributed: {} registered \
-                             node(s) received 0 — pool cannot roll up to producer",
-                            block.header.height, tier, non_producer_tier_nodes
-                        ));
-                    }
-                    // Genuinely empty tier from the producer's perspective — pool rolls up.
-                    rolled_up_to_producer += pool;
-                    continue;
-                }
+        let expected_norm = crate::reward_calculator::normalize(&expected);
+        let actual_norm = crate::reward_calculator::normalize(&block.masternode_rewards);
 
-                // For Free tier: pool is split among ≤ MAX_FREE_TIER_RECIPIENTS nodes.
-                // For paid tiers: the full pool goes to exactly one winner.
-                // In both cases, total paid to the tier must equal the pool allocation
-                // (within 1 satoshi per recipient for integer-division rounding).
-                let recipient_count = if matches!(tier, MasternodeTier::Free) {
-                    // Free tier: pool split among ≤ MAX_FREE_TIER_RECIPIENTS nodes.
-                    // No minimum per-node threshold — always distribute regardless of amount.
-                    let per_node = pool / MAX_FREE_TIER_RECIPIENTS as u64;
-                    if per_node == 0 {
-                        // Pool is smaller than MAX_FREE_TIER_RECIPIENTS satoshis — accept as-is.
-                        continue;
-                    }
-                    // Accept any split ≤ MAX_FREE_TIER_RECIPIENTS
-                    (paid / per_node).max(1) as usize
-                } else {
-                    1
-                };
-
-                // Rounding tolerance: at most 1 satoshi per recipient.
-                let tolerance = recipient_count as u64;
-                let diff = paid.abs_diff(pool);
-                if diff > tolerance {
-                    return Err(format!(
-                        "Block {} {:?} tier pool mismatch: expected {} satoshis, \
-                         block distributed {} (diff {})",
-                        block.header.height, tier, pool, paid, diff
+        if expected_norm != actual_norm {
+            let mut diff: Vec<String> = Vec::new();
+            for (addr, &exp_amt) in &expected_norm {
+                let act_amt = actual_norm.get(addr).copied().unwrap_or(0);
+                if act_amt != exp_amt {
+                    diff.push(format!(
+                        "{} expected {} got {}",
+                        &addr[..addr.len().min(12)],
+                        exp_amt,
+                        act_amt
                     ));
                 }
-
-                // ── Step 3b: winner identity check (AV30 — pool self-award) ─────────
-                // Verify the correct node(s) won the tier pool by fairness rotation.
-                // Uses bitmap-decoded candidates + on-chain blocks_without_reward history —
-                // both deterministic across all validators with no gossip dependency.
-                //
-                // Guard: only check when the actual winner wallet appears in our decoded
-                // bitmap nodes for this tier.  If it doesn't, our bitmap decoding has
-                // drifted from the producer's sort order (Free-tier churn), and we cannot
-                // trust our expected-winner calculation.
-                if !matches!(tier, MasternodeTier::Free) {
-                    if let Some(actual_wallet) = tier_winner.get(tier) {
-                        let tier_candidates: Vec<_> = active_bitmap_nodes
-                            .iter()
-                            .filter(|info| {
-                                if info.masternode.tier != *tier {
-                                    return false;
-                                }
-                                let w = if !info.reward_address.is_empty() {
-                                    info.reward_address.as_str()
-                                } else {
-                                    info.masternode.wallet_address.as_str()
-                                };
-                                w != producer_wallet.as_str()
-                            })
-                            .collect();
-
-                        let actual_in_bitmap = tier_candidates.iter().any(|info| {
-                            let w = if !info.reward_address.is_empty() {
-                                info.reward_address.as_str()
-                            } else {
-                                info.masternode.wallet_address.as_str()
-                            };
-                            w == actual_wallet.as_str()
-                                || collateral_utxo_tier_map
-                                    .get(actual_wallet.as_str())
-                                    .map(|&t| t == *tier)
-                                    .unwrap_or(false)
-                        });
-
-                        if !tier_candidates.is_empty() && actual_in_bitmap {
-                            let mut ranked: Vec<_> = tier_candidates
-                                .into_iter()
-                                .map(|info| {
-                                    let raw = fairness_map
-                                        .get(&info.masternode.address)
-                                        .copied()
-                                        .unwrap_or(0);
-                                    (info, raw)
-                                })
-                                .collect();
-                            ranked.sort_by(|a, b| {
-                                b.1.cmp(&a.1).then_with(|| {
-                                    a.0.masternode.address.cmp(&b.0.masternode.address)
-                                })
-                            });
-
-                            let (expected, expected_bonus) = &ranked[0];
-                            let expected_wallet = if !expected.reward_address.is_empty() {
-                                expected.reward_address.as_str()
-                            } else {
-                                expected.masternode.wallet_address.as_str()
-                            };
-
-                            // Payout may be redirected to the collateral UTXO owner —
-                            // accept if the tier matches.
-                            let is_utxo_redirect = collateral_utxo_tier_map
-                                .get(actual_wallet.as_str())
-                                .copied()
-                                == Some(*tier);
-
-                            if actual_wallet.as_str() != expected_wallet && !is_utxo_redirect {
-                                // Allow a tied candidate: if the actual winner shares the
-                                // top fairness_bonus, the producer chose validly among equals.
-                                let actual_bonus = ranked
-                                    .iter()
-                                    .find(|(info, _)| {
-                                        let w = if !info.reward_address.is_empty() {
-                                            info.reward_address.as_str()
-                                        } else {
-                                            info.masternode.wallet_address.as_str()
-                                        };
-                                        w == actual_wallet.as_str()
-                                    })
-                                    .map(|(_, b)| *b);
-
-                                let tied =
-                                    actual_bonus.map(|b| b >= *expected_bonus).unwrap_or(false);
-                                if !tied {
-                                    return Err(format!(
-                                        "Block {} {:?} pool winner mismatch: fairness \
-                                         rotation selects {} (blocks_without_reward={}), \
-                                         but {} was paid — possible pool self-award (AV30)",
-                                        block.header.height,
-                                        tier,
-                                        expected_wallet,
-                                        expected_bonus,
-                                        actual_wallet,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // ── Step 3b-Free: free-tier recipient ordering check ──────────────
-                    // With v2 fairness active, verify that no recently-paid free-tier
-                    // address (blocks_without_reward == 0) appears in the reward list
-                    // while other free-tier bitmap nodes have blocks_without_reward > 0.
-                    //
-                    // After FREE_TIER_ONCHAIN_HEIGHT, also verify that every free-tier
-                    // node in the bitmap has a valid on-chain FreeNodeRegistration.
-                    // An unregistered node in the bitmap indicates the producer is
-                    // inserting sybil/fake identities to dilute or steal the free pool.
-                    if block.header.height
-                        >= crate::constants::blockchain::FREE_TIER_ONCHAIN_HEIGHT
-                    {
-                        for info in active_bitmap_nodes
-                            .iter()
-                            .filter(|i| i.masternode.tier == MasternodeTier::Free)
-                        {
-                            if !self.is_free_tier_registered(&info.masternode.address) {
-                                return Err(format!(
-                                    "Block {} Free-tier bitmap violation: {} appears in \
-                                     bitmap but has no on-chain FreeNodeRegistration — \
-                                     possible sybil insertion",
-                                    block.header.height, info.masternode.address,
-                                ));
-                            }
-                        }
-                    }
-
-                    let free_tier_recipients: std::collections::HashSet<&str> = block
-                        .masternode_rewards
-                        .iter()
-                        .filter(|(_, amt)| *amt > 0)
-                        .filter_map(|(wallet, _)| {
-                            // Only include addresses we know are Free-tier in the bitmap
-                            active_bitmap_nodes.iter().find(|info| {
-                                info.masternode.tier == MasternodeTier::Free && {
-                                    let w = if !info.reward_address.is_empty() {
-                                        info.reward_address.as_str()
-                                    } else {
-                                        info.masternode.wallet_address.as_str()
-                                    };
-                                    w == wallet.as_str()
-                                }
-                            }).map(|_| wallet.as_str())
-                        })
-                        .collect();
-
-                    if !free_tier_recipients.is_empty() {
-                        // Compute the fairness-sorted free-tier candidate list from the bitmap.
-                        let mut free_candidates: Vec<_> = active_bitmap_nodes
-                            .iter()
-                            .filter(|info| info.masternode.tier == MasternodeTier::Free)
-                            .map(|info| {
-                                let raw = fairness_map
-                                    .get(&info.masternode.address)
-                                    .copied()
-                                    .unwrap_or(0);
-                                (info, raw) // raw counter (v2 direct)
-                            })
-                            .collect();
-                        free_candidates.sort_by(|a, b| {
-                            b.1.cmp(&a.1).then_with(|| {
-                                a.0.masternode.address.cmp(&b.0.masternode.address)
-                            })
-                        });
-
-                        let n = free_tier_recipients.len().min(MAX_FREE_TIER_RECIPIENTS);
-                        // Helper: get the blocks_without_reward counter for a wallet in the bitmap.
-                        let counter_for = |wallet: &str| -> u64 {
-                            free_candidates
-                                .iter()
-                                .find(|(info, _)| {
-                                    let w = if !info.reward_address.is_empty() {
-                                        info.reward_address.as_str()
-                                    } else {
-                                        info.masternode.wallet_address.as_str()
-                                    };
-                                    w == wallet
-                                })
-                                .map(|(_, r)| *r)
-                                .unwrap_or(0)
-                        };
-
-                        // ── Check A: counter=0 recipient while counter>0 nodes were skipped ──
-                        // (original check — catches "recently paid beats long-waiter" attack)
-                        let max_waiting = free_candidates.iter().map(|(_, r)| *r).max().unwrap_or(0);
-                        if max_waiting > 0 {
-                            for wallet in &free_tier_recipients {
-                                if counter_for(wallet) == 0 {
-                                    let waiting_count = free_candidates
-                                        .iter()
-                                        .filter(|(_, r)| *r > 0)
-                                        .count();
-                                    if waiting_count >= n {
-                                        return Err(format!(
-                                            "Block {} Free-tier fairness violation: {} was paid \
-                                             (blocks_without_reward=0) while {} other node(s) with \
-                                             higher blocks_without_reward were skipped — \
-                                             possible free-tier pool monopolisation",
-                                            block.header.height, wallet, waiting_count,
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-
-                        // ── Check B: fewer recipients than equally-ranked candidates ─────────
-                        // Catches the case where all free-tier nodes have the same counter
-                        // (e.g., all were paid together last block → all counter=0), and the
-                        // producer only includes one of them.  Since every candidate is equally
-                        // deserving, excluding any of them is unjustified.
-                        //
-                        // Only fire when there are strictly more bitmap candidates than
-                        // recipients AND at least one excluded candidate has counter >=
-                        // the minimum counter of any included recipient (equally deserving).
-                        let candidate_count = free_candidates.len().min(MAX_FREE_TIER_RECIPIENTS);
-                        if free_tier_recipients.len() < candidate_count {
-                            let min_recipient_counter = free_tier_recipients
-                                .iter()
-                                .map(|w| counter_for(w))
-                                .min()
-                                .unwrap_or(0);
-
-                            let excluded_equally_deserving: Vec<&str> = free_candidates
-                                .iter()
-                                .filter(|(info, raw)| {
-                                    let w = if !info.reward_address.is_empty() {
-                                        info.reward_address.as_str()
-                                    } else {
-                                        info.masternode.wallet_address.as_str()
-                                    };
-                                    !free_tier_recipients.contains(w) && *raw >= min_recipient_counter
-                                })
-                                .map(|(info, _)| {
-                                    if !info.reward_address.is_empty() {
-                                        info.reward_address.as_str()
-                                    } else {
-                                        info.masternode.wallet_address.as_str()
-                                    }
-                                })
-                                .collect();
-
-                            if !excluded_equally_deserving.is_empty() {
-                                return Err(format!(
-                                    "Block {} Free-tier fairness violation: {} of {} eligible \
-                                     node(s) were paid while {} equally-deserving node(s) \
-                                     (counter>={}) were excluded — \
-                                     possible free-tier pool monopolisation (excluded: {:?})",
-                                    block.header.height,
-                                    free_tier_recipients.len(),
-                                    candidate_count,
-                                    excluded_equally_deserving.len(),
-                                    min_recipient_counter,
-                                    &excluded_equally_deserving[..excluded_equally_deserving.len().min(3)],
-                                ));
-                            }
-                        }
-                    }
+            }
+            for (addr, &act_amt) in &actual_norm {
+                if !expected_norm.contains_key(addr.as_str()) {
+                    diff.push(format!(
+                        "{} unexpected {}",
+                        &addr[..addr.len().min(12)],
+                        act_amt
+                    ));
                 }
             }
-        }
-
-        // ── Step 4: verify producer received correct amount ──────────────────
-        // Producer must receive: PRODUCER_REWARD + fees + all rolled-up empty pools.
-        // Allow ±1 TIME tolerance for rounding and minor fee-calculation differences
-        // (e.g., a peer computed fees slightly differently due to UTXO lookup order).
-        // When deregistered recipients exist (fallback path), min uses rolled_up=0
-        // (only require base PRODUCER_REWARD) while max uses total_tier_budget override.
-
-        let rolled_up_for_max = rolled_up_to_producer_max_override.unwrap_or(rolled_up_to_producer);
-        let expected_producer_min = PRODUCER_REWARD_SATOSHIS + rolled_up_to_producer; // fees may be 0 if unknown
-        let expected_producer_max =
-            PRODUCER_REWARD_SATOSHIS + calculated_fees + rolled_up_for_max + SATOSHIS_PER_TIME;
-
-        if producer_received < expected_producer_min.saturating_sub(SATOSHIS_PER_TIME) {
             return Err(format!(
-                "Block {} producer {} received {} satoshis, \
-                 below minimum expected {} (30 TIME + {} rolled-up pools)",
+                "Block {} reward manipulation: calculator expected {} recipients, \
+                 block has {} recipients. Discrepancies: {}",
                 block.header.height,
-                producer_addr,
-                producer_received,
-                expected_producer_min,
-                rolled_up_to_producer
+                expected_norm.len(),
+                actual_norm.len(),
+                diff.join("; "),
             ));
         }
 
-        if producer_received > expected_producer_max {
-            return Err(format!(
-                "Block {} producer {} received {} satoshis, \
-                 exceeds maximum expected {} (30 TIME + fees {} + rolled {} + 1 TIME tolerance)",
-                block.header.height,
-                producer_addr,
-                producer_received,
-                expected_producer_max,
-                calculated_fees,
-                rolled_up_for_max
-            ));
-        }
-
-        // ── Step 5: verify reward recipients against the active-masternodes bitmap ──
-        // The bitmap is the ground truth for which nodes were connected and eligible
-        // for rewards.  Decode it and verify:
-        //   a) every positive-amount recipient is in the bitmap (no phantom payments)
-        //   b) no registered masternode outside the bitmap received a positive payment
-        // Skip if bitmap is empty (genesis block or very early bootstrap blocks).
-        //
-        // Also skip when unknown recipients are present (unknown_non_producer_paid > 0).
-        // In that case the per-recipient GOLD_POOL_SATOSHIS cap (Step 2) already limits
-        // individual payouts; stacking the bitmap check on top uses an unreliable
-        // positional mapping and causes false positives when our registry has diverged.
-        if !block.header.active_masternodes_bitmap.is_empty() && unknown_non_producer_paid == 0 {
-            // active_bitmap_nodes and bitmap_active_count are pre-computed above.
-            // If our local registry resolved fewer active nodes than the bitmap encodes,
-            // our registry is stale — we are missing masternodes that registered after
-            // our current chain tip.  In that case the positional bitmap decoding is
-            // unreliable (bit positions shift when an unknown node sorts into the middle),
-            // so we skip the address-level check.  Block structural integrity (VRF proof,
-            // producer signature, consensus votes) is still fully verified above.
-            if active_bitmap_nodes.len() < bitmap_active_count {
-                tracing::warn!(
-                    "Block {} bitmap has {} active nodes but local registry resolved only {} \
-                     — registry is stale (catching up), skipping reward injection address check",
-                    block.header.height,
-                    bitmap_active_count,
-                    active_bitmap_nodes.len()
-                );
-            } else {
-                // Build set of wallet addresses that are bitmap-active
-                let active_wallets: std::collections::HashSet<String> = active_bitmap_nodes
-                    .iter()
-                    .map(|info| {
-                        if !info.reward_address.is_empty() {
-                            info.reward_address.clone()
-                        } else {
-                            info.masternode.wallet_address.clone()
-                        }
-                    })
-                    .collect();
-
-                // Also include the producer's wallet — producer is always eligible
-                // (they produced the block, so they were clearly active).
-                // Also include collateral UTXO owner addresses: paid-tier rewards are
-                // always redirected to the UTXO owner, so those addresses are eligible
-                // even if they don't appear directly in the bitmap.
-                let mut eligible = active_wallets.clone();
-                eligible.insert(producer_wallet.clone());
-                for utxo_owner in collateral_utxo_tier_map.keys() {
-                    eligible.insert(utxo_owner.clone());
-                }
-
-                for (wallet, amount) in &block.masternode_rewards {
-                    if *amount == 0 {
-                        continue; // zero-amount entries are metadata padding
-                    }
-                    if !eligible.contains(wallet.as_str()) {
-                        // Before hard-failing, check whether this address belongs to any
-                        // known masternode in the full registry.  If it does, the bitmap
-                        // positional decode is merely wrong (AV6: our local registry sort
-                        // order differs from the producer's) — the amounts have already been
-                        // validated in Steps 2-4, so the block is safe to accept.
-                        // Only reject if the address is completely unknown to us (true injection).
-                        let is_known_masternode = all_infos.iter().any(|info| {
-                            info.reward_address == *wallet
-                                || info.masternode.wallet_address == *wallet
-                        }) || collateral_utxo_tier_map
-                            .contains_key(wallet.as_str());
-
-                        if is_known_masternode {
-                            tracing::warn!(
-                                "Block {} bitmap drift: {} ({} sat) not at expected bitmap \
-                                 position — known masternode, registry diverged, accepting",
-                                block.header.height,
-                                wallet,
-                                amount
-                            );
-                        } else {
-                            return Err(format!(
-                                "Block {} reward of {} satoshis paid to {} who is NOT in the \
-                                 active-masternodes bitmap — possible reward injection",
-                                block.header.height, amount, wallet
-                            ));
-                        }
-                    }
-                }
-
-                tracing::debug!(
-                    "Block {} bitmap reward check passed: {} active nodes, {} paid recipients",
-                    block.header.height,
-                    active_bitmap_nodes.len(),
-                    block
-                        .masternode_rewards
-                        .iter()
-                        .filter(|(_, v)| *v > 0)
-                        .count()
-                );
-            }
-        }
-
+        tracing::debug!(
+            "Block {} strict reward validation passed ({} recipients)",
+            block.header.height,
+            expected_norm.len(),
+        );
         Ok(())
     }
 

@@ -4,15 +4,15 @@
 //! every validator call [`compute`] with the same inputs and MUST arrive at
 //! identical outputs — any divergence is proof of a misbehaving producer.
 //!
-//! ## Inputs (all deterministic at or after `FREE_TIER_ONCHAIN_HEIGHT`)
+//! ## Inputs (all deterministic — derived from on-chain state only)
 //! - `active_nodes`: masternodes encoded in the block's `active_masternodes_bitmap`
 //!   (= nodes that voted on the previous block).  Passed in already-decoded form.
 //! - `fairness_map`: `blocks_without_reward` counters from in-memory on-chain history.
 //! - `fees`: transaction fees committed in the block header.
 //! - `total_reward`: `block.header.block_reward` (already validated to equal
 //!   `base_reward + fees − treasury` by `validate_block_rewards`).
-//! - `free_tier_registered`: set of on-chain-registered Free-tier node addresses
-//!   (only enforced at/after `FREE_TIER_ONCHAIN_HEIGHT`; pass an empty set below that).
+//! - `free_tier_registered`: set of on-chain-registered Free-tier node addresses.
+//!   Every Free-tier node must be registered — pass all confirmed registrations.
 //!
 //! ## Output
 //! `Vec<(String, u64)>` — `(payout_address, satoshis)` pairs.
@@ -23,9 +23,7 @@
 //! - Producer entry.1 >= `PRODUCER_REWARD_SATOSHIS` (in tier-based mode).
 //! - Every payout address appears at most once (duplicates merged).
 
-use crate::constants::blockchain::{
-    FREE_TIER_ONCHAIN_HEIGHT, MAX_FREE_TIER_RECIPIENTS, PRODUCER_REWARD_SATOSHIS,
-};
+use crate::constants::blockchain::{MAX_FREE_TIER_RECIPIENTS, PRODUCER_REWARD_SATOSHIS};
 use crate::masternode_registry::MasternodeInfo;
 use crate::types::MasternodeTier;
 use crate::utxo_manager::UTXOStateManager;
@@ -58,8 +56,8 @@ pub struct RewardInput<'a> {
     /// `block.header.block_reward` — already independently validated as
     /// `base_reward + fees − treasury` by `validate_block_rewards`.
     pub total_reward: u64,
-    /// On-chain-registered Free-tier node addresses for `FREE_TIER_ONCHAIN_HEIGHT` filter.
-    /// Pass an empty `HashSet` when below `FREE_TIER_ONCHAIN_HEIGHT`.
+    /// On-chain-registered Free-tier node addresses.
+    /// Every Free-tier node must be registered — pass all confirmed registrations.
     pub free_tier_registered: &'a HashSet<String>,
 }
 
@@ -72,7 +70,7 @@ pub struct RewardInput<'a> {
 /// redirected to the collateral UTXO owner's address, which requires a UTXO
 /// lookup to resolve (eliminates the economic incentive for collateral squatting).
 pub async fn compute(input: &RewardInput<'_>, utxo_manager: &UTXOStateManager) -> Vec<(String, u64)> {
-    let height = input.height;
+    let _ = input.height; // kept in RewardInput for logging/debugging only
     let producer_wallet = input.producer_wallet;
     let active_nodes = input.active_nodes;
     let fairness_map = input.fairness_map;
@@ -91,8 +89,8 @@ pub async fn compute(input: &RewardInput<'_>, utxo_manager: &UTXOStateManager) -
         mn.masternode.tier != MasternodeTier::Free && payout_addr(mn) != producer_wallet
     });
 
-    let apply_onchain_filter =
-        height >= FREE_TIER_ONCHAIN_HEIGHT && !input.free_tier_registered.is_empty();
+    // All Free-tier nodes must be on-chain registered — always apply the filter.
+    let apply_onchain_filter = !input.free_tier_registered.is_empty();
 
     let mut rewards: Vec<(String, u64)> = Vec::new();
 
