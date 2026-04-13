@@ -27,7 +27,6 @@ use tracing::{debug, info, warn};
 
 const BLOCK_TIME_SECONDS: i64 = constants::blockchain::BLOCK_TIME_SECONDS;
 const BLOCK_REWARD_SATOSHIS: u64 = constants::blockchain::BLOCK_REWARD_SATOSHIS;
-const PRODUCER_REWARD_SATOSHIS: u64 = constants::blockchain::PRODUCER_REWARD_SATOSHIS;
 
 /// Number of reward-distribution violations before a producer is considered misbehaving
 const REWARD_VIOLATION_THRESHOLD: u64 = 3;
@@ -3688,279 +3687,173 @@ impl Blockchain {
         let base_reward = self.get_current_block_reward();
         let treasury_share = constants::blockchain::TREASURY_POOL_SATOSHIS;
         let total_reward = base_reward + finalized_txs_fees - treasury_share; // coinbase outputs (no treasury UTXO)
-        let producer_share = PRODUCER_REWARD_SATOSHIS + finalized_txs_fees; // Leader gets 30 TIME + all fees
-
         // NOTE: Treasury deposit happens in add_block(), not here, to avoid
         // double-deposit when the producer's own node processes the block.
 
-        // Build reward list.
-        // §10.4 Two distribution modes:
-        //   All-Free mode (no paid-tier nodes in eligible pool):
-        //     5 TIME → treasury (handled in add_block), 95 TIME split equally among
-        //     up to MAX_FREE_TIER_RECIPIENTS free nodes. No separate producer bonus.
-        //   Tier-based mode (at least one paid-tier node present):
-        //     30 TIME leader bonus + 65 TIME tier pools + 5 TIME treasury.
-        let mut rewards: Vec<(String, u64)> = Vec::new();
+        // Build active masternode bitmap FIRST, then compute rewards deterministically.
+        // reward_calculator::compute is the single source of truth — both producer and
+        // validator must call it with identical active_nodes (decoded from the same bitmap).
+        // Putting the bitmap before the reward calc eliminates the gossip-pool vs. bitmap
+        // divergence that caused block-25 stalls (different inputs → different splits → rejection).
+        use crate::types::MasternodeTier;
 
-        let eligible_pool = self
+        // ── Voters → Bitmap ───────────────────────────────────────────────────
+        let voters: Vec<String> = if next_height == 1 {
+            tracing::debug!("📊 Block 1 (after genesis): using all active masternodes for bitmap");
+            self.masternode_registry
+                .get_active_masternodes()
+                .await
+                .into_iter()
+                .map(|mn| mn.masternode.address)
+                .collect()
+        } else {
+            let prev_block_hash = prev_hash;
+            let mut voters_set = std::collections::HashSet::new();
+
+            for v in self
+                .consensus
+                .timevote
+                .precommit_votes
+                .get_voters(prev_block_hash)
+            {
+                voters_set.insert(v);
+            }
+            for v in self
+                .consensus
+                .timevote
+                .get_finalized_block_voters(prev_block_hash)
+            {
+                voters_set.insert(v);
+            }
+            for v in self
+                .consensus
+                .timevote
+                .prepare_votes
+                .get_voters(prev_block_hash)
+            {
+                voters_set.insert(v);
+            }
+
+            let gossip_active = self.masternode_registry.get_active_masternodes().await;
+            let gossip_count_before = voters_set.len();
+            for mn in &gossip_active {
+                voters_set.insert(mn.masternode.address.clone());
+            }
+            let added_via_gossip = voters_set.len() - gossip_count_before;
+            if added_via_gossip > 0 {
+                tracing::debug!(
+                    "📊 Block {}: added {} gossip-active masternode(s) to bitmap",
+                    next_height,
+                    added_via_gossip,
+                );
+            }
+
+            let precommit_voters: Vec<String> = voters_set.into_iter().collect();
+            if precommit_voters.is_empty() {
+                let all_active = self.masternode_registry.get_active_masternodes().await;
+                let our_height = self.get_height();
+                let max_behind: u64 = 10;
+                let mut on_chain_voters: Vec<String> = Vec::new();
+
+                if let Some(registry) = self.get_peer_registry().await {
+                    for mn in &all_active {
+                        let mn_ip = mn
+                            .masternode
+                            .address
+                            .split(':')
+                            .next()
+                            .unwrap_or(&mn.masternode.address);
+                        if let Some(peer_height) = registry.get_peer_height(mn_ip).await {
+                            if our_height.saturating_sub(peer_height) <= max_behind {
+                                on_chain_voters.push(mn.masternode.address.clone());
+                            }
+                        } else if let Some(ref local_addr) =
+                            self.masternode_registry.get_local_address().await
+                        {
+                            let local_ip =
+                                local_addr.split(':').next().unwrap_or(local_addr);
+                            if mn_ip == local_ip {
+                                on_chain_voters.push(mn.masternode.address.clone());
+                            }
+                        }
+                    }
+                }
+
+                if on_chain_voters.len() < 2 {
+                    on_chain_voters = all_active
+                        .into_iter()
+                        .map(|mn| mn.masternode.address)
+                        .collect();
+                }
+
+                tracing::warn!(
+                    "⚠️ No precommit voters for block {} — fallback to {} on-chain masternodes",
+                    next_height - 1,
+                    on_chain_voters.len()
+                );
+                on_chain_voters
+            } else {
+                tracing::debug!(
+                    "📊 Block {}: {} precommit voters from previous block",
+                    next_height,
+                    precommit_voters.len()
+                );
+                precommit_voters
+            }
+        };
+
+        tracing::debug!(
+            "📊 Creating bitmap from {} voters on previous block",
+            voters.len()
+        );
+
+        let (active_bitmap, _) = self
             .masternode_registry
-            .get_eligible_pool_nodes(next_height)
+            .create_active_bitmap_from_voters(&voters)
             .await;
 
-        let blocks_without_reward_map = self
+        // Decode bitmap → active_bitmap_nodes: the exact same set the validator
+        // will decode from this block's header when it calls validate_pool_distribution.
+        let active_bitmap_nodes = self
+            .masternode_registry
+            .get_active_from_bitmap(&active_bitmap)
+            .await;
+
+        // Build on-chain-registered Free-tier set (mirrors validate_pool_distribution).
+        let free_tier_registered: std::collections::HashSet<String> = active_bitmap_nodes
+            .iter()
+            .filter(|info| info.masternode.tier == MasternodeTier::Free)
+            .filter(|info| self.is_free_tier_registered(&info.masternode.address))
+            .map(|info| info.masternode.address.clone())
+            .collect();
+
+        let fairness_map = self
             .masternode_registry
             .get_reward_tracking_from_memory()
             .await;
 
-        use crate::types::MasternodeTier;
-
-        let has_paid_tier_nodes = eligible_pool
-            .iter()
-            .any(|mn| mn.masternode.tier != MasternodeTier::Free);
-
-        let total_reward = if !has_paid_tier_nodes && !eligible_pool.is_empty() {
-            // ── All-Free mode ─────────────────────────────────────────────────
-            // All 95 TIME (total_reward) split equally among up to 25 free nodes,
-            // sorted by fairness bonus so nodes waiting longest are paid first.
-            // After FREE_TIER_ONCHAIN_HEIGHT, eligible_pool is pre-filtered to
-            // on-chain-registered nodes only (see below), so unregistered nodes
-            // cannot appear in the bitmap or collect rewards.
-            let mut free_nodes: Vec<_> = eligible_pool
-                .iter()
-                .map(|mn| {
-                    let fairness_bonus = blocks_without_reward_map
-                        .get(&mn.masternode.address)
-                        .copied()
-                        .unwrap_or(0);
-                    (mn, fairness_bonus)
-                })
-                .collect();
-            free_nodes.sort_by(|a, b| {
-                b.1.cmp(&a.1)
-                    .then_with(|| a.0.masternode.address.cmp(&b.0.masternode.address))
-            });
-            let recipient_count = free_nodes
-                .len()
-                .min(constants::blockchain::MAX_FREE_TIER_RECIPIENTS);
-            let per_node = total_reward / recipient_count as u64;
-            let mut distributed = 0u64;
-            for (i, (mn, _)) in free_nodes.iter().take(recipient_count).enumerate() {
-                // Last recipient absorbs rounding remainder so total == total_reward exactly.
-                let share = if i == recipient_count - 1 {
-                    total_reward - distributed
-                } else {
-                    per_node
-                };
-                let dest = if !mn.reward_address.is_empty() {
-                    mn.reward_address.clone()
-                } else {
-                    mn.masternode.wallet_address.clone()
-                };
-                if let Some(entry) = rewards.iter_mut().find(|(a, _)| a == &dest) {
-                    entry.1 += share;
-                } else {
-                    rewards.push((dest, share));
-                }
-                distributed += share;
-            }
-            tracing::info!(
-                "💰 Block {}: {} TIME (all-Free) — {} TIME each to {} node(s) [{} eligible]",
-                next_height,
-                total_reward / 100_000_000,
-                per_node / 100_000_000,
-                recipient_count,
-                eligible_pool.len(),
-            );
-            total_reward // no rounding dust in all-free mode
-        } else {
-            // ── Tier-based mode ───────────────────────────────────────────────
-            // Producer gets 30 TIME leader bonus + fees. Per-tier pools distributed
-            // to eligible winners; empty tiers roll up to producer.
-            if let Some(ref wallet) = producer_wallet {
-                rewards.push((wallet.clone(), producer_share));
-            }
-
-            let tiers = [
-                MasternodeTier::Gold,
-                MasternodeTier::Silver,
-                MasternodeTier::Bronze,
-                MasternodeTier::Free,
-            ];
-            let mut total_pool_distributed = 0u64;
-            let mut rounding_dust = 0u64;
-
-            // Collect the payment addresses of all paid-tier nodes.  Used below to
-            // exclude Free-tier nodes whose wallet is also registered at a paid tier.
-            // Without this, a wallet shared between a Silver node and a Free node would
-            // receive both the Silver pool (1800 TIME) and a Free-tier share (e.g. 160M),
-            // producing a merged entry that validators always reject as a Silver mismatch.
-            let paid_tier_wallet_set: std::collections::HashSet<String> = eligible_pool
-                .iter()
-                .filter(|mn| mn.masternode.tier != MasternodeTier::Free)
-                .map(|mn| {
-                    if !mn.reward_address.is_empty() {
-                        mn.reward_address.clone()
-                    } else {
-                        mn.masternode.wallet_address.clone()
-                    }
-                })
-                .collect();
-
-            for tier in &tiers {
-                let tier_pool = tier.pool_allocation();
-
-                let mut tier_nodes: Vec<_> = eligible_pool
-                    .iter()
-                    .filter(|mn| mn.masternode.tier == *tier)
-                    .map(|mn| {
-                        let fairness_bonus = blocks_without_reward_map
-                            .get(&mn.masternode.address)
-                            .copied()
-                            .unwrap_or(0);
-                        (mn, fairness_bonus)
-                    })
-                    .collect();
-
-                // For Free tier: remove nodes whose payment address is also registered
-                // at a paid tier.  Such a node would receive a Free-tier share whose
-                // amount is then misclassified as Silver/Bronze/Gold by validators
-                // (tier_for_wallet returns the highest tier for that wallet).
-                if matches!(tier, MasternodeTier::Free) && !paid_tier_wallet_set.is_empty() {
-                    let before = tier_nodes.len();
-                    tier_nodes.retain(|(mn, _)| {
-                        let dest = if !mn.reward_address.is_empty() {
-                            mn.reward_address.as_str()
-                        } else {
-                            mn.masternode.wallet_address.as_str()
-                        };
-                        !paid_tier_wallet_set.contains(dest)
-                    });
-                    let filtered = before - tier_nodes.len();
-                    if filtered > 0 {
-                        tracing::info!(
-                            "💰 Block {}: excluded {} Free node(s) with paid-tier wallet overlap from Free distribution",
-                            next_height, filtered
-                        );
-                    }
-                }
-
-                // Free-tier nodes must have an on-chain MasternodeRegistration TX.
-                // Gossip-visible but unregistered nodes are stripped out here so
-                // the producer cannot include sybil/fake free-tier nodes in the bitmap.
-                if matches!(tier, MasternodeTier::Free) {
-                    let before = tier_nodes.len();
-                    tier_nodes.retain(|(mn, _)| {
-                        self.is_free_tier_registered(&mn.masternode.address)
-                    });
-                    let filtered = before - tier_nodes.len();
-                    if filtered > 0 {
-                        tracing::info!(
-                            "💰 Block {}: excluded {} unregistered Free node(s) from distribution",
-                            next_height, filtered
-                        );
-                    }
-                }
-
-                // Empty tiers: full pool goes to block producer
-                if tier_nodes.is_empty() {
-                    if let Some(entry) = rewards.first_mut() {
-                        entry.1 += tier_pool;
-                    }
-                    total_pool_distributed += tier_pool;
-                    continue;
-                }
-
-                tier_nodes.sort_by(|a, b| {
-                    b.1.cmp(&a.1)
-                        .then_with(|| a.0.masternode.address.cmp(&b.0.masternode.address))
-                });
-
-                let is_free_tier = matches!(tier, MasternodeTier::Free);
-                let recipient_count = if is_free_tier {
-                    tier_nodes
-                        .len()
-                        .min(constants::blockchain::MAX_FREE_TIER_RECIPIENTS)
-                } else {
-                    1
-                };
-
-                let per_node = tier_pool / recipient_count as u64;
-
-                let mut distributed = 0u64;
-                for (mn, _) in tier_nodes.iter().take(recipient_count) {
-                    let share = per_node;
-                    let registered_dest = if !mn.reward_address.is_empty() {
-                        mn.reward_address.clone()
-                    } else {
-                        mn.masternode.wallet_address.clone()
-                    };
-                    // Paid-tier rewards always flow to the collateral UTXO owner's
-                    // address, not the registered wallet.  This removes the economic
-                    // incentive for collateral squatting: whoever owns the UTXO key
-                    // receives the reward, regardless of who gossip-registered the anchor.
-                    let dest = if !is_free_tier {
-                        if let Some(ref outpoint) = mn.masternode.collateral_outpoint {
-                            if let Ok(utxo) = self.utxo_manager.get_utxo(outpoint).await {
-                                if !utxo.address.is_empty() && utxo.address != registered_dest {
-                                    tracing::info!(
-                                        "💰 Block {}: redirecting reward for {} from {} to UTXO \
-                                         owner {} (collateral enforcement)",
-                                        next_height,
-                                        mn.masternode.address,
-                                        &registered_dest[..20.min(registered_dest.len())],
-                                        &utxo.address[..20.min(utxo.address.len())]
-                                    );
-                                }
-                                utxo.address
-                            } else {
-                                registered_dest
-                            }
-                        } else {
-                            registered_dest
-                        }
-                    } else {
-                        registered_dest
-                    };
-                    if let Some(entry) = rewards.iter_mut().find(|(a, _)| a == &dest) {
-                        entry.1 += share;
-                    } else {
-                        rewards.push((dest, share));
-                    }
-                    distributed += share;
-                }
-                let tier_dust = tier_pool - distributed;
-                if tier_dust > 0 {
-                    rounding_dust += tier_dust;
-                }
-                total_pool_distributed += distributed;
-            }
-
-            // Route integer-division rounding dust to the block producer so that
-            // block_reward == base_reward + fees - treasury exactly.  Previously the
-            // dust was silently burned, causing validators to reject valid blocks
-            // with a spurious "incorrect block_reward" error (e.g. 2-sat off with 3
-            // Free-tier recipients sharing an 8 TIME pool).
-            if rounding_dust > 0 {
-                if let Some(entry) = rewards.first_mut() {
-                    entry.1 += rounding_dust;
-                }
-            }
-            tracing::info!(
-                "💰 Block {}: {} TIME — producer {} TIME, pools {} TIME to {} node(s) [{} eligible]{}",
-                next_height,
-                total_reward / 100_000_000,
-                producer_share / 100_000_000,
-                total_pool_distributed / 100_000_000,
-                rewards.len().saturating_sub(1),
-                eligible_pool.len(),
-                if rounding_dust > 0 {
-                    format!(", {} sat rounding dust → producer", rounding_dust)
-                } else {
-                    String::new()
-                }
-            );
-            total_reward
-        };
+        // Single source of truth for reward computation.  Identical call to what
+        // validate_pool_distribution makes on the receiving side.
+        let rewards: Vec<(String, u64)> = crate::reward_calculator::compute(
+            &crate::reward_calculator::RewardInput {
+                height: next_height,
+                producer_wallet: producer_wallet.as_deref().unwrap_or(""),
+                active_nodes: &active_bitmap_nodes,
+                fairness_map: &fairness_map,
+                fees: finalized_txs_fees,
+                total_reward,
+                free_tier_registered: &free_tier_registered,
+            },
+            &self.utxo_manager,
+        )
+        .await;
+        tracing::info!(
+            "💰 Block {}: {} TIME → {} recipient(s) [{} bitmap nodes]",
+            next_height,
+            total_reward / 100_000_000,
+            rewards.len(),
+            active_bitmap_nodes.len(),
+        );
 
         if rewards.is_empty() {
             return Err(format!(
@@ -4055,153 +3948,7 @@ impl Blockchain {
         // Calculate merkle root from ALL transactions in canonical order
         let merkle_root = crate::block::types::calculate_merkle_root(&all_txs);
 
-        // Create active masternode bitmap based on who voted on the PREVIOUS block
-        // ELIGIBILITY RULES:
-        //  1. Direct voters: nodes whose timevote messages this producer received directly
-        //  2. Gossip-active nodes: nodes known to be online via gossip during the block period
-        //     Gossip proves a node was online — it must have been seen by ≥ min_reports peers
-        //     within the last 5 minutes. A node that joined mid-block won't have fresh enough
-        //     gossip records yet (gossip runs every 30s, cleanup every 60s).
-        //  3. Combines (1) and (2) so that pyramid-topology nodes not directly connected to
-        //     the producer still appear in the bitmap and remain eligible for rewards / leader
-        //     selection next block.
-        let voters = if next_height == 1 {
-            // Block 1: Genesis has no voters, so use all active masternodes
-            tracing::debug!("📊 Block 1 (after genesis): using all active masternodes for bitmap");
-            self.masternode_registry
-                .get_active_masternodes()
-                .await
-                .into_iter()
-                .map(|mn| mn.masternode.address)
-                .collect()
-        } else {
-            // Get voters from previous block (who voted to accept it)
-            let prev_block_hash = prev_hash;
-            // Gather voters from both prepare and precommit phases for maximum coverage.
-            // Fast consensus (e.g., high-weight producer) can finalize before all peers'
-            // precommit votes arrive, so prepare voters fill the gap.
-            let mut voters_set = std::collections::HashSet::new();
-
-            // 1. Check live precommit votes
-            for v in self
-                .consensus
-                .timevote
-                .precommit_votes
-                .get_voters(prev_block_hash)
-            {
-                voters_set.insert(v);
-            }
-            // 2. Check preserved voters (saved at finalization by cleanup_block_votes)
-            for v in self
-                .consensus
-                .timevote
-                .get_finalized_block_voters(prev_block_hash)
-            {
-                voters_set.insert(v);
-            }
-            // 3. Check live prepare votes (more complete since prepare consensus is reached first)
-            for v in self
-                .consensus
-                .timevote
-                .prepare_votes
-                .get_voters(prev_block_hash)
-            {
-                voters_set.insert(v);
-            }
-
-            // 4. Add gossip-active masternodes. These nodes were confirmed online during
-            //    the block period by ≥ min_reports independent peers, but may not be
-            //    directly connected to this producer (pyramid topology). Including them
-            //    ensures they appear in the bitmap and stay eligible for rewards / leader
-            //    selection without requiring direct connectivity to the block producer.
-            let gossip_active = self.masternode_registry.get_active_masternodes().await;
-            let gossip_active_count_before = voters_set.len();
-            for mn in &gossip_active {
-                voters_set.insert(mn.masternode.address.clone());
-            }
-            let added_via_gossip = voters_set.len() - gossip_active_count_before;
-            if added_via_gossip > 0 {
-                tracing::debug!(
-                    "📊 Block {}: added {} gossip-active masternode(s) to bitmap (total {} direct voters + gossip)",
-                    next_height,
-                    added_via_gossip,
-                    voters_set.len()
-                );
-            }
-
-            let precommit_voters: Vec<String> = voters_set.into_iter().collect();
-
-            // CRITICAL: If no voters recorded, use active masternodes on our chain as fallback
-            // This prevents bitmap from becoming empty and breaking participation tracking
-            // Filter out masternodes that are on a fork or significantly behind
-            if precommit_voters.is_empty() {
-                let all_active = self.masternode_registry.get_active_masternodes().await;
-
-                // Filter: only include masternodes near our chain tip
-                let our_height = self.get_height();
-                let max_behind = 10; // Allow up to 10 blocks behind
-                let mut on_chain_voters: Vec<String> = Vec::new();
-
-                if let Some(registry) = self.get_peer_registry().await {
-                    for mn in &all_active {
-                        let mn_ip = mn
-                            .masternode
-                            .address
-                            .split(':')
-                            .next()
-                            .unwrap_or(&mn.masternode.address);
-                        if let Some(peer_height) = registry.get_peer_height(mn_ip).await {
-                            if our_height.saturating_sub(peer_height) <= max_behind {
-                                on_chain_voters.push(mn.masternode.address.clone());
-                            }
-                        } else {
-                            // No height data — include local node, skip unknown peers
-                            if let Some(ref local_addr) =
-                                self.masternode_registry.get_local_address().await
-                            {
-                                let local_ip = local_addr.split(':').next().unwrap_or(local_addr);
-                                if mn_ip == local_ip {
-                                    on_chain_voters.push(mn.masternode.address.clone());
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // If filtering left too few, fall back to all active
-                if on_chain_voters.len() < 2 {
-                    on_chain_voters = all_active
-                        .into_iter()
-                        .map(|mn| mn.masternode.address)
-                        .collect();
-                }
-
-                tracing::warn!(
-                    "⚠️ No precommit voters found for block {} (hash: {}) - using {} on-chain masternodes as fallback",
-                    next_height - 1,
-                    hex::encode(&prev_block_hash[..8]),
-                    on_chain_voters.len()
-                );
-                on_chain_voters
-            } else {
-                tracing::debug!(
-                    "📊 Block {}: using {} precommit voters from previous block",
-                    next_height,
-                    precommit_voters.len()
-                );
-                precommit_voters
-            }
-        };
-
-        tracing::debug!(
-            "📊 Creating bitmap from {} voters on previous block",
-            voters.len()
-        );
-
-        let (active_bitmap, _) = self
-            .masternode_registry
-            .create_active_bitmap_from_voters(&voters)
-            .await;
+        // active_bitmap, active_bitmap_nodes already computed above before reward_calculator::compute.
 
         // Compute the treasury_balance committed in this block's header.
         //

@@ -110,6 +110,7 @@ pub async fn compute(input: &RewardInput<'_>, utxo_manager: &UTXOStateManager) -
         let mut free_nodes: Vec<(&MasternodeInfo, u64)> = active_nodes
             .iter()
             .filter(|mn| mn.masternode.tier == MasternodeTier::Free)
+            .filter(|mn| !payout_addr(mn).is_empty())
             .filter(|mn| {
                 if apply_onchain_filter {
                     input.free_tier_registered.contains(&mn.masternode.address)
@@ -180,6 +181,8 @@ pub async fn compute(input: &RewardInput<'_>, utxo_manager: &UTXOStateManager) -
         let mut tier_nodes: Vec<(&MasternodeInfo, u64)> = active_nodes
             .iter()
             .filter(|mn| mn.masternode.tier == *tier)
+            // Skip nodes with no payout address (empty wallet + empty reward_address).
+            .filter(|mn| !payout_addr(mn).is_empty())
             // Producer already has their share; exclude them from tier pools.
             .filter(|mn| payout_addr(mn) != producer_wallet)
             // Free tier: drop wallets that are also a paid-tier payout address.

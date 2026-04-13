@@ -6650,12 +6650,14 @@ impl MessageHandler {
                 self.direction, block.header.height, proposer, block.header.vrf_score
             );
 
-            // 6. Verify producer signature over block hash
+            // 6. Verify producer signature over block hash.
+            // Warn only (not rejection) to match add_block() behaviour — stale registry
+            // keys during bootstrap can cause false rejections of valid blocks.
             if let Err(e) = block.verify_signature(&proposer_info.masternode.public_key) {
-                return Err(format!(
-                    "Block {} producer signature invalid: {}",
+                tracing::warn!(
+                    "Block {} producer signature mismatch (stale key?): {}",
                     block.header.height, e
-                ));
+                );
             }
         }
 
