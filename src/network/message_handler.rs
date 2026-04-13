@@ -286,6 +286,12 @@ pub struct MessageHandler {
     peer_ip: String,
     direction: ConnectionDirection,
     recent_requests: Arc<RwLock<Vec<GetBlocksRequest>>>,
+    /// AV27: sliding window for invalid-vote-signature rejection counts.
+    /// Tracks (count, window_start). When count reaches 5 within 30 s, one
+    /// violation is recorded against the peer and the counter resets.
+    /// Sliding window prevents in-flight stale votes around block transitions
+    /// from triggering bans on legitimate peers.
+    invalid_sig_vote_window: Arc<Mutex<(u32, Instant)>>,
     /// AV28: sliding window for unregistered-voter vote rejection counts.
     /// Tracks (count, window_start). When count reaches 10 within 60 s, one
     /// violation is recorded against the peer and the counter resets.
@@ -299,6 +305,7 @@ impl MessageHandler {
             peer_ip,
             direction,
             recent_requests: Arc::new(RwLock::new(Vec::new())),
+            invalid_sig_vote_window: Arc::new(Mutex::new((0, Instant::now()))),
             unregistered_vote_window: Arc::new(Mutex::new((0, Instant::now()))),
         }
     }
@@ -429,9 +436,10 @@ impl MessageHandler {
                 voter_id,
                 e
             );
-            // AV27: forged Ed25519 signature; record immediately
-            self.record_vote_violation(context, "invalid vote signature (AV27)")
-                .await;
+            // AV27: use sliding window — a legitimate peer may have 1-2 stale
+            // in-flight votes right after a block transition or key rotation.
+            // Only record a violation after 5 failures within 30 s.
+            self.record_invalid_sig_vote(context).await;
             return Ok(false); // Reject
         }
 
@@ -439,6 +447,7 @@ impl MessageHandler {
     }
 
     /// AV27: record a vote violation against the sending peer immediately.
+    /// Used for structurally malformed votes (missing/wrong-length signature).
     /// Uses the blacklist escalation ladder: 3 → 1-min ban, 5 → 5-min ban,
     /// 10 → permanent ban.
     async fn record_vote_violation(&self, context: &MessageContext, reason: &str) {
@@ -446,6 +455,39 @@ impl MessageHandler {
             if let Ok(ip) = self.peer_ip.parse::<IpAddr>() {
                 blacklist.write().await.record_violation(ip, reason);
             }
+        }
+    }
+
+    /// AV27: sliding-window rate-limit for Ed25519 vote signature failures.
+    /// Records one violation after 5 failures within 30 s, then resets.
+    /// This prevents in-flight stale votes around block transitions (a legitimate
+    /// peer sends at most 2 stale votes per block — one PREPARE, one PRECOMMIT)
+    /// from triggering a ban.
+    async fn record_invalid_sig_vote(&self, context: &MessageContext) {
+        const THRESHOLD: u32 = 5;
+        const WINDOW_SECS: u64 = 30;
+
+        let should_record = {
+            let mut window = self.invalid_sig_vote_window.lock().await;
+            let now = Instant::now();
+            if now.duration_since(window.1) > Duration::from_secs(WINDOW_SECS) {
+                *window = (1, now);
+                false
+            } else {
+                window.0 += 1;
+                if window.0 >= THRESHOLD {
+                    window.0 = 0;
+                    window.1 = now;
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+
+        if should_record {
+            self.record_vote_violation(context, "invalid vote signature spam (AV27: 5+ per 30s)")
+                .await;
         }
     }
 
