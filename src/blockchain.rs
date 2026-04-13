@@ -4203,10 +4203,24 @@ impl Blockchain {
             .create_active_bitmap_from_voters(&voters)
             .await;
 
-        // Compute the treasury_balance for this block: prev_treasury + 5 TIME per block.
-        // Governance spends are committed separately; for production we start with the deposit.
-        let new_treasury_balance = self.treasury_balance.load(std::sync::atomic::Ordering::Relaxed)
-            + constants::blockchain::TREASURY_POOL_SATOSHIS;
+        // Compute the treasury_balance committed in this block's header.
+        //
+        // The header is the authoritative snapshot of treasury state *after* this block
+        // is fully applied, so we must account for any governance TreasurySpend proposals
+        // whose voting window closes at `next_height` and that already have quorum.
+        // The validator reads `prev.treasury_balance + 5 TIME - governance_spends` and
+        // accepts the block only if actual ≤ that value, so both sides must compute the
+        // same deduction to stay in consensus.
+        let governance_deduction = if let Some(gov) = &self.governance {
+            gov.treasury_spends_maturing_at(next_height, &self.masternode_registry)
+                .await
+        } else {
+            0
+        };
+        let prev_treasury = self.treasury_balance.load(std::sync::atomic::Ordering::Relaxed);
+        let new_treasury_balance = prev_treasury
+            .saturating_add(constants::blockchain::TREASURY_POOL_SATOSHIS)
+            .saturating_sub(governance_deduction);
 
         let mut block = Block {
             header: BlockHeader {

@@ -570,6 +570,52 @@ impl GovernanceState {
             .sum()
     }
 
+    // ── Deterministic pre-commit query ───────────────────────────────────────
+
+    /// Returns the total TreasurySpend satoshis that will be disbursed when
+    /// `height` is reached (i.e. proposals with `vote_end_height == height`
+    /// that currently have enough YES weight to pass quorum).
+    ///
+    /// This is a pure read — no state is mutated.  The block producer calls
+    /// this before sealing the block so that `BlockHeader.treasury_balance`
+    /// commits the post-governance balance, making it a complete, auditable
+    /// snapshot that never overstates the treasury.
+    pub async fn treasury_spends_maturing_at(
+        &self,
+        height: u64,
+        registry: &crate::masternode_registry::MasternodeRegistry,
+    ) -> u64 {
+        let total_weight = Self::total_active_weight(registry).await;
+
+        let maturing_ids: Vec<String> = self
+            .proposals
+            .read()
+            .await
+            .iter()
+            .filter(|(_, p)| {
+                p.status == ProposalStatus::Active && p.vote_end_height == height
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let mut total_spend = 0u64;
+        for id_hex in &maturing_ids {
+            let yes_weight = self.tally_yes_weight(id_hex, registry).await;
+            let quorum_met = total_weight > 0
+                && yes_weight * QUORUM_DENOMINATOR >= total_weight * QUORUM_NUMERATOR;
+            if !quorum_met {
+                continue;
+            }
+            let props = self.proposals.read().await;
+            if let Some(proposal) = props.get(id_hex) {
+                if let ProposalPayload::TreasurySpend { amount, .. } = &proposal.payload {
+                    total_spend = total_spend.saturating_add(*amount);
+                }
+            }
+        }
+        total_spend
+    }
+
     // ── Query helpers (RPC) ───────────────────────────────────────────────────
 
     pub async fn list_proposals(&self) -> Vec<GovernanceProposal> {
