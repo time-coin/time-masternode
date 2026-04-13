@@ -126,6 +126,27 @@ pub mod blockchain {
     /// Fee is collected by the block producer as normal; nothing is burned.
     pub const FREE_TIER_REG_FEE_SATOSHIS: u64 = 100_000_000; // 1 TIME
 
+    /// Fork height at which the deterministic `RewardCalculator` replaces the
+    /// heuristic pool-distribution validator.
+    ///
+    /// Before this height: `validate_pool_distribution` uses a multi-step heuristic
+    /// with several escape hatches (deregistered recipients → loose ceiling check,
+    /// bitmap drift → pool treated as rolled up).  A misbehaving producer can exploit
+    /// these to pay incorrect recipients while amounts appear valid.
+    ///
+    /// At and after this height: validators call `reward_calculator::compute()` with
+    /// the bitmap-decoded active-node set, compute the EXACT expected reward list, and
+    /// reject any block where actual ≠ expected.  There are no escape hatches.
+    ///
+    /// This height must be set to a future mainnet block where:
+    ///   1. All nodes have upgraded (reward_calculator module present).
+    ///   2. Free-tier on-chain registration is stable (FREE_TIER_ONCHAIN_HEIGHT active).
+    ///   3. Paid-tier registry is stable (collateral outpoints stable in UTXO set).
+    ///
+    /// Currently set to 2500 — approximately 340 blocks (~2.4 days) after
+    /// FREE_TIER_ONCHAIN_HEIGHT=2160.  Adjust before deployment if needed.
+    pub const STRICT_REWARD_CALC_HEIGHT: u64 = 2500;
+
     /// Fork height at which the improved fairness-rotation formula activates (v2).
     ///
     /// Before this height: fairness_bonus = blocks_without_reward / 10

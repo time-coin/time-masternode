@@ -6752,6 +6752,92 @@ impl Blockchain {
                 std::collections::HashMap::new()
             };
 
+        // ── Strict deterministic path (STRICT_REWARD_CALC_HEIGHT) ───────────────
+        // After this height every validator runs reward_calculator::compute() with
+        // the same bitmap-decoded active nodes and compares the result exactly to
+        // block.masternode_rewards.  No escape hatches — any deviation is proof of
+        // producer misbehaviour.  Returns early (Ok or Err) so the legacy heuristic
+        // steps below are skipped entirely for these heights.
+        if block.header.height >= crate::constants::blockchain::STRICT_REWARD_CALC_HEIGHT {
+            // Reject if the bitmap encodes nodes our registry doesn't know.
+            // After FREE_TIER_ONCHAIN_HEIGHT the set of valid masternodes is fully
+            // on-chain — an unknown node in the bitmap means the producer fabricated it.
+            if active_bitmap_nodes.len() < bitmap_active_count {
+                return Err(format!(
+                    "Block {} bitmap contains {} active bits but local registry resolved \
+                     only {} nodes — producer may have inserted unknown masternodes",
+                    block.header.height,
+                    bitmap_active_count,
+                    active_bitmap_nodes.len(),
+                ));
+            }
+
+            // Build the on-chain-registered Free-tier set (empty below FREE_TIER_ONCHAIN_HEIGHT,
+            // but STRICT_REWARD_CALC_HEIGHT >= FREE_TIER_ONCHAIN_HEIGHT by definition).
+            let free_tier_registered: std::collections::HashSet<String> = active_bitmap_nodes
+                .iter()
+                .filter(|info| info.masternode.tier == MasternodeTier::Free)
+                .filter(|info| self.is_free_tier_registered(&info.masternode.address))
+                .map(|info| info.masternode.address.clone())
+                .collect();
+
+            let calc_input = crate::reward_calculator::RewardInput {
+                height: block.header.height,
+                producer_wallet: &producer_wallet,
+                active_nodes: &active_bitmap_nodes,
+                fairness_map: &fairness_map,
+                fees: calculated_fees,
+                total_reward: block.header.block_reward,
+                free_tier_registered: &free_tier_registered,
+            };
+
+            let expected =
+                crate::reward_calculator::compute(&calc_input, &self.utxo_manager).await;
+
+            let expected_norm = crate::reward_calculator::normalize(&expected);
+            let actual_norm = crate::reward_calculator::normalize(&block.masternode_rewards);
+
+            if expected_norm != actual_norm {
+                // Build a concise diff for the error message.
+                let mut diff: Vec<String> = Vec::new();
+                for (addr, &exp_amt) in &expected_norm {
+                    let act_amt = actual_norm.get(addr).copied().unwrap_or(0);
+                    if act_amt != exp_amt {
+                        diff.push(format!(
+                            "{} expected {} got {}",
+                            &addr[..addr.len().min(12)],
+                            exp_amt,
+                            act_amt
+                        ));
+                    }
+                }
+                for (addr, &act_amt) in &actual_norm {
+                    if !expected_norm.contains_key(addr.as_str()) {
+                        diff.push(format!(
+                            "{} unexpected {}",
+                            &addr[..addr.len().min(12)],
+                            act_amt
+                        ));
+                    }
+                }
+                return Err(format!(
+                    "Block {} reward manipulation: calculator expected {} recipients, \
+                     block has {} recipients. Discrepancies: {}",
+                    block.header.height,
+                    expected_norm.len(),
+                    actual_norm.len(),
+                    diff.join("; "),
+                ));
+            }
+
+            tracing::debug!(
+                "Block {} strict reward validation passed ({} recipients)",
+                block.header.height,
+                expected_norm.len(),
+            );
+            return Ok(());
+        }
+
         // ── Step 3: verify each tier pool was distributed correctly ───────────
         // For each paid tier: the total paid to all recipients of that tier must
         // equal the tier's canonical pool allocation.

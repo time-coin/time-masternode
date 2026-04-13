@@ -20,6 +20,7 @@ pub mod memo;
 pub mod network;
 pub mod network_type;
 pub mod peer_manager;
+pub mod reward_calculator;
 pub mod rpc;
 pub mod shutdown;
 pub mod state_notifier;
