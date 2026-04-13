@@ -47,12 +47,29 @@ pub enum PoolError {
     PreviouslyRejected,
 }
 
-/// Transaction pool manages pending and finalized transactions
+/// Transaction pool manages pending and confirmed transactions.
+///
+/// ## Lifecycle
+/// ```
+/// submit → pending
+///   ↓  (67% TimeVote threshold — SpentFinalized)
+/// confirmed   ← invisible to mempool display; ready for block archival
+///   ↓  (block includes the TX)
+/// (removed)
+/// ```
+///
+/// Transactions disappear from the user-visible mempool the moment they reach
+/// `SpentFinalized` UTXO state — not when the archival block arrives.  The
+/// `confirmed` map is an internal staging area for the block producer only.
 pub struct TransactionPool {
-    /// Pending transactions waiting for consensus (lock-free concurrent access)
+    /// Pending transactions waiting for TimeVote consensus.
+    /// Visible in mempool RPC/dashboard.
     pending: DashMap<Hash256, PoolEntry>,
-    /// Finalized transactions ready for block inclusion
-    finalized: DashMap<Hash256, PoolEntry>,
+    /// Confirmed transactions (TimeVote reached SpentFinalized).
+    /// NOT shown in mempool display — already settled from the user's perspective.
+    /// Held here so the block producer can collect them for archival.
+    /// Cleared when the containing block is accepted by `archive_confirmed_txs`.
+    confirmed: DashMap<Hash256, PoolEntry>,
     /// Rejected transactions with reason and timestamp
     rejected: DashMap<Hash256, (String, Instant)>,
     /// Track sizes
@@ -74,7 +91,7 @@ impl TransactionPool {
     pub fn new() -> Self {
         Self {
             pending: DashMap::new(),
-            finalized: DashMap::new(),
+            confirmed: DashMap::new(),
             rejected: DashMap::new(),
             pending_count: AtomicUsize::new(0),
             pending_bytes: AtomicUsize::new(0),
@@ -150,7 +167,7 @@ impl TransactionPool {
         let txid = tx.txid();
 
         // Fast path: Check if already exists BEFORE expensive serialization
-        if self.pending.contains_key(&txid) || self.finalized.contains_key(&txid) {
+        if self.pending.contains_key(&txid) || self.confirmed.contains_key(&txid) {
             return Err(PoolError::AlreadyExists);
         }
 
@@ -196,18 +213,22 @@ impl TransactionPool {
         Ok(())
     }
 
-    /// Move transaction from pending to finalized (atomic)
-    /// Returns true if the transaction was successfully finalized
-    pub fn finalize_transaction(&self, txid: Hash256) -> bool {
+    /// Confirm a transaction: move from pending → confirmed.
+    ///
+    /// Called when TimeVote reaches the SpentFinalized threshold.
+    /// The TX is removed from the user-visible mempool immediately.
+    /// It stays in `confirmed` until the block producer archives it.
+    /// Returns true if the transaction was found in pending and confirmed.
+    pub fn confirm_transaction(&self, txid: Hash256) -> bool {
         if let Some((_, entry)) = self.pending.remove(&txid) {
-            self.sled_persist(&txid, &entry.tx, entry.fee, true);
-            self.finalized.insert(txid, entry.clone());
+            // Remove from sled mempool — no longer visible to peers via mempool sync
+            self.sled_remove(&txid);
+            self.confirmed.insert(txid, entry.clone());
             self.pending_count.fetch_sub(1, Ordering::Relaxed);
             self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
             tracing::info!(
-                "📦 TxPool: Finalized TX {}, pool now has {} finalized",
+                "✅ TxPool: TX {} confirmed (SpentFinalized), awaiting block archival",
                 hex::encode(txid),
-                self.finalized.len()
             );
             true
         } else {
@@ -215,9 +236,14 @@ impl TransactionPool {
         }
     }
 
-    /// Check if transaction exists in pending or finalized pool
+    /// Legacy alias — prefer `confirm_transaction`.
+    pub fn finalize_transaction(&self, txid: Hash256) -> bool {
+        self.confirm_transaction(txid)
+    }
+
+    /// Check if transaction exists in pending or confirmed pool
     pub fn has_transaction(&self, txid: &Hash256) -> bool {
-        self.pending.contains_key(txid) || self.finalized.contains_key(txid)
+        self.pending.contains_key(txid) || self.confirmed.contains_key(txid)
     }
 
     /// Reject a transaction (atomic)
@@ -233,7 +259,7 @@ impl TransactionPool {
 
     /// Get all finalized transactions for block inclusion (with fees)
     pub fn get_finalized_transactions_with_fees(&self) -> Vec<(Transaction, u64)> {
-        self.finalized
+        self.confirmed
             .iter()
             .map(|e| (e.value().tx.clone(), e.value().fee))
             .collect()
@@ -241,41 +267,30 @@ impl TransactionPool {
 
     /// Get all finalized transactions for block inclusion
     pub fn get_finalized_transactions(&self) -> Vec<Transaction> {
-        self.finalized
+        self.confirmed
             .iter()
             .map(|e| e.value().tx.clone())
             .collect()
     }
 
-    /// Get all mempool entries with metadata (for dashboard/verbose RPC)
+    /// Get all user-visible mempool entries with metadata (for dashboard/verbose RPC).
+    /// Only shows `pending` — confirmed TXs have already settled from the user's
+    /// perspective (their inputs are SpentFinalized) and are excluded.
     pub fn get_all_entries_verbose(&self) -> Vec<(Transaction, u64, u64, String)> {
         // Returns (tx, fee, age_secs, status)
-        let mut entries = Vec::new();
-        for e in self.pending.iter() {
-            let age = e.value().added_at.elapsed().as_secs();
-            entries.push((
-                e.value().tx.clone(),
-                e.value().fee,
-                age,
-                "pending".to_string(),
-            ));
-        }
-        for e in self.finalized.iter() {
-            let age = e.value().added_at.elapsed().as_secs();
-            entries.push((
-                e.value().tx.clone(),
-                e.value().fee,
-                age,
-                "finalized".to_string(),
-            ));
-        }
-        entries
+        self.pending
+            .iter()
+            .map(|e| {
+                let age = e.value().added_at.elapsed().as_secs();
+                (e.value().tx.clone(), e.value().fee, age, "pending".to_string())
+            })
+            .collect()
     }
 
     /// Clear finalized transactions (after block inclusion)
     pub fn clear_finalized(&self) {
-        let count = self.finalized.len();
-        self.finalized.clear();
+        let count = self.confirmed.len();
+        self.confirmed.clear();
         // Remove finalized entries from sled (pending entries remain)
         if let Some(tree) = self.sled_tree.get() {
             let mut removed = 0;
@@ -304,32 +319,38 @@ impl TransactionPool {
         );
     }
 
-    /// Clear only specific finalized transactions that were included in a block
-    /// This prevents clearing transactions that weren't actually in the block
-    pub fn clear_finalized_txs(&self, txids: &[Hash256]) {
-        let mut cleared_finalized = 0;
-        let mut cleared_pending = 0;
+    /// Archive confirmed transactions that were included in a block.
+    ///
+    /// Called from `add_block` after a block is accepted.  Removes the TXs from
+    /// the `confirmed` staging map.  Also evicts any still-pending entries for the
+    /// same txids — this handles the sync path where a peer included a TX that we
+    /// haven't yet seen reach SpentFinalized locally.
+    pub fn archive_confirmed_txs(&self, txids: &[Hash256]) {
+        let mut archived = 0;
+        let mut evicted_pending = 0;
         for txid in txids {
-            if self.finalized.remove(txid).is_some() {
-                cleared_finalized += 1;
+            if self.confirmed.remove(txid).is_some() {
+                archived += 1;
             }
-            // Also remove from pending: a peer may have included a TX that was still
-            // pending locally (finalized on their side but not ours). Without this,
-            // pending entries leak and the mempool grows indefinitely.
             if let Some((_, entry)) = self.pending.remove(txid) {
                 self.pending_count.fetch_sub(1, Ordering::Relaxed);
                 self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
-                cleared_pending += 1;
+                self.sled_remove(txid);
+                evicted_pending += 1;
             }
-            self.sled_remove(txid);
         }
-        if cleared_finalized > 0 || cleared_pending > 0 {
+        if archived > 0 || evicted_pending > 0 {
             tracing::info!(
-                "🧹 TxPool: Cleared {} finalized + {} pending transaction(s) included in block",
-                cleared_finalized,
-                cleared_pending
+                "🧹 TxPool: Archived {} confirmed + evicted {} pending tx(s) from block",
+                archived,
+                evicted_pending
             );
         }
+    }
+
+    /// Legacy alias — prefer `archive_confirmed_txs`.
+    pub fn clear_finalized_txs(&self, txids: &[Hash256]) {
+        self.archive_confirmed_txs(txids);
     }
 
     /// Get pending transaction count (O(1))
@@ -339,7 +360,12 @@ impl TransactionPool {
 
     /// Get finalized transaction count
     pub fn finalized_count(&self) -> usize {
-        self.finalized.len()
+        self.confirmed.len()
+    }
+
+    /// Get confirmed transaction count (alias for finalized_count)
+    pub fn confirmed_count(&self) -> usize {
+        self.confirmed.len()
     }
 
     /// Remove stale pending transactions older than max_age.
@@ -409,7 +435,7 @@ impl TransactionPool {
     pub fn get_transaction(&self, txid: &Hash256) -> Option<Transaction> {
         self.pending
             .get(txid)
-            .or_else(|| self.finalized.get(txid))
+            .or_else(|| self.confirmed.get(txid))
             .map(|e| e.tx.clone())
     }
 
@@ -421,7 +447,7 @@ impl TransactionPool {
     /// Check if transaction is finalized
     #[allow(dead_code)]
     pub fn is_finalized(&self, txid: &Hash256) -> bool {
-        self.finalized.contains_key(txid)
+        self.confirmed.contains_key(txid)
     }
 
     /// Get rejection reason
@@ -432,7 +458,7 @@ impl TransactionPool {
 
     /// Get total fees from finalized transactions
     pub fn get_total_fees(&self) -> u64 {
-        self.finalized.iter().map(|e| e.value().fee).sum()
+        self.confirmed.iter().map(|e| e.value().fee).sum()
     }
 
     /// Get fee for a specific transaction
@@ -464,7 +490,7 @@ impl TransactionPool {
         PoolMetrics {
             pending_count: self.pending_count(),
             pending_bytes: self.pending_bytes.load(Ordering::Relaxed),
-            finalized_count: self.finalized_count(),
+            finalized_count: self.confirmed_count(),
             rejected_count: self.rejected.len(),
             total_fees_pending: total_fees,
             avg_fee_rate,
@@ -588,7 +614,7 @@ impl TransactionPool {
     /// TimeVote consensus. Does not start a new consensus round.
     pub fn add_finalized_direct(&self, tx: Transaction, fee: u64) {
         let txid = tx.txid();
-        if self.pending.contains_key(&txid) || self.finalized.contains_key(&txid) {
+        if self.pending.contains_key(&txid) || self.confirmed.contains_key(&txid) {
             return;
         }
         let size = bincode::serialized_size(&tx).unwrap_or(0) as usize;
@@ -600,13 +626,13 @@ impl TransactionPool {
             submitter_ip: None,
         };
         self.sled_persist(&txid, &entry.tx, entry.fee, true);
-        self.finalized.insert(txid, entry);
+        self.confirmed.insert(txid, entry);
     }
 
     /// Get finalized transactions that have been waiting longer than `min_age`.
     /// Used to re-broadcast orphaned finalized TXs that peers may have missed.
     pub fn get_stale_finalized(&self, min_age: std::time::Duration) -> Vec<(Hash256, Transaction)> {
-        self.finalized
+        self.confirmed
             .iter()
             .filter(|e| e.value().added_at.elapsed() >= min_age)
             .map(|e| (*e.key(), e.value().tx.clone()))
@@ -624,7 +650,7 @@ impl TransactionPool {
                 is_finalized: false,
             });
         }
-        for e in self.finalized.iter() {
+        for e in self.confirmed.iter() {
             entries.push(crate::network::message::MempoolSyncEntry {
                 tx: e.value().tx.clone(),
                 fee: e.value().fee,
@@ -666,7 +692,7 @@ impl TransactionPool {
             }
         }
 
-        for e in self.finalized.iter() {
+        for e in self.confirmed.iter() {
             let entry = serde_json::json!({
                 "tx": serde_json::to_value(&e.value().tx).unwrap_or_default(),
                 "fee": e.value().fee,

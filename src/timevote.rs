@@ -155,7 +155,12 @@ impl TimeVoteHandler {
         }
     }
 
-    /// Apply the finality result to the transaction pool and UTXO state
+    /// Apply the finality result to the transaction pool and UTXO state.
+    ///
+    /// This is the canonical confirmation point for TIME Coin: when a TX reaches
+    /// `SpentFinalized` here, it is confirmed from the user's perspective.  Blocks
+    /// are archival checkpoints only.  Special transactions (masternode reg/dereg/
+    /// payout updates) are applied to the live registry here — not in `add_block`.
     async fn apply_finality_result(
         &self,
         txid: Hash256,
@@ -163,51 +168,136 @@ impl TimeVoteHandler {
     ) -> Result<(), TimeVoteError> {
         match preference {
             Preference::Accept => {
-                // Get TX before finalizing (PoolEntry is private)
+                // Grab TX data before removing from pending pool.
                 let tx_data = self.tx_pool.get_pending(&txid);
 
-                // Move transaction to finalized pool
-                self.tx_pool.finalize_transaction(txid);
+                // Move TX from pending → confirmed staging area.
+                // This is the moment the TX disappears from the user-visible mempool.
+                self.tx_pool.confirm_transaction(txid);
 
-                if self.tx_pool.is_finalized(&txid) {
-                    // Only proceed if we got the TX data
-                    if let Some(tx) = tx_data {
-                        // Update inputs to SpentFinalized
-                        for input in &tx.inputs {
-                            let new_state = UTXOState::SpentFinalized {
-                                txid,
-                                finalized_at: chrono::Utc::now().timestamp(),
-                                votes: 0,
-                            };
-                            self.utxo_manager
-                                .update_state(&input.previous_output, new_state);
+                if let Some(tx) = tx_data {
+                    // Update inputs to SpentFinalized
+                    for input in &tx.inputs {
+                        let new_state = UTXOState::SpentFinalized {
+                            txid,
+                            finalized_at: chrono::Utc::now().timestamp(),
+                            votes: 0,
+                        };
+                        self.utxo_manager
+                            .update_state(&input.previous_output, new_state);
+                    }
+
+                    // Create new UTXOs from outputs
+                    for (idx, output) in tx.outputs.iter().enumerate() {
+                        let outpoint = OutPoint {
+                            txid,
+                            vout: idx as u32,
+                        };
+                        let utxo = UTXO {
+                            outpoint: outpoint.clone(),
+                            value: output.value,
+                            script_pubkey: output.script_pubkey.clone(),
+                            address: String::from_utf8(output.script_pubkey.clone())
+                                .unwrap_or_default(),
+                            masternode_key: None,
+                        };
+                        let _ = self.utxo_manager.add_utxo(utxo).await;
+                        self.utxo_manager
+                            .update_state(&outpoint, UTXOState::Unspent);
+                    }
+
+                    // Dispatch special transactions to the live registry.
+                    // process_special_transactions in add_block will be idempotent and skip
+                    // any registration that was already applied here.
+                    if let Some(ref special) = tx.special_data {
+                        let txid_hex = hex::encode(txid);
+                        match special {
+                            SpecialTransactionData::MasternodeRegistration {
+                                node_address,
+                                wallet_address,
+                                reward_address,
+                                collateral_outpoint,
+                                pubkey,
+                                signature,
+                            } => {
+                                // Height 0 at finality time — the block height is not yet known.
+                                // process_special_transactions will update with the real height.
+                                if let Err(e) = self
+                                    .masternode_registry
+                                    .apply_masternode_registration(
+                                        node_address,
+                                        wallet_address,
+                                        reward_address,
+                                        collateral_outpoint,
+                                        pubkey,
+                                        signature,
+                                        0, // registration_height: updated when block is added
+                                        &txid_hex,
+                                        &self.utxo_manager,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "⚠️  MasternodeRegistration at SpentFinalized: {} (txid {})",
+                                        e,
+                                        txid_hex
+                                    );
+                                }
+                            }
+                            SpecialTransactionData::MasternodeDeregistration {
+                                node_address,
+                                slot_id,
+                                pubkey,
+                                signature,
+                            } => {
+                                if let Err(e) = self
+                                    .masternode_registry
+                                    .apply_masternode_deregistration(
+                                        node_address,
+                                        *slot_id,
+                                        pubkey,
+                                        signature,
+                                        &self.utxo_manager,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "⚠️  MasternodeDeregistration at SpentFinalized: {} (txid {})",
+                                        e,
+                                        txid_hex
+                                    );
+                                }
+                            }
+                            SpecialTransactionData::MasternodePayoutUpdate {
+                                node_address,
+                                new_reward_address,
+                                pubkey,
+                                signature,
+                            } => {
+                                if let Err(e) = self
+                                    .masternode_registry
+                                    .apply_masternode_payout_update(
+                                        node_address,
+                                        new_reward_address,
+                                        pubkey,
+                                        signature,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "⚠️  MasternodePayoutUpdate at SpentFinalized: {} (txid {})",
+                                        e,
+                                        txid_hex
+                                    );
+                                }
+                            }
                         }
+                    }
 
-                        // Create new UTXOs from outputs
-                        for (idx, output) in tx.outputs.iter().enumerate() {
-                            let outpoint = OutPoint {
-                                txid,
-                                vout: idx as u32,
-                            };
-                            let utxo = UTXO {
-                                outpoint: outpoint.clone(),
-                                value: output.value,
-                                script_pubkey: output.script_pubkey.clone(),
-                                address: String::from_utf8(output.script_pubkey.clone())
-                                    .unwrap_or_default(),
-                                masternode_key: None,
-                            };
-
-                            let _ = self.utxo_manager.add_utxo(utxo).await;
-                            self.utxo_manager
-                                .update_state(&outpoint, UTXOState::Unspent);
-                        }
-
-                        tracing::info!(
-                            "💾 Transaction {:?} finalized and available for block inclusion",
-                            hex::encode(txid)
-                        );
-                    } // End if let Some(tx) = tx_data
+                    tracing::info!(
+                        "✅ TX {} confirmed (SpentFinalized) — mempool cleared, registry updated",
+                        hex::encode(txid)
+                    );
                 }
                 Ok(())
             }

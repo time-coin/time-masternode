@@ -3698,6 +3698,36 @@ impl MasternodeRegistry {
     ) -> Result<u32, String> {
         use ed25519_dalek::Verifier;
 
+        // Idempotency guard: if this node is already registered with the same txid
+        // (applied earlier at SpentFinalized by apply_finality_result), skip re-application.
+        // If registration_height > 0 (i.e. we have the real block height now), update it.
+        let key = format!("mnreg:{}", node_address);
+        if let Ok(Some(existing_bytes)) = self.db.get(key.as_bytes()) {
+            if let Ok(mut existing) = bincode::deserialize::<crate::types::MasternodeOnchainInfo>(&existing_bytes) {
+                if existing.registration_txid == registration_txid {
+                    // Already applied. If we now have the real block height, update it.
+                    if registration_height > 0 && existing.registration_height == 0 {
+                        existing.registration_height = registration_height;
+                        if let Ok(bytes) = bincode::serialize(&existing) {
+                            let _ = self.db.insert(key.as_bytes(), bytes);
+                        }
+                        // Also update in-memory registration_height
+                        if let Some(info) = self.masternodes.write().await.get_mut(node_address) {
+                            info.registration_height = registration_height;
+                            if let RegistrationSource::OnChain(_) = info.registration_source {
+                                info.registration_source = RegistrationSource::OnChain(registration_height);
+                            }
+                        }
+                        tracing::debug!(
+                            "↪ MasternodeRegistration height updated: {} height={}",
+                            node_address, registration_height
+                        );
+                    }
+                    return Ok(existing.slot_id);
+                }
+            }
+        }
+
         // Verify signature
         let pubkey_bytes = hex::decode(pubkey).map_err(|e| format!("invalid pubkey hex: {}", e))?;
         let pubkey_arr: [u8; 32] = pubkey_bytes.try_into().map_err(|_| "pubkey must be 32 bytes")?;
@@ -3815,7 +3845,7 @@ impl MasternodeRegistry {
         verifying_key.verify(msg.as_bytes(), &sig)
             .map_err(|_| "MasternodeDeregistration signature verification failed")?;
 
-        // Verify slot ID matches
+        // Idempotency guard: if already deregistered (applied at SpentFinalized), return Ok.
         {
             let nodes = self.masternodes.read().await;
             if let Some(info) = nodes.get(node_address) {
@@ -3830,7 +3860,12 @@ impl MasternodeRegistry {
                     let _ = utxo_manager.unlock_collateral(outpoint);
                 }
             } else {
-                return Err(format!("no masternode registered at {}", node_address));
+                // Already removed (applied at SpentFinalized) — idempotent, nothing to do.
+                tracing::debug!(
+                    "↪ MasternodeDeregistration already applied (idempotent): {} slot={}",
+                    node_address, slot_id
+                );
+                return Ok(());
             }
         }
 
@@ -3870,7 +3905,12 @@ impl MasternodeRegistry {
             info.reward_address = new_reward_address.to_string();
             self.store_masternode(node_address, info).map_err(|e| format!("store: {}", e))?;
         } else {
-            return Err(format!("no masternode registered at {}", node_address));
+            // Node may have been deregistered between SpentFinalized and block archival
+            // — treat as already-applied, not an error.
+            tracing::debug!(
+                "↪ MasternodePayoutUpdate for unknown node (idempotent): {}",
+                node_address
+            );
         }
         Ok(())
     }
