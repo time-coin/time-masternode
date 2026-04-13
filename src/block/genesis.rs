@@ -159,6 +159,7 @@ impl GenesisBlock {
                 vrf_proof: vec![],
                 vrf_score: 0,
                 producer_signature: vec![],
+                treasury_balance: 500_000_000, // 5 TIME first deposit
             },
             transactions: vec![],
             masternode_rewards: vec![
@@ -207,6 +208,7 @@ impl GenesisBlock {
                 vrf_proof: vec![],
                 vrf_score: 0,
                 producer_signature: vec![],
+                treasury_balance: 500_000_000, // 5 TIME first deposit
             },
             transactions: vec![],
             masternode_rewards: vec![], // full reward to treasury pool; no masternode distribution

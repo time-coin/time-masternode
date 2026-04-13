@@ -850,14 +850,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let txid_hex = parts[1];
         let outpoint_str = format!("{}:{}", txid_hex, vout);
 
-        // Build signing message
-        let msg = format!(
-            "MN_REG:{}:{}:{}:{}",
-            outpoint_str, masternode_ip, p2p_port, payout_address
-        );
-        let message = Sha256::digest(msg.as_bytes()).to_vec();
-
-        // Resolve signing key: --privkey takes priority over --wallet-path
+        // Build signing key
         let owned_key: SigningKey;
         let signing_key: &SigningKey = if let Some(pk_hex) = privkey {
             let bytes = hex::decode(pk_hex)
@@ -870,7 +863,6 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             owned_key = SigningKey::from_bytes(&arr);
             &owned_key
         } else {
-            // Fall back to wallet file
             let wpath = if let Some(p) = wallet_path {
                 std::path::PathBuf::from(p)
             } else {
@@ -884,7 +876,6 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 };
                 data_dir.join("wallet.dat")
             };
-
             let wallet = Wallet::load(&wpath, wallet_password).map_err(|e| {
                 format!(
                     "Failed to load wallet from {}: {}. Use --wallet-path or --privkey.",
@@ -896,9 +887,10 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             &owned_key
         };
 
-        let signature = signing_key.sign(&message);
-        let owner_pubkey_hex = hex::encode(signing_key.verifying_key().as_bytes());
-        let signature_hex = hex::encode(signature.to_bytes());
+        let node_address = format!("{}:{}", masternode_ip, p2p_port);
+        let pubkey_hex = hex::encode(signing_key.verifying_key().as_bytes());
+        let msg = format!("MNREG:{}:{}:{}:{}", node_address, payout_address, pubkey_hex, outpoint_str);
+        let signature_hex = hex::encode(signing_key.sign(msg.as_bytes()).to_bytes());
 
         // Build the transaction
         let tx = timed::types::Transaction {
@@ -907,12 +899,12 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             outputs: vec![],
             lock_time: 0,
             timestamp: chrono::Utc::now().timestamp(),
-            special_data: Some(timed::types::SpecialTransactionData::MasternodeReg {
+            special_data: Some(timed::types::SpecialTransactionData::MasternodeRegistration {
+                node_address: node_address.clone(),
+                wallet_address: payout_address.clone(),
+                reward_address: String::new(),
                 collateral_outpoint: outpoint_str.clone(),
-                masternode_ip: masternode_ip.clone(),
-                masternode_port: p2p_port,
-                payout_address: payout_address.clone(),
-                owner_pubkey: owner_pubkey_hex.clone(),
+                pubkey: pubkey_hex.clone(),
                 signature: signature_hex,
             }),
             encrypted_memo: None,
@@ -944,12 +936,12 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
         if let Some(txid) = rpc_response.result {
-            println!("✅ MasternodeReg submitted!");
+            println!("✅ MasternodeRegistration submitted!");
             println!("   txid:            {}", txid);
             println!("   collateral:      {}", outpoint_str);
             println!("   masternode:      {}:{}", masternode_ip, p2p_port);
             println!("   payout_address:  {}", payout_address);
-            println!("   owner_pubkey:    {}", owner_pubkey_hex);
+            println!("   pubkey:          {}", pubkey_hex);
             println!("\nThe masternode will be recognized as the registered operator once");
             println!("the transaction is confirmed in the next block.");
         }

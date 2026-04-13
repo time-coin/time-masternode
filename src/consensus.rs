@@ -2564,7 +2564,7 @@ impl ConsensusEngine {
         // economic checks (input/output balance, dust, minimum send, fee) for these.
         // Structural / signature validity is enforced in blockchain.rs when the containing
         // block is applied, so we just accept them here without further checks.
-        if tx.is_masternode_reg() || tx.is_collateral_unlock() {
+        if tx.is_masternode_reg() || tx.is_masternode_dereg() {
             return Ok(0);
         }
 

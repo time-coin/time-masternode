@@ -7,7 +7,7 @@
 
 use crate::types::{Hash256, Transaction};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256}; // still used for merkle root
 
 /// Build a merkle tree from a list of hashes
 /// Generic merkle root calculator used for transactions, attestations, etc.
@@ -157,36 +157,49 @@ pub struct BlockHeader {
     #[serde(default)]
     pub producer_signature: Vec<u8>,
     /// Total transaction fees collected in this block (satoshis).
-    /// Zero for blocks with no user transactions; defaults to 0 for
-    /// pre-v1.3 blocks that were stored before this field existed.
     #[serde(default)]
     pub total_fees: u64,
+    /// On-chain treasury balance after all deposits and spends in this block (satoshis).
+    ///
+    /// Computed deterministically as:
+    ///   `prev_block.treasury_balance + TREASURY_POOL_SATOSHIS
+    ///    − sum(TreasurySpend governance outputs in this block)
+    ///    + sum(slashing deposits in this block)`
+    ///
+    /// Included in `block_hash()` — any divergence is detectable by validators
+    /// and syncing nodes replaying from genesis.  Genesis sets this to
+    /// `TREASURY_POOL_SATOSHIS` (the first block's deposit).
+    #[serde(default)]
+    pub treasury_balance: u64,
 }
 
 impl Block {
+    /// Compute the canonical BLAKE3 block hash over all consensus-critical header fields.
+    ///
+    /// Fields included (in order):
+    ///   version, height, previous_hash, merkle_root, timestamp, block_reward,
+    ///   leader, vrf_output, vrf_score, active_masternodes_bitmap, treasury_balance
+    ///
+    /// Fields NOT included:
+    ///   masternode_tiers  — metadata only, doesn't affect validity
+    ///   vrf_proof         — proof OF vrf_output; including both would be redundant
+    ///   attestation_root  — deprecated heartbeat field, always zeroed in new blocks
+    ///   producer_signature — covers this hash, so cannot be part of it
+    ///   total_fees        — committed via block_reward (= base + fees - treasury)
     pub fn hash(&self) -> Hash256 {
-        use sha2::{Digest, Sha256};
-
-        // Hash only the consensus-critical fields, excluding masternode_tiers
-        // which is metadata that changes over time and should not affect block identity
-        let mut hasher = Sha256::new();
-        hasher.update(self.header.version.to_le_bytes());
-        hasher.update(self.header.height.to_le_bytes());
-        hasher.update(self.header.previous_hash);
-        hasher.update(self.header.merkle_root);
-        hasher.update(self.header.timestamp.to_le_bytes());
-        hasher.update(self.header.block_reward.to_le_bytes());
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&self.header.version.to_le_bytes());
+        hasher.update(&self.header.height.to_le_bytes());
+        hasher.update(&self.header.previous_hash);
+        hasher.update(&self.header.merkle_root);
+        hasher.update(&self.header.timestamp.to_le_bytes());
+        hasher.update(&self.header.block_reward.to_le_bytes());
         hasher.update(self.header.leader.as_bytes());
-        hasher.update(self.header.attestation_root);
-        // VRF fields for deterministic chain comparison
-        // NOTE: vrf_proof is NOT included (it's a proof OF the output)
-        hasher.update(self.header.vrf_output);
-        hasher.update(self.header.vrf_score.to_le_bytes());
-        // Include active masternodes bitmap (consensus-critical field)
+        hasher.update(&self.header.vrf_output);
+        hasher.update(&self.header.vrf_score.to_le_bytes());
         hasher.update(&self.header.active_masternodes_bitmap);
-        // Explicitly NOT including masternode_tiers - it's metadata only
-
-        hasher.finalize().into()
+        hasher.update(&self.header.treasury_balance.to_le_bytes());
+        *hasher.finalize().as_bytes()
     }
 
     /// Add VRF proof to this block using the block leader's signing key

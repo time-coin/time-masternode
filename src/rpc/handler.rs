@@ -1015,10 +1015,9 @@ impl RpcHandler {
         // that listunspentmulti returns spendable: false right away — before the tx is
         // confirmed in a block (~10 min).  This closes the double-spend window on both
         // the GUI and mobile wallets.
-        if let Some(crate::types::SpecialTransactionData::MasternodeReg {
+        if let Some(crate::types::SpecialTransactionData::MasternodeRegistration {
             ref collateral_outpoint,
-            ref masternode_ip,
-            masternode_port,
+            ref node_address,
             ..
         }) = tx.special_data
         {
@@ -1035,8 +1034,7 @@ impl RpcHandler {
                             vout,
                         };
                         if let Ok(utxo) = self.utxo_manager.get_utxo(&outpoint).await {
-                            let mn_addr =
-                                format!("{}:{}", masternode_ip, masternode_port);
+                            let mn_addr = node_address.clone();
                             let height = self.blockchain.get_height();
                             match self.utxo_manager.lock_collateral(
                                 outpoint,
@@ -1045,7 +1043,7 @@ impl RpcHandler {
                                 utxo.value,
                             ) {
                                 Ok(_) => tracing::info!(
-                                    "🔒 Pre-locked collateral {}:{} for pending MasternodeReg {}",
+                                    "🔒 Pre-locked collateral {}:{} for pending MasternodeRegistration {}",
                                     parts[0],
                                     vout,
                                     &txid_hex[..16]

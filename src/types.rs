@@ -109,92 +109,84 @@ pub struct TxOutput {
 /// Carried in `Transaction::special_data` for masternode lifecycle operations.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum SpecialTransactionData {
-    /// Register a new masternode (Dash-like ProRegTx).
-    /// The collateral UTXO is *referenced* (not spent) and locked while the masternode is active.
-    MasternodeReg {
-        /// Collateral outpoint in "txid_hex:vout" format
-        collateral_outpoint: String,
-        masternode_ip: String,
-        masternode_port: u16,
+    /// Register any masternode tier on-chain.
+    ///
+    /// Replaces the old split between `MasternodeReg` (paid tiers) and
+    /// `FreeNodeRegistration` (Free tier).  All tiers use the same TX; the
+    /// tier is inferred from `collateral_outpoint`:
+    ///   - `None`  → Free tier (no collateral)
+    ///   - present → Bronze / Silver / Gold (tier from UTXO amount)
+    ///
+    /// When the TX is confirmed a permanent `slot_id` is assigned from the
+    /// registry's monotonically-increasing counter.  The slot ID is used for
+    /// bitmap position — it never changes and is never reused, eliminating
+    /// bitmap position drift (AV6).
+    ///
+    /// Signature message: `"MNREG:{node_address}:{wallet_address}:{pubkey}:{collateral_outpoint_or_none}"`
+    MasternodeRegistration {
+        /// IP:port of the node (used as the registry key)
+        node_address: String,
         /// Wallet address to receive block rewards
-        payout_address: String,
-        /// Hex-encoded Ed25519 public key of the collateral owner (cold wallet).
-        /// Address::from_public_key(owner_pubkey) must equal utxo.address.
-        owner_pubkey: String,
-        /// Ed25519 signature over the registration fields, proving collateral ownership.
-        /// Signed by owner_pubkey's private key.
+        wallet_address: String,
+        /// Optional reward-address override (empty = use wallet_address)
+        reward_address: String,
+        /// Collateral outpoint in "txid_hex:vout" format; empty string for Free tier
+        collateral_outpoint: String,
+        /// Hex-encoded Ed25519 public key of the operator / collateral owner
+        pubkey: String,
+        /// Ed25519 signature proving key ownership
         signature: String,
     },
-    /// Update the payout address of an existing masternode.
+    /// Deregister a masternode of any tier.
+    ///
+    /// The node's slot ID is retired (never reused); its bit in future bitmaps
+    /// will always be 0.  Collateral is unlocked for paid-tier nodes.
+    ///
+    /// Signature message: `"MNDEREG:{node_address}:{slot_id}"`
+    MasternodeDeregistration {
+        /// IP:port of the node (must match the on-chain registration)
+        node_address: String,
+        /// Slot ID assigned at registration time
+        slot_id: u32,
+        /// Hex-encoded Ed25519 public key (must match registration)
+        pubkey: String,
+        /// Ed25519 signature proving key ownership
+        signature: String,
+    },
+    /// Update the reward payout address for a registered masternode.
+    ///
+    /// Signature message: `"MNPAYOUT:{node_address}:{new_reward_address}"`
     MasternodePayoutUpdate {
         /// The masternode's node address (from original registration)
-        masternode_id: String,
-        new_payout_address: String,
+        node_address: String,
+        new_reward_address: String,
         /// Hex-encoded Ed25519 public key (must match original registration)
-        owner_pubkey: String,
-        /// Ed25519 signature over (masternode_id, new_payout_address)
-        signature: String,
-    },
-    /// Release a registered masternode's collateral back to spendable balance.
-    /// Emitted when collateral is removed from masternode.conf (commented out or deleted).
-    /// Must be signed by the collateral owner to prevent unauthorized unlocks.
-    CollateralUnlock {
-        /// Collateral outpoint in "txid_hex:vout" format (matches the original MasternodeReg)
-        collateral_outpoint: String,
-        /// The masternode's IP address (must match the on-chain registration anchor)
-        masternode_address: String,
-        /// Hex-encoded Ed25519 public key of the collateral owner
-        owner_pubkey: String,
-        /// Ed25519 signature over SHA-256("MN_UNLOCK:{collateral_outpoint}:{masternode_address}")
-        signature: String,
-    },
-    /// Register a Free-tier node on-chain (activates at FREE_TIER_ONCHAIN_HEIGHT).
-    ///
-    /// After FREE_TIER_ONCHAIN_HEIGHT, only nodes with an on-chain registration
-    /// (and FREE_MATURITY_BLOCKS of age) appear in the deterministic free-tier
-    /// eligible pool.  This closes the gossip-based eligibility attack surface
-    /// (AV35) where a VRF leader could exclude competing free-tier nodes by
-    /// disconnecting them before producing a block.
-    ///
-    /// The transaction must include a fee of at least FREE_TIER_REG_FEE_SATOSHIS
-    /// (1 TIME) to deter spam registrations.
-    FreeNodeRegistration {
-        /// IP address of the node (used as the registry key; one per IP)
-        node_address: String,
-        /// Wallet address to receive free-tier block rewards
-        wallet_address: String,
-        /// Hex-encoded Ed25519 public key of the node operator
         pubkey: String,
-        /// Ed25519 signature over "FREEREG:{node_address}:{wallet_address}:{pubkey}"
-        signature: String,
-    },
-    /// Deregister a Free-tier node from the on-chain registry.
-    ///
-    /// Stops reward payments to this node.  Must be signed by the same key that
-    /// was used for the original FreeNodeRegistration.
-    FreeNodeDeregistration {
-        /// IP address of the node to deregister (must match the on-chain record)
-        node_address: String,
-        /// Hex-encoded Ed25519 public key (must match the original registration)
-        pubkey: String,
-        /// Ed25519 signature over "FREEDEREG:{node_address}"
+        /// Ed25519 signature
         signature: String,
     },
 }
 
-/// On-chain record for a registered Free-tier masternode.
-/// Stored in blockchain sled DB under key `freereg:{node_address}`.
+/// On-chain record for a registered masternode (any tier).
+/// Stored in blockchain sled DB under key `mnreg:{node_address}`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct FreeNodeOnchainInfo {
-    /// IP address of the node
+pub struct MasternodeOnchainInfo {
+    /// IP:port of the node
     pub node_address: String,
-    /// Wallet address that receives free-tier rewards
+    /// Wallet address that receives block rewards
     pub wallet_address: String,
+    /// Optional reward-address override (empty = use wallet_address)
+    pub reward_address: String,
+    /// Collateral outpoint for paid tiers; empty for Free tier
+    pub collateral_outpoint: String,
     /// Hex-encoded Ed25519 public key
     pub pubkey: String,
-    /// Block height at which the FreeNodeRegistration TX was confirmed
+    /// Permanent slot ID assigned when the registration TX was confirmed.
+    /// Used for bitmap position — never changes, never reused.
+    pub slot_id: u32,
+    /// Block height at which the MasternodeRegistration TX was confirmed
     pub registration_height: u64,
-    /// Hex-encoded txid of the FreeNodeRegistration transaction
+    /// Hex-encoded txid of the MasternodeRegistration transaction
     pub registration_txid: String,
 }
 
@@ -238,7 +230,15 @@ impl Transaction {
     pub fn is_masternode_reg(&self) -> bool {
         matches!(
             self.special_data,
-            Some(SpecialTransactionData::MasternodeReg { .. })
+            Some(SpecialTransactionData::MasternodeRegistration { .. })
+        )
+    }
+
+    /// Returns `true` if this is a masternode deregistration transaction
+    pub fn is_masternode_dereg(&self) -> bool {
+        matches!(
+            self.special_data,
+            Some(SpecialTransactionData::MasternodeDeregistration { .. })
         )
     }
 
@@ -247,14 +247,6 @@ impl Transaction {
         matches!(
             self.special_data,
             Some(SpecialTransactionData::MasternodePayoutUpdate { .. })
-        )
-    }
-
-    /// Returns `true` if this is a collateral unlock transaction
-    pub fn is_collateral_unlock(&self) -> bool {
-        matches!(
-            self.special_data,
-            Some(SpecialTransactionData::CollateralUnlock { .. })
         )
     }
 
@@ -404,8 +396,10 @@ impl TransactionStatus {
 pub struct Masternode {
     pub address: String,
     pub wallet_address: String,
+    /// Optional reward-address override (empty = use wallet_address)
+    pub reward_address: String,
     pub collateral: u64,
-    /// The specific UTXO locked as collateral (None for legacy masternodes)
+    /// The specific UTXO locked as collateral (None for Free-tier nodes)
     pub collateral_outpoint: Option<OutPoint>,
     /// Timestamp when collateral was locked
     pub locked_at: u64,
@@ -414,6 +408,10 @@ pub struct Masternode {
     pub public_key: VerifyingKey,
     pub tier: MasternodeTier,
     pub registered_at: u64,
+    /// Permanent on-chain slot ID assigned when the MasternodeRegistration TX was confirmed.
+    /// Used as the stable bitmap position — never changes after assignment, never reused.
+    /// `u32::MAX` is a sentinel meaning "not yet assigned" (pre-confirmation).
+    pub slot_id: u32,
 }
 
 impl Masternode {
@@ -429,6 +427,7 @@ impl Masternode {
         Self {
             address,
             wallet_address,
+            reward_address: String::new(),
             collateral,
             collateral_outpoint: None,
             locked_at: registered_at,
@@ -436,6 +435,7 @@ impl Masternode {
             public_key,
             tier,
             registered_at,
+            slot_id: u32::MAX, // sentinel: not yet assigned
         }
     }
 
@@ -452,6 +452,7 @@ impl Masternode {
         Self {
             address,
             wallet_address,
+            reward_address: String::new(),
             collateral,
             collateral_outpoint: Some(collateral_outpoint),
             locked_at: registered_at,
@@ -459,6 +460,7 @@ impl Masternode {
             public_key,
             tier,
             registered_at,
+            slot_id: u32::MAX, // sentinel: not yet assigned
         }
     }
 

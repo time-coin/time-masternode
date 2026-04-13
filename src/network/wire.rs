@@ -129,6 +129,7 @@ impl From<LegacyBlockHeader> for BlockHeader {
             liveness_recovery: h.liveness_recovery,
             producer_signature: h.producer_signature,
             total_fees: 0,
+            treasury_balance: 0,
         }
     }
 }

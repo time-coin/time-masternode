@@ -1642,27 +1642,42 @@ async fn main() {
                     return;
                 }
 
-                // Unlock the old on-chain collateral if it differs from conf
-                if let Some(ref old_outpoint_str) = on_chain_outpoint {
+                // Deregister the old on-chain record if the collateral outpoint changed
+                if let Some(ref _old_outpoint_str) = on_chain_outpoint {
                     if on_chain_outpoint != conf_outpoint {
-                        tracing::info!(
-                            "📤 Submitting CollateralUnlock for old collateral {}",
-                            old_outpoint_str
-                        );
-                        if let Some(unlock_tx) =
-                            build_collateral_unlock_tx(old_outpoint_str, ip, &wallet_key_for_sync)
-                        {
-                            match collateral_sync_consensus
-                                .submit_transaction(unlock_tx)
-                                .await
+                        // Look up the slot ID for this node address
+                        let slot_id = collateral_sync_registry
+                            .get_slot_id_for_address(ip)
+                            .await
+                            .unwrap_or(u32::MAX);
+                        if slot_id == u32::MAX {
+                            tracing::warn!(
+                                "⚠️ Cannot deregister {}: no slot ID found (not yet confirmed?)",
+                                ip
+                            );
+                        } else {
+                            tracing::info!(
+                                "📤 Submitting MasternodeDeregistration for {} slot={}",
+                                ip, slot_id
+                            );
+                            if let Some(dereg_tx) =
+                                build_masternode_dereg_tx(ip, slot_id, &wallet_key_for_sync)
                             {
-                                Ok(txid) => tracing::info!(
-                                    "✅ CollateralUnlock submitted: {} (tx {})",
-                                    old_outpoint_str,
-                                    hex::encode(txid)
-                                ),
-                                Err(e) => {
-                                    tracing::warn!("⚠️ CollateralUnlock submission failed: {}", e)
+                                match collateral_sync_consensus
+                                    .submit_transaction(dereg_tx)
+                                    .await
+                                {
+                                    Ok(txid) => tracing::info!(
+                                        "✅ MasternodeDeregistration submitted: {} (tx {})",
+                                        ip,
+                                        hex::encode(txid)
+                                    ),
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "⚠️ MasternodeDeregistration submission failed: {}",
+                                            e
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -4955,23 +4970,22 @@ fn build_masternode_reg_tx(
         outputs: vec![],
         lock_time: 0,
         timestamp: chrono::Utc::now().timestamp(),
-        special_data: Some(types::SpecialTransactionData::MasternodeReg {
+        special_data: Some(types::SpecialTransactionData::MasternodeRegistration {
+            node_address: format!("{}:{}", mn.address, p2p_port),
+            wallet_address: mn.wallet_address.clone(),
+            reward_address: String::new(),
             collateral_outpoint: outpoint_str,
-            masternode_ip: mn.address.clone(),
-            masternode_port: p2p_port,
-            payout_address: mn.wallet_address.clone(),
-            owner_pubkey: owner_pubkey_hex,
+            pubkey: owner_pubkey_hex,
             signature: signature_hex,
         }),
         encrypted_memo: None,
     })
 }
 
-/// Build a FreeNodeRegistration special transaction.
+/// Build a MasternodeRegistration special transaction for a Free-tier node (no collateral).
 ///
-/// Signed with `node_key` — the operator's hot key (masternodeprivkey or wallet key).
-/// The message is "FREEREG:{node_address}:{wallet_address}:{pubkey_hex}".
-/// Returns `None` only if key bytes cannot be encoded (should never happen).
+/// Signed with `node_key`.
+/// Message: `"MNREG:{node_address}:{wallet_address}:{pubkey}:none"`
 fn build_free_node_reg_tx(
     node_address: &str,
     wallet_address: &str,
@@ -4980,7 +4994,7 @@ fn build_free_node_reg_tx(
     use ed25519_dalek::Signer;
 
     let pubkey_hex = hex::encode(node_key.verifying_key().as_bytes());
-    let msg = format!("FREEREG:{}:{}:{}", node_address, wallet_address, pubkey_hex);
+    let msg = format!("MNREG:{}:{}:{}:none", node_address, wallet_address, pubkey_hex);
     let signature_hex = hex::encode(node_key.sign(msg.as_bytes()).to_bytes());
 
     Some(types::Transaction {
@@ -4989,9 +5003,11 @@ fn build_free_node_reg_tx(
         outputs: vec![],
         lock_time: 0,
         timestamp: chrono::Utc::now().timestamp(),
-        special_data: Some(types::SpecialTransactionData::FreeNodeRegistration {
+        special_data: Some(types::SpecialTransactionData::MasternodeRegistration {
             node_address: node_address.to_string(),
             wallet_address: wallet_address.to_string(),
+            reward_address: String::new(),
+            collateral_outpoint: String::new(), // empty = Free tier
             pubkey: pubkey_hex,
             signature: signature_hex,
         }),
@@ -4999,28 +5015,19 @@ fn build_free_node_reg_tx(
     })
 }
 
-/// Build a CollateralUnlock special transaction to release a previously registered collateral.
-/// `collateral_outpoint_str` is "txid_hex:vout".
-fn build_collateral_unlock_tx(
-    collateral_outpoint_str: &str,
-    masternode_address: &str,
-    wallet_key: &ed25519_dalek::SigningKey,
+/// Build a MasternodeDeregistration special transaction.
+/// `slot_id` is the permanent on-chain slot assigned at registration.
+/// Message: `"MNDEREG:{node_address}:{slot_id}"`
+fn build_masternode_dereg_tx(
+    node_address: &str,
+    slot_id: u32,
+    node_key: &ed25519_dalek::SigningKey,
 ) -> Option<types::Transaction> {
     use ed25519_dalek::Signer;
 
-    let owner_pubkey = wallet_key.verifying_key();
-    let owner_pubkey_hex = hex::encode(owner_pubkey.as_bytes());
-
-    let message = {
-        use sha2::{Digest, Sha256};
-        let msg = format!(
-            "MN_UNLOCK:{}:{}",
-            collateral_outpoint_str, masternode_address
-        );
-        Sha256::digest(msg.as_bytes()).to_vec()
-    };
-    let signature = wallet_key.sign(&message);
-    let signature_hex = hex::encode(signature.to_bytes());
+    let pubkey_hex = hex::encode(node_key.verifying_key().as_bytes());
+    let msg = format!("MNDEREG:{}:{}", node_address, slot_id);
+    let signature_hex = hex::encode(node_key.sign(msg.as_bytes()).to_bytes());
 
     Some(types::Transaction {
         version: 1,
@@ -5028,10 +5035,10 @@ fn build_collateral_unlock_tx(
         outputs: vec![],
         lock_time: 0,
         timestamp: chrono::Utc::now().timestamp(),
-        special_data: Some(types::SpecialTransactionData::CollateralUnlock {
-            collateral_outpoint: collateral_outpoint_str.to_string(),
-            masternode_address: masternode_address.to_string(),
-            owner_pubkey: owner_pubkey_hex,
+        special_data: Some(types::SpecialTransactionData::MasternodeDeregistration {
+            node_address: node_address.to_string(),
+            slot_id,
+            pubkey: pubkey_hex,
             signature: signature_hex,
         }),
         encrypted_memo: None,

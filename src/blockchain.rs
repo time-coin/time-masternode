@@ -1230,6 +1230,7 @@ impl Blockchain {
             vrf_proof: vec![],
             vrf_score: 0,
             producer_signature: vec![], // Genesis has no producer signature
+            treasury_balance: crate::constants::blockchain::TREASURY_POOL_SATOSHIS,
         };
 
         // Create genesis block
@@ -5896,187 +5897,70 @@ impl Blockchain {
             let txid_hex = hex::encode(tx.txid());
 
             match special {
-                SpecialTransactionData::MasternodeReg {
-                    collateral_outpoint,
-                    masternode_ip,
-                    masternode_port,
-                    payout_address,
-                    owner_pubkey,
-                    signature,
-                } => {
-                    // Validate the registration
-                    match self
-                        .masternode_registry
-                        .validate_masternode_reg(
-                            collateral_outpoint,
-                            masternode_ip,
-                            *masternode_port,
-                            payout_address,
-                            owner_pubkey,
-                            signature,
-                            None,
-                            &self.utxo_manager,
-                        )
-                        .await
-                    {
-                        Ok((outpoint, tier, validated_op_key)) => {
-                            // Apply the registration
-                            if let Err(e) = self
-                                .masternode_registry
-                                .apply_masternode_reg(
-                                    outpoint,
-                                    masternode_ip,
-                                    *masternode_port,
-                                    payout_address,
-                                    owner_pubkey,
-                                    validated_op_key.as_deref(),
-                                    tier,
-                                    &self.utxo_manager,
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    "⚠️ Failed to apply MasternodeReg tx {}: {}",
-                                    &txid_hex[..16],
-                                    e
-                                );
-                            } else {
-                                tracing::info!(
-                                    "✅ MasternodeReg applied: {}:{} -> {} (tx {})",
-                                    masternode_ip,
-                                    masternode_port,
-                                    payout_address,
-                                    &txid_hex[..16]
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "⚠️ Invalid MasternodeReg tx {}: {}",
-                                &txid_hex[..16],
-                                e
-                            );
-                        }
-                    }
-                }
-
-                SpecialTransactionData::CollateralUnlock {
-                    collateral_outpoint,
-                    masternode_address,
-                    owner_pubkey,
-                    signature,
-                } => {
-                    match self
-                        .masternode_registry
-                        .validate_collateral_unlock(
-                            collateral_outpoint,
-                            masternode_address,
-                            owner_pubkey,
-                            signature,
-                            &self.utxo_manager,
-                        )
-                        .await
-                    {
-                        Ok(outpoint) => {
-                            if let Err(e) = self
-                                .masternode_registry
-                                .apply_collateral_unlock(
-                                    outpoint,
-                                    masternode_address,
-                                    &self.utxo_manager,
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    "⚠️ Failed to apply CollateralUnlock tx {}: {}",
-                                    &txid_hex[..16],
-                                    e
-                                );
-                            } else {
-                                tracing::info!(
-                                    "✅ CollateralUnlock applied: {} (tx {})",
-                                    masternode_address,
-                                    &txid_hex[..16]
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "⚠️ Invalid CollateralUnlock tx {}: {}",
-                                &txid_hex[..16],
-                                e
-                            );
-                        }
-                    }
-                }
-
-                SpecialTransactionData::FreeNodeRegistration {
+                SpecialTransactionData::MasternodeRegistration {
                     node_address,
                     wallet_address,
+                    reward_address,
+                    collateral_outpoint,
                     pubkey,
                     signature,
                 } => {
-                    match self.validate_free_node_registration(
-                        node_address,
-                        wallet_address,
-                        pubkey,
-                        signature,
-                    ) {
-                        Ok(()) => {
-                            let info = crate::types::FreeNodeOnchainInfo {
-                                node_address: node_address.clone(),
-                                wallet_address: wallet_address.clone(),
-                                pubkey: pubkey.clone(),
-                                registration_height: block.header.height,
-                                registration_txid: txid_hex.clone(),
-                            };
-                            let key = format!("freereg:{}", node_address);
-                            match bincode::serialize(&info) {
-                                Ok(bytes) => {
-                                    let _ = self.storage.insert(key.as_bytes(), bytes);
-                                    tracing::info!(
-                                        "✅ FreeNodeRegistration applied: {} -> {} (tx {})",
-                                        node_address, wallet_address, &txid_hex[..16]
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "⚠️ Failed to serialize FreeNodeRegistration {}: {}",
-                                        &txid_hex[..16], e
-                                    );
-                                }
-                            }
+                    match self
+                        .masternode_registry
+                        .apply_masternode_registration(
+                            node_address,
+                            wallet_address,
+                            reward_address,
+                            collateral_outpoint,
+                            pubkey,
+                            signature,
+                            block.header.height,
+                            &txid_hex,
+                            &self.utxo_manager,
+                        )
+                        .await
+                    {
+                        Ok(slot_id) => {
+                            tracing::info!(
+                                "✅ MasternodeRegistration applied: {} -> {} slot={} (tx {})",
+                                node_address, wallet_address, slot_id, &txid_hex[..16]
+                            );
                         }
                         Err(e) => {
                             tracing::warn!(
-                                "⚠️ Invalid FreeNodeRegistration tx {}: {}",
+                                "⚠️ Invalid MasternodeRegistration tx {}: {}",
                                 &txid_hex[..16], e
                             );
                         }
                     }
                 }
 
-                SpecialTransactionData::FreeNodeDeregistration {
+                SpecialTransactionData::MasternodeDeregistration {
                     node_address,
+                    slot_id,
                     pubkey,
                     signature,
                 } => {
-                    match self.validate_free_node_deregistration(
-                        node_address,
-                        pubkey,
-                        signature,
-                    ) {
+                    match self
+                        .masternode_registry
+                        .apply_masternode_deregistration(
+                            node_address,
+                            *slot_id,
+                            pubkey,
+                            signature,
+                            &self.utxo_manager,
+                        )
+                        .await
+                    {
                         Ok(()) => {
-                            let key = format!("freereg:{}", node_address);
-                            let _ = self.storage.remove(key.as_bytes());
                             tracing::info!(
-                                "✅ FreeNodeDeregistration applied: {} (tx {})",
-                                node_address, &txid_hex[..16]
+                                "✅ MasternodeDeregistration applied: {} slot={} (tx {})",
+                                node_address, slot_id, &txid_hex[..16]
                             );
                         }
                         Err(e) => {
                             tracing::warn!(
-                                "⚠️ Invalid FreeNodeDeregistration tx {}: {}",
+                                "⚠️ Invalid MasternodeDeregistration tx {}: {}",
                                 &txid_hex[..16], e
                             );
                         }
@@ -6084,46 +5968,31 @@ impl Blockchain {
                 }
 
                 SpecialTransactionData::MasternodePayoutUpdate {
-                    masternode_id,
-                    new_payout_address,
-                    owner_pubkey,
+                    node_address,
+                    new_reward_address,
+                    pubkey,
                     signature,
                 } => {
                     match self
                         .masternode_registry
-                        .validate_masternode_update(
-                            masternode_id,
-                            new_payout_address,
-                            owner_pubkey,
+                        .apply_masternode_payout_update(
+                            node_address,
+                            new_reward_address,
+                            pubkey,
                             signature,
                         )
                         .await
                     {
                         Ok(()) => {
-                            if let Err(e) = self
-                                .masternode_registry
-                                .apply_masternode_update(masternode_id, new_payout_address)
-                                .await
-                            {
-                                tracing::warn!(
-                                    "⚠️ Failed to apply MasternodePayoutUpdate tx {}: {}",
-                                    &txid_hex[..16],
-                                    e
-                                );
-                            } else {
-                                tracing::info!(
-                                    "✅ MasternodePayoutUpdate applied: {} -> {} (tx {})",
-                                    masternode_id,
-                                    new_payout_address,
-                                    &txid_hex[..16]
-                                );
-                            }
+                            tracing::info!(
+                                "✅ MasternodePayoutUpdate applied: {} -> {} (tx {})",
+                                node_address, new_reward_address, &txid_hex[..16]
+                            );
                         }
                         Err(e) => {
                             tracing::warn!(
                                 "⚠️ Invalid MasternodePayoutUpdate tx {}: {}",
-                                &txid_hex[..16],
-                                e
+                                &txid_hex[..16], e
                             );
                         }
                     }
@@ -6132,119 +6001,29 @@ impl Blockchain {
         }
     }
 
-    /// Validate a FreeNodeRegistration special transaction.
-    ///
-    /// Checks:
-    /// - pubkey is valid 32-byte Ed25519 key
-    /// - signature covers "FREEREG:{node_address}:{wallet_address}:{pubkey}"
-    fn validate_free_node_registration(
-        &self,
-        node_address: &str,
-        wallet_address: &str,
-        pubkey: &str,
-        signature: &str,
-    ) -> Result<(), String> {
-        use ed25519_dalek::Verifier;
-
-        let pubkey_bytes =
-            hex::decode(pubkey).map_err(|e| format!("invalid pubkey hex: {}", e))?;
-        let pubkey_arr: [u8; 32] = pubkey_bytes
-            .try_into()
-            .map_err(|_| "pubkey must be 32 bytes".to_string())?;
-        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_arr)
-            .map_err(|e| format!("invalid Ed25519 pubkey: {}", e))?;
-
-        let sig_bytes =
-            hex::decode(signature).map_err(|e| format!("invalid signature hex: {}", e))?;
-        let sig_arr: [u8; 64] = sig_bytes
-            .try_into()
-            .map_err(|_| "signature must be 64 bytes".to_string())?;
-        let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
-
-        let msg = format!("FREEREG:{}:{}:{}", node_address, wallet_address, pubkey);
-        verifying_key
-            .verify(msg.as_bytes(), &sig)
-            .map_err(|_| "FreeNodeRegistration signature verification failed".to_string())
+    /// Returns true if `node_address` has an on-chain `MasternodeRegistration` record.
+    /// Used to gate reward eligibility: unregistered nodes never enter the reward pool.
+    pub fn is_masternode_registered(&self, node_address: &str) -> bool {
+        let key = format!("mnreg:{}", node_address);
+        self.storage.get(key.as_bytes()).ok().flatten().is_some()
     }
 
-    /// Validate a FreeNodeDeregistration special transaction.
-    ///
-    /// Checks:
-    /// - an on-chain record exists for `node_address`
-    /// - pubkey matches the original registration
-    /// - signature covers "FREEDEREG:{node_address}"
-    fn validate_free_node_deregistration(
-        &self,
-        node_address: &str,
-        pubkey: &str,
-        signature: &str,
-    ) -> Result<(), String> {
-        use ed25519_dalek::Verifier;
-
-        // Look up the existing on-chain record
-        let key = format!("freereg:{}", node_address);
-        let record_bytes = self
-            .storage
-            .get(key.as_bytes())
-            .map_err(|e| format!("storage error: {}", e))?
-            .ok_or_else(|| format!("no on-chain record for {}", node_address))?;
-        let record: crate::types::FreeNodeOnchainInfo =
-            bincode::deserialize(&record_bytes)
-                .map_err(|e| format!("failed to deserialize record: {}", e))?;
-
-        if record.pubkey != pubkey {
-            return Err(format!(
-                "pubkey mismatch: registered {}, got {}",
-                &record.pubkey[..16.min(record.pubkey.len())],
-                &pubkey[..16.min(pubkey.len())]
-            ));
-        }
-
-        let pubkey_bytes =
-            hex::decode(pubkey).map_err(|e| format!("invalid pubkey hex: {}", e))?;
-        let pubkey_arr: [u8; 32] = pubkey_bytes
-            .try_into()
-            .map_err(|_| "pubkey must be 32 bytes".to_string())?;
-        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_arr)
-            .map_err(|e| format!("invalid Ed25519 pubkey: {}", e))?;
-
-        let sig_bytes =
-            hex::decode(signature).map_err(|e| format!("invalid signature hex: {}", e))?;
-        let sig_arr: [u8; 64] = sig_bytes
-            .try_into()
-            .map_err(|_| "signature must be 64 bytes".to_string())?;
-        let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
-
-        let msg = format!("FREEDEREG:{}", node_address);
-        verifying_key
-            .verify(msg.as_bytes(), &sig)
-            .map_err(|_| "FreeNodeDeregistration signature verification failed".to_string())
-    }
-
-    /// Returns true if `node_address` has any on-chain FreeNodeRegistration record,
-    /// regardless of maturity.  Used by the startup auto-registration check.
+    /// Legacy alias used by reward_calculator and validate_pool_distribution.
     pub fn is_free_tier_registered(&self, node_address: &str) -> bool {
-        let key = format!("freereg:{}", node_address);
-        self.storage
-            .get(key.as_bytes())
-            .ok()
-            .flatten()
-            .is_some()
+        self.is_masternode_registered(node_address)
     }
 
-    /// Returns all mature on-chain free-tier registrations at `current_height`.
+    /// Returns all mature on-chain masternode registrations at `current_height`.
     /// A registration is mature when `current_height >= registration_height + FREE_MATURITY_BLOCKS`.
-    /// Only called after `FREE_TIER_ONCHAIN_HEIGHT`.
-    pub fn get_onchain_free_tier_nodes(&self, current_height: u64) -> Vec<crate::types::FreeNodeOnchainInfo> {
+    pub fn get_onchain_registered_nodes(&self, current_height: u64) -> Vec<crate::types::MasternodeOnchainInfo> {
         use crate::constants::blockchain::FREE_MATURITY_BLOCKS;
-        let prefix = b"freereg:";
+        let prefix = b"mnreg:";
         self.storage
             .scan_prefix(prefix)
             .filter_map(|item| {
                 let (_, v) = item.ok()?;
-                let info: crate::types::FreeNodeOnchainInfo =
+                let info: crate::types::MasternodeOnchainInfo =
                     bincode::deserialize(&v).ok()?;
-                // Enforce anti-sybil maturity gate (testnet: FREE_MATURITY_BLOCKS = 0)
                 if current_height >= info.registration_height + FREE_MATURITY_BLOCKS {
                     Some(info)
                 } else {

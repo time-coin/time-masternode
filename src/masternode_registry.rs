@@ -3668,6 +3668,228 @@ impl MasternodeRegistry {
         None
     }
 
+    /// Returns the permanent slot ID for a node address, or `None` if not yet assigned.
+    pub async fn get_slot_id_for_address(&self, address: &str) -> Option<u32> {
+        let nodes = self.masternodes.read().await;
+        nodes.get(address).and_then(|info| {
+            if info.masternode.slot_id == u32::MAX {
+                None
+            } else {
+                Some(info.masternode.slot_id)
+            }
+        })
+    }
+
+    /// Apply a `MasternodeRegistration` special transaction confirmed in a block.
+    ///
+    /// Assigns the next available slot ID and stores the on-chain record.
+    /// Returns the assigned slot ID on success.
+    pub async fn apply_masternode_registration(
+        &self,
+        node_address: &str,
+        wallet_address: &str,
+        reward_address: &str,
+        collateral_outpoint: &str,
+        pubkey: &str,
+        signature: &str,
+        registration_height: u64,
+        registration_txid: &str,
+        utxo_manager: &crate::utxo_manager::UTXOStateManager,
+    ) -> Result<u32, String> {
+        use ed25519_dalek::Verifier;
+
+        // Verify signature
+        let pubkey_bytes = hex::decode(pubkey).map_err(|e| format!("invalid pubkey hex: {}", e))?;
+        let pubkey_arr: [u8; 32] = pubkey_bytes.try_into().map_err(|_| "pubkey must be 32 bytes")?;
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_arr)
+            .map_err(|e| format!("invalid Ed25519 pubkey: {}", e))?;
+        let sig_bytes = hex::decode(signature).map_err(|e| format!("invalid sig hex: {}", e))?;
+        let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| "signature must be 64 bytes")?;
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+        let collateral_field = if collateral_outpoint.is_empty() { "none" } else { collateral_outpoint };
+        let msg = format!("MNREG:{}:{}:{}:{}", node_address, wallet_address, pubkey, collateral_field);
+        verifying_key.verify(msg.as_bytes(), &sig)
+            .map_err(|_| "MasternodeRegistration signature verification failed")?;
+
+        // Assign next slot ID (atomically from sled counter)
+        let slot_id = self.assign_next_slot_id()?;
+
+        // Determine tier and lock collateral for paid-tier nodes
+        let (tier, collateral_amount, outpoint_opt) = if collateral_outpoint.is_empty() {
+            (crate::types::MasternodeTier::Free, 0u64, None)
+        } else {
+            let parts: Vec<&str> = collateral_outpoint.split(':').collect();
+            if parts.len() != 2 {
+                return Err(format!("invalid collateral_outpoint format: {}", collateral_outpoint));
+            }
+            let txid_bytes = hex::decode(parts[0]).map_err(|e| format!("txid hex: {}", e))?;
+            let txid_arr: [u8; 32] = txid_bytes.try_into().map_err(|_| "txid must be 32 bytes")?;
+            let vout: u32 = parts[1].parse().map_err(|e| format!("vout: {}", e))?;
+            let outpoint = crate::types::OutPoint { txid: txid_arr, vout };
+            let utxo = utxo_manager.get_utxo(&outpoint).await
+                .map_err(|e| format!("UTXO lookup failed: {}", e))?;
+            let tier = MasternodeTier::from_collateral_value(utxo.value)
+                .unwrap_or(crate::types::MasternodeTier::Free);
+            (tier, utxo.value, Some(outpoint))
+        };
+
+        // Build and register the masternode
+        let public_key = verifying_key;
+        let now = chrono::Utc::now().timestamp() as u64;
+        let mut mn = crate::types::Masternode::new_legacy(
+            node_address.to_string(),
+            wallet_address.to_string(),
+            collateral_amount,
+            public_key,
+            tier,
+            now,
+        );
+        mn.reward_address = reward_address.to_string();
+        mn.collateral_outpoint = outpoint_opt;
+        mn.slot_id = slot_id;
+
+        // Store the on-chain record
+        let record = crate::types::MasternodeOnchainInfo {
+            node_address: node_address.to_string(),
+            wallet_address: wallet_address.to_string(),
+            reward_address: reward_address.to_string(),
+            collateral_outpoint: collateral_outpoint.to_string(),
+            pubkey: pubkey.to_string(),
+            slot_id,
+            registration_height,
+            registration_txid: registration_txid.to_string(),
+        };
+        let key = format!("mnreg:{}", node_address);
+        let bytes = bincode::serialize(&record).map_err(|e| format!("serialize: {}", e))?;
+        self.db.insert(key.as_bytes(), bytes).map_err(|e| format!("db insert: {}", e))?;
+
+        // Register in the in-memory registry
+        let mn_info = MasternodeInfo {
+            masternode: mn,
+            reward_address: reward_address.to_string(),
+            registration_source: RegistrationSource::OnChain(registration_height),
+            registration_height,
+            uptime_start: now,
+            total_uptime: 0,
+            is_active: false,
+            daemon_started_at: 0,
+            last_reward_height: 0,
+            blocks_without_reward: 0,
+            peer_reports: Arc::new(Default::default()),
+            operator_pubkey: None,
+            is_publicly_reachable: false,
+            reachability_checked_at: 0,
+            first_seen_at: now,
+            last_seen_at: 0,
+        };
+        self.masternodes.write().await.insert(node_address.to_string(), mn_info);
+
+        tracing::info!(
+            "✅ Masternode registered on-chain: {} tier={:?} slot={} height={}",
+            node_address, tier, slot_id, registration_height
+        );
+
+        Ok(slot_id)
+    }
+
+    /// Apply a `MasternodeDeregistration` special transaction confirmed in a block.
+    pub async fn apply_masternode_deregistration(
+        &self,
+        node_address: &str,
+        slot_id: u32,
+        pubkey: &str,
+        signature: &str,
+        utxo_manager: &crate::utxo_manager::UTXOStateManager,
+    ) -> Result<(), String> {
+        use ed25519_dalek::Verifier;
+
+        // Verify signature
+        let pubkey_bytes = hex::decode(pubkey).map_err(|e| format!("invalid pubkey hex: {}", e))?;
+        let pubkey_arr: [u8; 32] = pubkey_bytes.try_into().map_err(|_| "pubkey must be 32 bytes")?;
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_arr)
+            .map_err(|e| format!("invalid Ed25519 pubkey: {}", e))?;
+        let sig_bytes = hex::decode(signature).map_err(|e| format!("invalid sig hex: {}", e))?;
+        let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| "signature must be 64 bytes")?;
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+        let msg = format!("MNDEREG:{}:{}", node_address, slot_id);
+        verifying_key.verify(msg.as_bytes(), &sig)
+            .map_err(|_| "MasternodeDeregistration signature verification failed")?;
+
+        // Verify slot ID matches
+        {
+            let nodes = self.masternodes.read().await;
+            if let Some(info) = nodes.get(node_address) {
+                if info.masternode.slot_id != slot_id {
+                    return Err(format!(
+                        "slot_id mismatch: registered {}, got {}",
+                        info.masternode.slot_id, slot_id
+                    ));
+                }
+                // Unlock collateral if paid tier
+                if let Some(ref outpoint) = info.masternode.collateral_outpoint {
+                    let _ = utxo_manager.unlock_collateral(outpoint);
+                }
+            } else {
+                return Err(format!("no masternode registered at {}", node_address));
+            }
+        }
+
+        // Remove from in-memory registry and sled
+        self.masternodes.write().await.remove(node_address);
+        let key = format!("mnreg:{}", node_address);
+        let _ = self.db.remove(key.as_bytes());
+
+        tracing::info!("✅ Masternode deregistered: {} slot={}", node_address, slot_id);
+        Ok(())
+    }
+
+    /// Apply a `MasternodePayoutUpdate` special transaction confirmed in a block.
+    pub async fn apply_masternode_payout_update(
+        &self,
+        node_address: &str,
+        new_reward_address: &str,
+        pubkey: &str,
+        signature: &str,
+    ) -> Result<(), String> {
+        use ed25519_dalek::Verifier;
+
+        let pubkey_bytes = hex::decode(pubkey).map_err(|e| format!("invalid pubkey hex: {}", e))?;
+        let pubkey_arr: [u8; 32] = pubkey_bytes.try_into().map_err(|_| "pubkey must be 32 bytes")?;
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_arr)
+            .map_err(|e| format!("invalid Ed25519 pubkey: {}", e))?;
+        let sig_bytes = hex::decode(signature).map_err(|e| format!("invalid sig hex: {}", e))?;
+        let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| "signature must be 64 bytes")?;
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+        let msg = format!("MNPAYOUT:{}:{}", node_address, new_reward_address);
+        verifying_key.verify(msg.as_bytes(), &sig)
+            .map_err(|_| "MasternodePayoutUpdate signature verification failed")?;
+
+        let mut nodes = self.masternodes.write().await;
+        if let Some(info) = nodes.get_mut(node_address) {
+            info.masternode.reward_address = new_reward_address.to_string();
+            info.reward_address = new_reward_address.to_string();
+            self.store_masternode(node_address, info).map_err(|e| format!("store: {}", e))?;
+        } else {
+            return Err(format!("no masternode registered at {}", node_address));
+        }
+        Ok(())
+    }
+
+    /// Assign the next available slot ID from the persistent counter in sled.
+    fn assign_next_slot_id(&self) -> Result<u32, String> {
+        let key = b"next_slot_id";
+        let current = self.db.get(key)
+            .map_err(|e| format!("sled get: {}", e))?
+            .and_then(|v| {
+                let arr: Option<[u8; 4]> = v.as_ref().try_into().ok();
+                arr.map(u32::from_le_bytes)
+            })
+            .unwrap_or(0u32);
+        let next = current.checked_add(1).ok_or_else(|| "slot ID overflow".to_string())?;
+        self.db.insert(key, next.to_le_bytes().as_ref()).map_err(|e| format!("sled insert: {}", e))?;
+        Ok(current)
+    }
+
     /// Look up the registered operator pubkey (hex) for a given collateral outpoint.
     ///
     /// Returns `Some(hex)` if the collateral has an on-chain registration with an operator key.
