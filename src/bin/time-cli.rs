@@ -834,7 +834,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     } = &args.command
     {
         use ed25519_dalek::{Signer, SigningKey};
-        use sha2::{Digest, Sha256};
+
         use timed::wallet::Wallet;
 
         let p2p_port = port.unwrap_or(if is_testnet { 24100 } else { 24000 });
