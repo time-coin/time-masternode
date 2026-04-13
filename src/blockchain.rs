@@ -3690,7 +3690,73 @@ impl Blockchain {
             // sorted by fairness bonus so nodes waiting longest are paid first.
             let use_v2_fairness = next_height
                 >= crate::constants::blockchain::FAIRNESS_V2_HEIGHT;
-            let mut free_nodes: Vec<_> = eligible_pool
+
+            // After FREE_TIER_ONCHAIN_HEIGHT, source free nodes from the sled registry
+            // instead of gossip so producer and validator always agree.
+            let use_onchain_free =
+                next_height >= crate::constants::blockchain::FREE_TIER_ONCHAIN_HEIGHT;
+
+            let free_nodes_raw: Vec<(String, String, u64)>; // (node_addr, reward_addr, bonus)
+            let free_nodes_from_onchain;
+            let mut free_nodes: Vec<_>;
+
+            if use_onchain_free {
+                free_nodes_from_onchain = self.get_onchain_free_tier_nodes(next_height);
+                free_nodes_raw = free_nodes_from_onchain
+                    .iter()
+                    .map(|info| {
+                        let raw = blocks_without_reward_map
+                            .get(&info.node_address)
+                            .copied()
+                            .unwrap_or(0);
+                        let bonus = if use_v2_fairness { raw } else { raw / 10 };
+                        (
+                            info.node_address.clone(),
+                            info.wallet_address.clone(),
+                            bonus,
+                        )
+                    })
+                    .collect();
+                free_nodes = free_nodes_raw
+                    .iter()
+                    .map(|(node, reward, bonus)| (node.as_str(), reward.as_str(), *bonus))
+                    .collect::<Vec<_>>();
+                free_nodes.sort_by(|a, b| {
+                    b.2.cmp(&a.2).then_with(|| a.0.cmp(b.0))
+                });
+                let recipient_count = free_nodes
+                    .len()
+                    .min(constants::blockchain::MAX_FREE_TIER_RECIPIENTS);
+                let per_node = total_reward / recipient_count as u64;
+                let mut distributed = 0u64;
+                for (i, (_node, reward_addr, _)) in
+                    free_nodes.iter().take(recipient_count).enumerate()
+                {
+                    let share = if i == recipient_count - 1 {
+                        total_reward - distributed
+                    } else {
+                        per_node
+                    };
+                    let dest = reward_addr.to_string();
+                    if let Some(entry) = rewards.iter_mut().find(|(a, _)| a == &dest) {
+                        entry.1 += share;
+                    } else {
+                        rewards.push((dest, share));
+                    }
+                    distributed += share;
+                }
+                tracing::info!(
+                    "💰 Block {}: {} TIME (all-Free on-chain) — {} TIME each to {} node(s) [{} registered]",
+                    next_height,
+                    total_reward / 100_000_000,
+                    per_node / 100_000_000,
+                    recipient_count,
+                    free_nodes.len(),
+                );
+                total_reward
+            } else {
+
+            let mut free_nodes_gossip: Vec<_> = eligible_pool
                 .iter()
                 .map(|mn| {
                     let blocks_without = blocks_without_reward_map
@@ -3708,16 +3774,16 @@ impl Blockchain {
                     (mn, fairness_bonus)
                 })
                 .collect();
-            free_nodes.sort_by(|a, b| {
+            free_nodes_gossip.sort_by(|a, b| {
                 b.1.cmp(&a.1)
                     .then_with(|| a.0.masternode.address.cmp(&b.0.masternode.address))
             });
-            let recipient_count = free_nodes
+            let recipient_count = free_nodes_gossip
                 .len()
                 .min(constants::blockchain::MAX_FREE_TIER_RECIPIENTS);
             let per_node = total_reward / recipient_count as u64;
             let mut distributed = 0u64;
-            for (i, (mn, _)) in free_nodes.iter().take(recipient_count).enumerate() {
+            for (i, (mn, _)) in free_nodes_gossip.iter().take(recipient_count).enumerate() {
                 // Last recipient absorbs rounding remainder so total == total_reward exactly.
                 let share = if i == recipient_count - 1 {
                     total_reward - distributed
@@ -3745,6 +3811,7 @@ impl Blockchain {
                 eligible_pool.len(),
             );
             total_reward // no rounding dust in all-free mode
+            } // end else (gossip path)
         } else {
             // ── Tier-based mode ───────────────────────────────────────────────
             // Producer gets 30 TIME leader bonus + fees. Per-tier pools distributed
@@ -3784,6 +3851,75 @@ impl Blockchain {
 
                 let use_v2_fairness = next_height
                     >= crate::constants::blockchain::FAIRNESS_V2_HEIGHT;
+
+                // ── On-chain Free-tier path (after FREE_TIER_ONCHAIN_HEIGHT) ──────────
+                // Eligibility comes from the sled freereg: table, not gossip bitmaps.
+                // All validators read the same deterministic sled state, so producer and
+                // validator always agree on who should be paid — closing AV35 completely.
+                if matches!(tier, MasternodeTier::Free)
+                    && next_height
+                        >= crate::constants::blockchain::FREE_TIER_ONCHAIN_HEIGHT
+                {
+                    let onchain_nodes = self.get_onchain_free_tier_nodes(next_height);
+                    let mut onchain_eligible: Vec<_> = onchain_nodes
+                        .into_iter()
+                        .filter(|info| !paid_tier_wallet_set.contains(&info.wallet_address))
+                        .map(|info| {
+                            let raw = blocks_without_reward_map
+                                .get(&info.node_address)
+                                .copied()
+                                .unwrap_or(0);
+                            let bonus = if use_v2_fairness { raw } else { raw / 10 };
+                            (info, bonus)
+                        })
+                        .collect();
+
+                    if onchain_eligible.is_empty() {
+                        if let Some(entry) = rewards.first_mut() {
+                            entry.1 += tier_pool;
+                        }
+                        total_pool_distributed += tier_pool;
+                        continue;
+                    }
+
+                    onchain_eligible.sort_by(|a, b| {
+                        b.1.cmp(&a.1)
+                            .then_with(|| a.0.node_address.cmp(&b.0.node_address))
+                    });
+
+                    let recipient_count = onchain_eligible
+                        .len()
+                        .min(constants::blockchain::MAX_FREE_TIER_RECIPIENTS);
+                    let per_node = tier_pool / recipient_count as u64;
+                    let mut distributed = 0u64;
+
+                    for (i, (info, _)) in onchain_eligible.iter().take(recipient_count).enumerate()
+                    {
+                        let share = if i == recipient_count - 1 {
+                            tier_pool - distributed
+                        } else {
+                            per_node
+                        };
+                        let dest = info.wallet_address.clone();
+                        if let Some(entry) = rewards.iter_mut().find(|(a, _)| a == &dest) {
+                            entry.1 += share;
+                        } else {
+                            rewards.push((dest, share));
+                        }
+                        distributed += share;
+                    }
+                    total_pool_distributed += tier_pool;
+                    rounding_dust += tier_pool.saturating_sub(distributed);
+                    tracing::info!(
+                        "💰 Block {} [on-chain Free]: {} TIME → {} node(s) [{} registered]",
+                        next_height,
+                        tier_pool / 100_000_000,
+                        recipient_count,
+                        onchain_eligible.len(),
+                    );
+                    continue; // skip gossip-based logic below
+                }
+
                 let mut tier_nodes: Vec<_> = eligible_pool
                     .iter()
                     .filter(|mn| mn.masternode.tier == *tier)
@@ -6216,6 +6352,17 @@ impl Blockchain {
             .map_err(|_| "FreeNodeDeregistration signature verification failed".to_string())
     }
 
+    /// Returns true if `node_address` has any on-chain FreeNodeRegistration record,
+    /// regardless of maturity.  Used by the startup auto-registration check.
+    pub fn is_free_tier_registered(&self, node_address: &str) -> bool {
+        let key = format!("freereg:{}", node_address);
+        self.storage
+            .get(key.as_bytes())
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
     /// Returns all mature on-chain free-tier registrations at `current_height`.
     /// A registration is mature when `current_height >= registration_height + FREE_MATURITY_BLOCKS`.
     /// Only called after `FREE_TIER_ONCHAIN_HEIGHT`.
@@ -7079,8 +7226,85 @@ impl Blockchain {
                             }
                         }
                     }
+                } else if block.header.height
+                    >= crate::constants::blockchain::FREE_TIER_ONCHAIN_HEIGHT
+                {
+                    // ── Step 3b-Free (on-chain mode): deterministic eligibility ──────────
+                    // After FREE_TIER_ONCHAIN_HEIGHT, free-tier eligibility comes from the
+                    // sled freereg: table — not gossip bitmaps.  Both producer and validator
+                    // read the same deterministic on-chain state, so they always agree on
+                    // who should be paid.  AV35 (producer excludes other free-tier nodes by
+                    // disconnecting them) is closed: disconnected nodes remain in the sled
+                    // table and must be paid.
+                    let onchain_candidates =
+                        self.get_onchain_free_tier_nodes(block.header.height);
+
+                    if !onchain_candidates.is_empty() {
+                        let mut sorted_candidates: Vec<_> = onchain_candidates
+                            .iter()
+                            .map(|info| {
+                                let raw = fairness_map
+                                    .get(&info.node_address)
+                                    .copied()
+                                    .unwrap_or(0);
+                                (info, bonus_for(raw), raw)
+                            })
+                            .collect();
+                        sorted_candidates.sort_by(|a, b| {
+                            b.1.cmp(&a.1)
+                                .then_with(|| a.0.node_address.cmp(&b.0.node_address))
+                        });
+
+                        let candidate_count =
+                            sorted_candidates.len().min(MAX_FREE_TIER_RECIPIENTS);
+                        let expected_wallets: std::collections::HashSet<&str> =
+                            sorted_candidates
+                                .iter()
+                                .take(candidate_count)
+                                .map(|(info, _, _)| info.wallet_address.as_str())
+                                .collect();
+
+                        let free_recipients: std::collections::HashSet<&str> = block
+                            .masternode_rewards
+                            .iter()
+                            .filter(|(_, amt)| *amt > 0)
+                            .filter_map(|(w, _)| {
+                                if onchain_candidates
+                                    .iter()
+                                    .any(|n| n.wallet_address == *w)
+                                {
+                                    Some(w.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+
+                        // Every paid free-tier wallet must be in the expected set.
+                        for wallet in &free_recipients {
+                            if !expected_wallets.contains(wallet) {
+                                return Err(format!(
+                                    "Block {} Free-tier on-chain violation: {} was paid but \
+                                     is not among the {} fairness-rotation winners",
+                                    block.header.height,
+                                    wallet,
+                                    candidate_count,
+                                ));
+                            }
+                        }
+                        // Every expected wallet must appear in the paid set.
+                        for wallet in &expected_wallets {
+                            if !free_recipients.contains(wallet) {
+                                return Err(format!(
+                                    "Block {} Free-tier on-chain violation: {} is eligible \
+                                     (on-chain registered, mature) but was not paid",
+                                    block.header.height, wallet,
+                                ));
+                            }
+                        }
+                    }
                 } else if use_v2_fairness {
-                    // ── Step 3b-Free: free-tier recipient ordering check ─────────────
+                    // ── Step 3b-Free: free-tier recipient ordering check (bitmap mode) ──
                     // With v2 fairness active, verify that no recently-paid free-tier
                     // address (blocks_without_reward == 0) appears in the reward list
                     // while other free-tier bitmap nodes have blocks_without_reward > 0.

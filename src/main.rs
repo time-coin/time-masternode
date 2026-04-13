@@ -1759,6 +1759,37 @@ async fn main() {
                         "ℹ️  Collateral removed from conf — CollateralUnlock submitted above"
                     );
                 }
+
+                // ── Free-tier on-chain auto-registration ─────────────────────────────
+                // Free-tier nodes have no collateral to register, but after
+                // FREE_TIER_ONCHAIN_HEIGHT eligibility for block rewards requires a
+                // FreeNodeRegistration TX in the chain.  Submit one automatically on
+                // first startup so operators don't need to take any manual action.
+                if mn_for_sync.tier == types::MasternodeTier::Free
+                    && !collateral_sync_blockchain.is_free_tier_registered(ip)
+                {
+                    tracing::info!(
+                        "📤 Auto-submitting FreeNodeRegistration for {} (wallet: {})",
+                        ip, mn_for_sync.wallet_address
+                    );
+                    if let Some(reg_tx) = build_free_node_reg_tx(
+                        ip,
+                        &mn_for_sync.wallet_address,
+                        &wallet_key_for_sync,
+                    ) {
+                        match collateral_sync_consensus.submit_transaction(reg_tx).await {
+                            Ok(txid) => tracing::info!(
+                                "✅ FreeNodeRegistration submitted (tx {})",
+                                hex::encode(txid)
+                            ),
+                            Err(e) => tracing::warn!(
+                                "⚠️ FreeNodeRegistration submission failed: {} \
+                                 (will retry on next restart)",
+                                e
+                            ),
+                        }
+                    }
+                }
             });
         }
         // ── End on-chain collateral auto-sync ────────────────────────────────────
@@ -4929,6 +4960,38 @@ fn build_masternode_reg_tx(
             masternode_port: p2p_port,
             payout_address: mn.wallet_address.clone(),
             owner_pubkey: owner_pubkey_hex,
+            signature: signature_hex,
+        }),
+        encrypted_memo: None,
+    })
+}
+
+/// Build a FreeNodeRegistration special transaction.
+///
+/// Signed with `node_key` — the operator's hot key (masternodeprivkey or wallet key).
+/// The message is "FREEREG:{node_address}:{wallet_address}:{pubkey_hex}".
+/// Returns `None` only if key bytes cannot be encoded (should never happen).
+fn build_free_node_reg_tx(
+    node_address: &str,
+    wallet_address: &str,
+    node_key: &ed25519_dalek::SigningKey,
+) -> Option<types::Transaction> {
+    use ed25519_dalek::Signer;
+
+    let pubkey_hex = hex::encode(node_key.verifying_key().as_bytes());
+    let msg = format!("FREEREG:{}:{}:{}", node_address, wallet_address, pubkey_hex);
+    let signature_hex = hex::encode(node_key.sign(msg.as_bytes()).to_bytes());
+
+    Some(types::Transaction {
+        version: 1,
+        inputs: vec![],
+        outputs: vec![],
+        lock_time: 0,
+        timestamp: chrono::Utc::now().timestamp(),
+        special_data: Some(types::SpecialTransactionData::FreeNodeRegistration {
+            node_address: node_address.to_string(),
+            wallet_address: wallet_address.to_string(),
+            pubkey: pubkey_hex,
             signature: signature_hex,
         }),
         encrypted_memo: None,
