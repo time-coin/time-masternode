@@ -6005,6 +6005,79 @@ impl Blockchain {
                     }
                 }
 
+                SpecialTransactionData::FreeNodeRegistration {
+                    node_address,
+                    wallet_address,
+                    pubkey,
+                    signature,
+                } => {
+                    match self.validate_free_node_registration(
+                        node_address,
+                        wallet_address,
+                        pubkey,
+                        signature,
+                    ) {
+                        Ok(()) => {
+                            let info = crate::types::FreeNodeOnchainInfo {
+                                node_address: node_address.clone(),
+                                wallet_address: wallet_address.clone(),
+                                pubkey: pubkey.clone(),
+                                registration_height: block.header.height,
+                                registration_txid: txid_hex.clone(),
+                            };
+                            let key = format!("freereg:{}", node_address);
+                            match bincode::serialize(&info) {
+                                Ok(bytes) => {
+                                    let _ = self.storage.insert(key.as_bytes(), bytes);
+                                    tracing::info!(
+                                        "✅ FreeNodeRegistration applied: {} -> {} (tx {})",
+                                        node_address, wallet_address, &txid_hex[..16]
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "⚠️ Failed to serialize FreeNodeRegistration {}: {}",
+                                        &txid_hex[..16], e
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "⚠️ Invalid FreeNodeRegistration tx {}: {}",
+                                &txid_hex[..16], e
+                            );
+                        }
+                    }
+                }
+
+                SpecialTransactionData::FreeNodeDeregistration {
+                    node_address,
+                    pubkey,
+                    signature,
+                } => {
+                    match self.validate_free_node_deregistration(
+                        node_address,
+                        pubkey,
+                        signature,
+                    ) {
+                        Ok(()) => {
+                            let key = format!("freereg:{}", node_address);
+                            let _ = self.storage.remove(key.as_bytes());
+                            tracing::info!(
+                                "✅ FreeNodeDeregistration applied: {} (tx {})",
+                                node_address, &txid_hex[..16]
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "⚠️ Invalid FreeNodeDeregistration tx {}: {}",
+                                &txid_hex[..16], e
+                            );
+                        }
+                    }
+                }
+
                 SpecialTransactionData::MasternodePayoutUpdate {
                     masternode_id,
                     new_payout_address,
@@ -6052,6 +6125,117 @@ impl Blockchain {
                 }
             }
         }
+    }
+
+    /// Validate a FreeNodeRegistration special transaction.
+    ///
+    /// Checks:
+    /// - pubkey is valid 32-byte Ed25519 key
+    /// - signature covers "FREEREG:{node_address}:{wallet_address}:{pubkey}"
+    fn validate_free_node_registration(
+        &self,
+        node_address: &str,
+        wallet_address: &str,
+        pubkey: &str,
+        signature: &str,
+    ) -> Result<(), String> {
+        use ed25519_dalek::Verifier;
+
+        let pubkey_bytes =
+            hex::decode(pubkey).map_err(|e| format!("invalid pubkey hex: {}", e))?;
+        let pubkey_arr: [u8; 32] = pubkey_bytes
+            .try_into()
+            .map_err(|_| "pubkey must be 32 bytes".to_string())?;
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_arr)
+            .map_err(|e| format!("invalid Ed25519 pubkey: {}", e))?;
+
+        let sig_bytes =
+            hex::decode(signature).map_err(|e| format!("invalid signature hex: {}", e))?;
+        let sig_arr: [u8; 64] = sig_bytes
+            .try_into()
+            .map_err(|_| "signature must be 64 bytes".to_string())?;
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+
+        let msg = format!("FREEREG:{}:{}:{}", node_address, wallet_address, pubkey);
+        verifying_key
+            .verify(msg.as_bytes(), &sig)
+            .map_err(|_| "FreeNodeRegistration signature verification failed".to_string())
+    }
+
+    /// Validate a FreeNodeDeregistration special transaction.
+    ///
+    /// Checks:
+    /// - an on-chain record exists for `node_address`
+    /// - pubkey matches the original registration
+    /// - signature covers "FREEDEREG:{node_address}"
+    fn validate_free_node_deregistration(
+        &self,
+        node_address: &str,
+        pubkey: &str,
+        signature: &str,
+    ) -> Result<(), String> {
+        use ed25519_dalek::Verifier;
+
+        // Look up the existing on-chain record
+        let key = format!("freereg:{}", node_address);
+        let record_bytes = self
+            .storage
+            .get(key.as_bytes())
+            .map_err(|e| format!("storage error: {}", e))?
+            .ok_or_else(|| format!("no on-chain record for {}", node_address))?;
+        let record: crate::types::FreeNodeOnchainInfo =
+            bincode::deserialize(&record_bytes)
+                .map_err(|e| format!("failed to deserialize record: {}", e))?;
+
+        if record.pubkey != pubkey {
+            return Err(format!(
+                "pubkey mismatch: registered {}, got {}",
+                &record.pubkey[..16.min(record.pubkey.len())],
+                &pubkey[..16.min(pubkey.len())]
+            ));
+        }
+
+        let pubkey_bytes =
+            hex::decode(pubkey).map_err(|e| format!("invalid pubkey hex: {}", e))?;
+        let pubkey_arr: [u8; 32] = pubkey_bytes
+            .try_into()
+            .map_err(|_| "pubkey must be 32 bytes".to_string())?;
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_arr)
+            .map_err(|e| format!("invalid Ed25519 pubkey: {}", e))?;
+
+        let sig_bytes =
+            hex::decode(signature).map_err(|e| format!("invalid signature hex: {}", e))?;
+        let sig_arr: [u8; 64] = sig_bytes
+            .try_into()
+            .map_err(|_| "signature must be 64 bytes".to_string())?;
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+
+        let msg = format!("FREEDEREG:{}", node_address);
+        verifying_key
+            .verify(msg.as_bytes(), &sig)
+            .map_err(|_| "FreeNodeDeregistration signature verification failed".to_string())
+    }
+
+    /// Returns all mature on-chain free-tier registrations at `current_height`.
+    /// A registration is mature when `current_height >= registration_height + FREE_MATURITY_BLOCKS`.
+    /// Only called after `FREE_TIER_ONCHAIN_HEIGHT`.
+    pub fn get_onchain_free_tier_nodes(&self, current_height: u64) -> Vec<crate::types::FreeNodeOnchainInfo> {
+        use crate::constants::blockchain::FREE_MATURITY_BLOCKS;
+        let prefix = b"freereg:";
+        self.storage
+            .scan_prefix(prefix)
+            .filter_map(|item| {
+                let (_, v) = item.ok()?;
+                let info: crate::types::FreeNodeOnchainInfo =
+                    bincode::deserialize(&v).ok()?;
+                // Enforce anti-sybil maturity gate (testnet: FREE_MATURITY_BLOCKS = 0)
+                if current_height >= info.registration_height + FREE_MATURITY_BLOCKS {
+                    Some(info)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Compute the total transaction fees for a block by resolving each input UTXO's

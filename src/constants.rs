@@ -82,17 +82,18 @@ pub mod blockchain {
 
     /// Pool distribution validation is skipped for blocks at or below this height.
     ///
-    /// Blocks 676–681 were produced during a consensus split on 2026-04-05 caused
-    /// by non-deterministic `tier_for_wallet` when an operator shared the same
-    /// wallet address across Silver and Free tier registrations. The split was
-    /// resolved by deploying deterministic tier logic (commit 8d2086a). Some of
-    /// those historical blocks may pay a Silver-classified wallet from both the
-    /// Silver and Free pools, making them appear to over-distribute Silver by the
-    /// amount of the Free pool payment. Skipping pool validation for this range
-    /// allows minority-fork nodes (stuck at 678) to accept the majority chain
-    /// (at 681) without re-validating blocks they cannot currently pass. All
-    /// blocks above this height are fully validated with the corrected logic.
-    pub const POOL_VALIDATION_MIN_HEIGHT: u64 = 682;
+    /// **Blocks 676–681** (2026-04-05): consensus split caused by non-deterministic
+    /// `tier_for_wallet` when an operator shared the same wallet address across Silver
+    /// and Free tier registrations. Fixed by deterministic tier logic (commit 8d2086a).
+    ///
+    /// **Block 1737** (2026-04-13): free-tier fairness violation (AV35) — a modified
+    /// producer paid only 1 of 5 equally-deserving free-tier nodes (counter≥1000 for
+    /// all candidates). The Check B fairness guard (added in the same release as
+    /// FAIRNESS_V2_HEIGHT) correctly rejects block 1737, but it was deployed while that
+    /// block was already accepted by a minority of pre-upgrade peers. Raising this
+    /// constant to 1737 lets honest nodes at height 1736 accept block 1737 and re-join
+    /// the majority chain. All blocks at height ≥ 1738 are fully validated.
+    pub const POOL_VALIDATION_MIN_HEIGHT: u64 = 1737;
 
     /// Fork height at which collateral reward-address enforcement activates.
     ///
@@ -102,6 +103,28 @@ pub mod blockchain {
     /// that gossip-squats a UTXO it doesn't own cannot redirect rewards to itself.
     /// Free-tier nodes (no collateral) are unaffected.
     pub const COLLATERAL_REWARD_ENFORCEMENT_HEIGHT: u64 = 750;
+
+    /// Fork height at which free-tier reward eligibility switches from gossip-based
+    /// to on-chain registration.
+    ///
+    /// Before this height: free-tier eligibility is determined by gossip (who is
+    /// currently connected), which can be gamed by a VRF leader disconnecting other
+    /// free nodes before producing a block (AV35 / targeted-disconnect attack).
+    ///
+    /// At and after this height: only nodes that have submitted a `FreeNodeRegistration`
+    /// special transaction AND waited FREE_MATURITY_BLOCKS are eligible for free-tier
+    /// rewards.  The eligible set is computed deterministically from on-chain state,
+    /// so producer and validator always agree — the attack surface collapses to zero.
+    ///
+    /// Operators running free-tier nodes must submit a `freetierregister` transaction
+    /// before this height and wait for maturity.  The daemon auto-submits on startup
+    /// if `masternode=1` and no collateral is configured.
+    pub const FREE_TIER_ONCHAIN_HEIGHT: u64 = 2160;
+
+    /// Minimum transaction fee for a FreeNodeRegistration special transaction.
+    /// Creates a small economic barrier against spam-registering many fake nodes.
+    /// Fee is collected by the block producer as normal; nothing is burned.
+    pub const FREE_TIER_REG_FEE_SATOSHIS: u64 = 100_000_000; // 1 TIME
 
     /// Fork height at which the improved fairness-rotation formula activates (v2).
     ///

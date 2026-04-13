@@ -148,6 +148,54 @@ pub enum SpecialTransactionData {
         /// Ed25519 signature over SHA-256("MN_UNLOCK:{collateral_outpoint}:{masternode_address}")
         signature: String,
     },
+    /// Register a Free-tier node on-chain (activates at FREE_TIER_ONCHAIN_HEIGHT).
+    ///
+    /// After FREE_TIER_ONCHAIN_HEIGHT, only nodes with an on-chain registration
+    /// (and FREE_MATURITY_BLOCKS of age) appear in the deterministic free-tier
+    /// eligible pool.  This closes the gossip-based eligibility attack surface
+    /// (AV35) where a VRF leader could exclude competing free-tier nodes by
+    /// disconnecting them before producing a block.
+    ///
+    /// The transaction must include a fee of at least FREE_TIER_REG_FEE_SATOSHIS
+    /// (1 TIME) to deter spam registrations.
+    FreeNodeRegistration {
+        /// IP address of the node (used as the registry key; one per IP)
+        node_address: String,
+        /// Wallet address to receive free-tier block rewards
+        wallet_address: String,
+        /// Hex-encoded Ed25519 public key of the node operator
+        pubkey: String,
+        /// Ed25519 signature over "FREEREG:{node_address}:{wallet_address}:{pubkey}"
+        signature: String,
+    },
+    /// Deregister a Free-tier node from the on-chain registry.
+    ///
+    /// Stops reward payments to this node.  Must be signed by the same key that
+    /// was used for the original FreeNodeRegistration.
+    FreeNodeDeregistration {
+        /// IP address of the node to deregister (must match the on-chain record)
+        node_address: String,
+        /// Hex-encoded Ed25519 public key (must match the original registration)
+        pubkey: String,
+        /// Ed25519 signature over "FREEDEREG:{node_address}"
+        signature: String,
+    },
+}
+
+/// On-chain record for a registered Free-tier masternode.
+/// Stored in blockchain sled DB under key `freereg:{node_address}`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct FreeNodeOnchainInfo {
+    /// IP address of the node
+    pub node_address: String,
+    /// Wallet address that receives free-tier rewards
+    pub wallet_address: String,
+    /// Hex-encoded Ed25519 public key
+    pub pubkey: String,
+    /// Block height at which the FreeNodeRegistration TX was confirmed
+    pub registration_height: u64,
+    /// Hex-encoded txid of the FreeNodeRegistration transaction
+    pub registration_txid: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
