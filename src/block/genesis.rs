@@ -66,7 +66,7 @@ impl GenesisBlock {
     pub fn genesis_timestamp(network: NetworkType) -> i64 {
         match network {
             NetworkType::Testnet => 1764547200, // 2025-12-01T00:00:00Z - FIXED for determinism
-            NetworkType::Mainnet => 1775001600, // 2026-04-01T00:00:00Z - FIXED for determinism
+            NetworkType::Mainnet => 1776211200, // 2026-04-15T00:00:00Z - FIXED for determinism
         }
     }
 
