@@ -1015,7 +1015,7 @@ impl Blockchain {
         // Genesis timestamp: Use FIXED timestamps for deterministic genesis hash
         // All nodes MUST produce identical genesis blocks to be on the same chain
         // - Testnet: December 1, 2025 00:00:00 UTC (1764547200)
-        // - Mainnet: April 1, 2026 00:00:00 UTC (1775001600)
+        // - Mainnet: April 15, 2026 00:00:00 UTC (1776211200)
         let genesis_timestamp = self.network_type.genesis_timestamp();
 
         // ── CLOCK GUARD ──────────────────────────────────────────────────────────
