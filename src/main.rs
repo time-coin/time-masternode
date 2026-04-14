@@ -1954,13 +1954,29 @@ async fn main() {
 
                 tracing::info!("📥 Requesting genesis from {} peer(s)", connected.len());
 
-                // Request block 0 from all peers
-                for peer_ip in &connected {
+                // AV31: request from whitelisted (trusted) peers first; only fall back to
+                // unwhitelisted peers if whitelisted ones don't respond in time.
+                // This prevents an attacker who controls the majority of initial connections
+                // from injecting a forked genesis.
+                let whitelisted = peer_registry_for_sync
+                    .get_whitelisted_connected_peers()
+                    .await;
+                let priority_peers: Vec<&String> = if whitelisted.is_empty() {
+                    connected.iter().collect()
+                } else {
+                    tracing::info!(
+                        "🔐 Requesting genesis from {} whitelisted peer(s) first (AV31)",
+                        whitelisted.len()
+                    );
+                    whitelisted.iter().collect()
+                };
+
+                for peer_ip in &priority_peers {
                     let msg = crate::network::message::NetworkMessage::GetBlocks(0, 0);
                     let _ = peer_registry_for_sync.send_to_peer(peer_ip, msg).await;
                 }
 
-                // Wait for genesis to arrive
+                // Wait for genesis from whitelisted peers
                 let mut wait_secs = 0;
                 while wait_secs < GENESIS_WAIT_SECS {
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -1969,6 +1985,31 @@ async fn main() {
                         break;
                     }
                     wait_secs += 1;
+                }
+
+                // Fallback: if whitelisted peers didn't deliver, ask the rest
+                if !blockchain_init.has_genesis() && !whitelisted.is_empty() {
+                    let fallback: Vec<&String> = connected
+                        .iter()
+                        .filter(|ip| !whitelisted.contains(ip))
+                        .collect();
+                    if !fallback.is_empty() {
+                        tracing::info!(
+                            "📥 Falling back to {} non-whitelisted peer(s) for genesis",
+                            fallback.len()
+                        );
+                        for peer_ip in &fallback {
+                            let msg = crate::network::message::NetworkMessage::GetBlocks(0, 0);
+                            let _ = peer_registry_for_sync.send_to_peer(peer_ip, msg).await;
+                        }
+                        // Brief wait for fallback response
+                        for _ in 0..3 {
+                            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                            if blockchain_init.has_genesis() {
+                                break;
+                            }
+                        }
+                    }
                 }
             }
 
@@ -2125,11 +2166,19 @@ async fn main() {
                                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                                 waited += 1;
 
-                                // Re-request genesis periodically
+                                // Re-request genesis periodically — whitelist-first (AV31)
                                 if waited % REQUEST_INTERVAL == 0 {
                                     let connected =
                                         peer_registry_for_sync.get_connected_peers().await;
-                                    for peer_ip in &connected {
+                                    let wl = peer_registry_for_sync
+                                        .get_whitelisted_connected_peers()
+                                        .await;
+                                    let targets: Vec<&String> = if wl.is_empty() {
+                                        connected.iter().collect()
+                                    } else {
+                                        wl.iter().collect()
+                                    };
+                                    for peer_ip in targets {
                                         let msg =
                                             crate::network::message::NetworkMessage::GetBlocks(
                                                 0, 0,

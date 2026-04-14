@@ -510,6 +510,24 @@ impl PeerConnectionRegistry {
         vec![]
     }
 
+    /// Return the subset of currently-connected peers that are whitelisted
+    /// (i.e. from the time-coin.io trusted peer list).
+    ///
+    /// Used during catch-up sync (AV31 fix) to prefer trusted peers when
+    /// requesting blocks — an attacker who controls the majority of a node's
+    /// initial connections cannot inject a forked chain if we ask whitelisted
+    /// peers first.
+    pub async fn get_whitelisted_connected_peers(&self) -> Vec<String> {
+        let connected = self.get_connected_peers().await;
+        let mut result = Vec::new();
+        for ip in connected {
+            if self.is_whitelisted(&ip).await {
+                result.push(ip);
+            }
+        }
+        result
+    }
+
     /// Get list of compatible connected peers (excludes currently incompatible ones)
     pub async fn get_compatible_peers(&self) -> Vec<String> {
         // Return cached result if still fresh

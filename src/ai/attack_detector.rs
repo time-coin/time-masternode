@@ -27,10 +27,12 @@ pub enum AttackType {
     CollateralSpoofing,  // Attempting to claim another node's registered collateral
     SyncLoopFlooding,    // Excessive GetBlocks for same range (sync loop DoS)
     UtxoLockFlood,       // Peer sends excessive UTXOStateUpdate messages for one TX (DoS)
-    SynchronizedCycling, // Coordinated synchronized disconnect/reconnect storm from a subnet
-    TlsFlood,            // High-rate TLS handshake flood from distributed IPs
-    PingFlood,           // Sustained ping-rate-limit excess from one peer — tokio RPC starvation
-    MessageFlood,        // Raw pre-channel message flood (>500 msgs/s before deserialization)
+    SynchronizedCycling,    // Coordinated synchronized disconnect/reconnect storm from a subnet
+    TlsFlood,               // High-rate TLS handshake flood from distributed IPs
+    PingFlood,              // Sustained ping-rate-limit excess from one peer — tokio RPC starvation
+    MessageFlood,           // Raw pre-channel message flood (>500 msgs/s before deserialization)
+    InvalidVoteSignatureSpam, // Forged Ed25519 vote signatures at ≥5/30s (AV27)
+    UnregisteredVoterSpam,  // Votes from unregistered IDs at ≥10/60s (AV28)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +106,10 @@ pub struct AttackDetector {
     /// Per-IP TLS failure timestamps for TlsFlood detection.
     /// Key: IP address, Value: deque of failure Unix timestamps.
     tls_failure_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
+    /// Per-/24-subnet TLS failure timestamps for distributed TLS flood detection.
+    /// An attacker spreading failures across many IPs in the same /24 — each staying
+    /// under the per-IP threshold — is caught here instead.
+    subnet_tls_failures: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
     /// Per-peer ping excess timestamps for PingFlood detection.
     ping_flood_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
     /// Per-peer raw message flood timestamps for MessageFlood detection.
@@ -124,6 +130,7 @@ impl AttackDetector {
             time_window: Duration::from_secs(300),
             subnet_disconnects: Arc::new(RwLock::new(HashMap::new())),
             tls_failure_times: Arc::new(RwLock::new(HashMap::new())),
+            subnet_tls_failures: Arc::new(RwLock::new(HashMap::new())),
             ping_flood_times: Arc::new(RwLock::new(HashMap::new())),
             message_flood_times: Arc::new(RwLock::new(HashMap::new())),
             ban_notify: Arc::new(tokio::sync::Notify::new()),
@@ -593,14 +600,21 @@ impl AttackDetector {
         }
     }
 
-    /// Record a TLS handshake failure from `addr`. If ≥5 failures from the same IP
-    /// occur within 60 s, detect TlsFlood and recommend BlockPeer.
+    /// Record a TLS handshake failure from `addr`.
+    /// Two thresholds are checked:
+    /// 1. Per-IP: ≥5 failures from the same IP within 60s → BlockPeer (per-IP TLS flood).
+    /// 2. Per-/24 subnet: ≥20 failures from the same /24 within 60s → BlockPeer for the
+    ///    specific triggering IP. This catches distributed attacks spread across many IPs
+    ///    that each stay under the per-IP threshold. Subnet-wide bans are NOT issued —
+    ///    honest nodes on shared cloud infrastructure would be caught in the blast radius.
     pub fn record_tls_failure(&self, addr: &str) {
         let now = Self::now_secs();
         const TLS_FLOOD_WINDOW_SECS: u64 = 60;
         const TLS_FLOOD_THRESHOLD: usize = 5;
+        const TLS_SUBNET_FLOOD_THRESHOLD: usize = 20;
 
-        let should_block = {
+        // Per-IP check
+        let ip_should_block = {
             let mut map = self.tls_failure_times.write();
             let timestamps = map.entry(addr.to_string()).or_default();
             while timestamps
@@ -614,7 +628,7 @@ impl AttackDetector {
             timestamps.len() >= TLS_FLOOD_THRESHOLD
         };
 
-        if should_block {
+        if ip_should_block {
             self.maybe_add_attack(AttackPattern {
                 attack_type: AttackType::TlsFlood,
                 confidence: 0.88,
@@ -634,6 +648,97 @@ impl AttackDetector {
                 mitigation_applied_at: None,
             });
         }
+
+        // Per-/24-subnet check — catches distributed TLS floods below the per-IP threshold
+        let subnet: String = addr.split('.').take(3).collect::<Vec<_>>().join(".");
+        if subnet.len() >= 5 && !subnet.contains(':') {
+            let subnet_should_block = {
+                let mut map = self.subnet_tls_failures.write();
+                let timestamps = map.entry(subnet.clone()).or_default();
+                while timestamps
+                    .front()
+                    .map(|t| now.saturating_sub(*t) > TLS_FLOOD_WINDOW_SECS)
+                    .unwrap_or(false)
+                {
+                    timestamps.pop_front();
+                }
+                timestamps.push_back(now);
+                timestamps.len() >= TLS_SUBNET_FLOOD_THRESHOLD
+            };
+
+            if subnet_should_block && !ip_should_block {
+                tracing::warn!(
+                    "🛡️ Distributed TLS flood from {}.x/24 (AV13 subnet variant) — blocking {}",
+                    subnet,
+                    addr
+                );
+                self.maybe_add_attack(AttackPattern {
+                    attack_type: AttackType::TlsFlood,
+                    confidence: 0.80,
+                    severity: AttackSeverity::High,
+                    indicators: vec![
+                        format!(
+                            "≥{} TLS failures from {}.x/24 within {}s (distributed, each IP below per-IP threshold)",
+                            TLS_SUBNET_FLOOD_THRESHOLD, subnet, TLS_FLOOD_WINDOW_SECS
+                        ),
+                        format!("Blocking specific offending IP {} (not whole subnet)", addr),
+                    ],
+                    first_detected: now,
+                    last_seen: now,
+                    source_ips: vec![addr.to_string()],
+                    recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+                    mitigation_applied_at: None,
+                });
+            }
+        }
+    }
+
+    /// Record that a peer sent forged/invalid Ed25519 vote signatures after the
+    /// per-peer sliding window threshold was exceeded (AV27: ≥5 in 30s).
+    /// This makes the attack visible to the AI layer for cross-peer correlation.
+    pub fn record_invalid_vote_sig_spam(&self, addr: &str) {
+        let now = Self::now_secs();
+        self.maybe_add_attack(AttackPattern {
+            attack_type: AttackType::InvalidVoteSignatureSpam,
+            confidence: 0.90,
+            severity: AttackSeverity::Medium,
+            indicators: vec![
+                format!(
+                    "≥5 invalid Ed25519 vote signatures from {} within 30s (AV27)",
+                    addr
+                ),
+                "Possible forged vote spam to burn CPU on signature verification".to_string(),
+            ],
+            first_detected: now,
+            last_seen: now,
+            source_ips: vec![addr.to_string()],
+            recommended_action: MitigationAction::RateLimitPeer(addr.to_string()),
+            mitigation_applied_at: None,
+        });
+    }
+
+    /// Record that a peer sent votes from unregistered IDs after the per-peer
+    /// sliding window threshold was exceeded (AV28: ≥10 in 60s).
+    /// This makes the attack visible to the AI layer for cross-peer correlation.
+    pub fn record_unregistered_voter_spam(&self, addr: &str) {
+        let now = Self::now_secs();
+        self.maybe_add_attack(AttackPattern {
+            attack_type: AttackType::UnregisteredVoterSpam,
+            confidence: 0.85,
+            severity: AttackSeverity::Low,
+            indicators: vec![
+                format!(
+                    "≥10 votes from unregistered IDs relayed by {} within 60s (AV28)",
+                    addr
+                ),
+                "Possible spam via relay of votes for deregistered/phantom masternodes".to_string(),
+            ],
+            first_detected: now,
+            last_seen: now,
+            source_ips: vec![addr.to_string()],
+            recommended_action: MitigationAction::RateLimitPeer(addr.to_string()),
+            mitigation_applied_at: None,
+        });
     }
 
     /// Record a sustained ping rate-limit exceedance from `addr`.

@@ -488,6 +488,11 @@ impl MessageHandler {
         if should_record {
             self.record_vote_violation(context, "invalid vote signature spam (AV27: 5+ per 30s)")
                 .await;
+            // Notify AI layer for cross-peer correlation and metrics visibility
+            if let Some(ai) = &context.ai_system {
+                ai.attack_detector
+                    .record_invalid_vote_sig_spam(&self.peer_ip);
+            }
         }
     }
 
@@ -520,6 +525,11 @@ impl MessageHandler {
         if should_record {
             self.record_vote_violation(context, "unregistered voter spam (AV28: 10+ per 60s)")
                 .await;
+            // Notify AI layer for cross-peer correlation and metrics visibility
+            if let Some(ai) = &context.ai_system {
+                ai.attack_detector
+                    .record_unregistered_voter_spam(&self.peer_ip);
+            }
         }
     }
 
