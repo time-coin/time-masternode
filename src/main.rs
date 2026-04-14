@@ -1033,6 +1033,43 @@ async fn main() {
         }
     }
 
+    // ── PRE-LAUNCH HEIGHT GUARD ───────────────────────────────────────────────
+    // If our stored chain height is higher than what could have been produced
+    // since the genesis timestamp, we have stale blocks from before launch
+    // (e.g. a test run against an old genesis timestamp).  Roll back to genesis
+    // automatically so the node resyncs the correct chain from peers.
+    {
+        let genesis_ts = blockchain.genesis_timestamp();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let max_valid_height = if now_secs >= genesis_ts {
+            ((now_secs - genesis_ts) / 600) as u64
+        } else {
+            0
+        };
+        let stored_height = blockchain.get_height();
+        if stored_height > max_valid_height {
+            tracing::warn!(
+                "⚠️  Stored chain height {} exceeds max valid height {} (genesis launch: {}). \
+                 Chain contains pre-launch blocks — rolling back to genesis and resyncing.",
+                stored_height,
+                max_valid_height,
+                chrono::DateTime::from_timestamp(genesis_ts, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                    .unwrap_or_else(|| genesis_ts.to_string()),
+            );
+            eprintln!(
+                "⚠️  Rolling back stale chain (height {}) to genesis — stored blocks predate launch time.",
+                stored_height
+            );
+            blockchain.revert_to_after_genesis().await;
+            tracing::info!("✅ Rollback complete — chain is now at height 0, will resync from peers.");
+        }
+    }
+    // ── END PRE-LAUNCH HEIGHT GUARD ───────────────────────────────────────────
+
     // Build (or rebuild) transaction index on startup.
     // build_tx_index() clears any stale entries before rebuilding from scratch, so it is safe
     // to always run it. A stale index (e.g., from an incomplete rollback) causes
