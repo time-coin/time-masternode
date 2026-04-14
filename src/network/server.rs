@@ -1158,6 +1158,22 @@ async fn handle_peer(
                                                 Please upgrade: https://github.com/time-coin/time-masternode",
                                                 peer.addr, commit_count, our_commits
                                             );
+                                            // Notify the peer directly so they see it in their own logs.
+                                            let upgrade_msg = crate::network::message::NetworkMessage::ForkAlert {
+                                                your_height: 0,
+                                                your_hash: [0u8; 32],
+                                                consensus_height: 0,
+                                                consensus_hash: [0u8; 32],
+                                                consensus_peer_count: 0,
+                                                message: format!(
+                                                    "Your node is running outdated software \
+                                                    (commit {commit_count}, current is {our_commits}). \
+                                                    Please upgrade: https://github.com/time-coin/time-masternode"
+                                                ),
+                                            };
+                                            if let Ok(frame) = crate::network::wire::serialize_frame(&upgrade_msg) {
+                                                let _ = writer_tx.send(frame);
+                                            }
                                         }
                                         peer_registry.set_peer_commit_count(&ip_str, *commit_count).await;
                                         tracing::info!(
