@@ -3561,14 +3561,16 @@ async fn main() {
 
             // Safety checks before producing
             // Require at least 1/3 of COMPATIBLE peers as connected, with a hard
-            // floor of 3, to prevent isolated nodes from creating forks.
+            // floor of 2, to prevent isolated nodes from creating forks.
+            // Floor is 2 (not 3) so a 4-node testnet (3 other peers) can produce
+            // when connected to 2/3 of them — that is still a majority.
             // NOTE: We use compatible peer count (not total active masternodes) because
             // banned/incompatible nodes should not inflate the quorum threshold.
             // After a chain restart, most old-code nodes will be banned — the quorum
             // must reflect only the nodes we can actually talk to.
             let connected_peers = block_peer_registry.get_compatible_peers().await;
             let compatible_count = connected_peers.len();
-            let min_peers_required = (compatible_count / 3).max(3);
+            let min_peers_required = (compatible_count / 3).max(2);
             if compatible_count < min_peers_required {
                 // Rate-limit to once per 30s — this fires every second when syncing
                 static LAST_PEER_WARN: std::sync::atomic::AtomicI64 =
