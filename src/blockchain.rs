@@ -30,6 +30,10 @@ const BLOCK_REWARD_SATOSHIS: u64 = constants::blockchain::BLOCK_REWARD_SATOSHIS;
 
 /// Number of reward-distribution violations before a producer is considered misbehaving
 const REWARD_VIOLATION_THRESHOLD: u64 = 3;
+/// Seconds after the last violation before the counter resets.
+/// Honest producers whose blocks were rejected due to transient fork confusion recover
+/// automatically once this window expires without a new violation.
+const REWARD_VIOLATION_DECAY_SECS: u64 = 3600; // 1 hour
 
 // Security limits (Phase 1)
 const MAX_BLOCK_SIZE: usize = constants::blockchain::MAX_BLOCK_SIZE;
@@ -199,8 +203,9 @@ pub struct Blockchain {
     #[allow(clippy::type_complexity)]
     same_height_fork_cooldown: Arc<RwLock<Option<(u64, [u8; 32], std::time::Instant)>>>,
     /// Tracks reward-distribution violations per block producer address.
-    /// After REWARD_VIOLATION_THRESHOLD strikes the producer's proposals are rejected.
-    reward_violations: Arc<DashMap<String, u64>>,
+    /// Stored as (count, last_violation_time); count resets after REWARD_VIOLATION_DECAY_SECS
+    /// of clean behaviour so transient fork-confusion cannot permanently ban honest producers.
+    reward_violations: Arc<DashMap<String, (u64, std::time::Instant)>>,
     /// Set when peers have a different genesis block than ours.
     /// Suppresses repeated fork resolution attempts to avoid infinite loop.
     genesis_mismatch_detected: Arc<AtomicBool>,
@@ -6295,23 +6300,43 @@ impl Blockchain {
     // ===== Reward Misbehavior Tracking =====
 
     /// Check whether a producer has exceeded the reward-violation threshold.
+    /// Returns false (and clears the entry) if all recorded violations are older than
+    /// REWARD_VIOLATION_DECAY_SECS — honest producers recover automatically after the window.
     pub fn is_producer_misbehaving(&self, producer_addr: &str) -> bool {
-        self.reward_violations
-            .get(producer_addr)
-            .map(|v| *v >= REWARD_VIOLATION_THRESHOLD)
-            .unwrap_or(false)
+        if let Some(mut entry) = self.reward_violations.get_mut(producer_addr) {
+            let (count, last_time) = *entry;
+            if last_time.elapsed().as_secs() > REWARD_VIOLATION_DECAY_SECS {
+                // Window expired — wipe the slate clean
+                *entry = (0, std::time::Instant::now());
+                return false;
+            }
+            count >= REWARD_VIOLATION_THRESHOLD
+        } else {
+            false
+        }
     }
 
     /// Record a reward-distribution violation for a block producer.
     /// On reaching REWARD_VIOLATION_THRESHOLD, the producer's collateral is slashed
     /// (transferred to treasury) and the masternode is deregistered.
+    /// Violations older than REWARD_VIOLATION_DECAY_SECS are forgiven so that
+    /// transient fork confusion cannot permanently ban honest producers.
     pub async fn record_reward_violation(&self, producer_addr: &str) {
-        let mut count = self
+        let now = std::time::Instant::now();
+        let mut entry = self
             .reward_violations
             .entry(producer_addr.to_string())
-            .or_insert(0);
-        *count += 1;
-        let strikes = *count;
+            .or_insert((0, now));
+
+        // Reset counter if the decay window has expired since the last violation
+        if entry.1.elapsed().as_secs() > REWARD_VIOLATION_DECAY_SECS {
+            *entry = (0, now);
+        }
+
+        entry.0 += 1;
+        entry.1 = now;
+        let strikes = entry.0;
+
         if strikes >= REWARD_VIOLATION_THRESHOLD {
             tracing::warn!(
                 "🚨 Producer {} has {} reward violation(s) — SLASHING collateral and deregistering",
@@ -6319,7 +6344,7 @@ impl Blockchain {
                 strikes
             );
             // Drop DashMap ref before async call
-            drop(count);
+            drop(entry);
             self.slash_producer_collateral(producer_addr).await;
         } else {
             tracing::warn!(
@@ -6423,7 +6448,7 @@ impl Blockchain {
                 producer_addr,
                 self.reward_violations
                     .get(producer_addr)
-                    .map(|v| *v)
+                    .map(|v| v.0)
                     .unwrap_or(0)
             ));
         }
