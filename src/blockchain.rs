@@ -6438,11 +6438,23 @@ impl Blockchain {
 
     /// Validate a block proposal's reward distribution BEFORE voting.
     /// Strict: returns Err if rewards deviate or producer is misbehaving.
-    pub async fn validate_proposal_rewards(&self, block: &Block) -> Result<(), String> {
+    ///
+    /// `record_violations` controls whether a failed check increments the producer's
+    /// reward-violation counter.  Pass `false` when the leader identity has NOT been
+    /// authenticated yet (empty VRF proof, unverified signature) — an unauthenticated
+    /// failure must not poison the named leader's reputation (AV36).  The caller is
+    /// responsible for recording a violation against the *sending peer* instead.
+    pub async fn validate_proposal_rewards(
+        &self,
+        block: &Block,
+        record_violations: bool,
+    ) -> Result<(), String> {
         let producer_addr = &block.header.leader;
 
-        // Reject proposals from producers that have exceeded the misbehavior threshold
-        if !producer_addr.is_empty() && self.is_producer_misbehaving(producer_addr) {
+        // Reject proposals from producers that have exceeded the misbehavior threshold.
+        // Only check when the leader is authenticated — an attacker could forge any IP
+        // as the leader to trigger a false "misbehaving" rejection.
+        if record_violations && !producer_addr.is_empty() && self.is_producer_misbehaving(producer_addr) {
             return Err(format!(
                 "Producer {} is misbehaving ({} reward violations) — rejecting proposal",
                 producer_addr,
@@ -6473,7 +6485,7 @@ impl Blockchain {
                 .map(|(a, _)| a.as_str())
                 .collect();
             if paid.len() < min_paid_recipients {
-                if !producer_addr.is_empty() {
+                if record_violations && !producer_addr.is_empty() {
                     self.record_reward_violation(producer_addr).await;
                 }
                 return Err(format!(
@@ -6512,7 +6524,7 @@ impl Blockchain {
             .validate_pool_distribution(block, calculated_fees)
             .await
         {
-            if !producer_addr.is_empty() {
+            if record_violations && !producer_addr.is_empty() {
                 self.record_reward_violation(producer_addr).await;
             }
             return Err(e);

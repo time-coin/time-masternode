@@ -4202,33 +4202,43 @@ impl MessageHandler {
                         .await;
                 }
                 Err(crate::masternode_registry::RegistryError::CollateralAlreadyLocked) => {
+                    // AV36 (relay poisoning): when the announce arrived via relay, the
+                    // violation must be recorded against the RELAY peer (peer_ip), not
+                    // the claimed masternode_ip. An attacker can craft an announce with
+                    // masternode_ip = victim_ip pointing to already-locked collateral and
+                    // relay it through any node — if we blamed masternode_ip here, the
+                    // victim would accumulate severe violations on every receiving node.
+                    let violation_ip = if is_relayed { &peer_ip } else { &masternode_ip };
                     warn!(
-                        "❌ [{}] Collateral hijack attempt from {} for {} — recording violation{}",
+                        "❌ [{}] Collateral hijack attempt for {} — recording violation against {}{}",
                         self.direction,
-                        masternode_ip,
                         outpoint_for_relay,
+                        violation_ip,
                         if is_relayed {
-                            format!(" (relayed via {})", peer_ip)
+                            format!(" (relay forwarded bad announce claiming {})", masternode_ip)
                         } else {
                             String::new()
                         }
                     );
-                    if let Some(ai) = &context.ai_system {
-                        ai.attack_detector.record_collateral_spoof_attempt(
-                            &masternode_ip,
-                            &outpoint_for_relay.to_string(),
-                        );
+                    if !is_relayed {
+                        // Only flag the AI for direct squatting — relay is just forwarding
+                        if let Some(ai) = &context.ai_system {
+                            ai.attack_detector.record_collateral_spoof_attempt(
+                                &masternode_ip,
+                                &outpoint_for_relay.to_string(),
+                            );
+                        }
                     }
                     if let Some(blacklist) = &context.blacklist {
-                        let bare_ip = masternode_ip.split(':').next().unwrap_or(&masternode_ip);
+                        let bare_ip = violation_ip.split(':').next().unwrap_or(violation_ip);
                         if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
                             let mut bl = blacklist.write().await;
-                            let should_disconnect = bl.record_severe_violation(
-                                ban_ip,
-                                &format!("Collateral hijack attempt for {}", outpoint_for_relay),
-                            );
-                            // Only disconnect the relay (not the masternode) if this was relayed.
-                            // For direct connections, disconnect the squatter itself.
+                            let should_disconnect = if is_relayed {
+                                // Relay forwarding bad content: minor violation only
+                                bl.record_violation(ban_ip, &format!("Relayed collateral hijack announce for {}", outpoint_for_relay))
+                            } else {
+                                bl.record_severe_violation(ban_ip, &format!("Collateral hijack attempt for {}", outpoint_for_relay))
+                            };
                             if should_disconnect && !is_relayed {
                                 return Err(format!(
                                     "DISCONNECT: collateral hijack banned {}",
@@ -4383,22 +4393,33 @@ impl MessageHandler {
                         .await;
                 }
                 Err(crate::masternode_registry::RegistryError::CollateralAlreadyLocked) => {
+                    // AV36: same relay-poisoning guard as the paid-tier path above.
+                    let violation_ip = if is_relayed { &peer_ip } else { &masternode_ip };
                     warn!(
-                        "❌ [{}] Free-tier collateral hijack attempt from {} — recording violation",
-                        self.direction, masternode_ip
+                        "❌ [{}] Free-tier collateral hijack for {} — recording violation against {}{}",
+                        self.direction,
+                        masternode_ip,
+                        violation_ip,
+                        if is_relayed { " (relayed)" } else { "" }
                     );
-                    if let Some(ai) = &context.ai_system {
-                        ai.attack_detector
-                            .record_collateral_spoof_attempt(&masternode_ip, "free-tier-claim");
+                    if !is_relayed {
+                        if let Some(ai) = &context.ai_system {
+                            ai.attack_detector
+                                .record_collateral_spoof_attempt(&masternode_ip, "free-tier-claim");
+                        }
                     }
                     if let Some(blacklist) = &context.blacklist {
-                        let bare_ip = masternode_ip.split(':').next().unwrap_or(&masternode_ip);
+                        let bare_ip = violation_ip.split(':').next().unwrap_or(violation_ip);
                         if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
                             let mut bl = blacklist.write().await;
-                            let should_disconnect = bl.record_severe_violation(
-                                ban_ip,
-                                "Free-tier collateral hijack: tried to claim paid-tier collateral",
-                            );
+                            let should_disconnect = if is_relayed {
+                                bl.record_violation(ban_ip, "Relayed free-tier collateral hijack announce")
+                            } else {
+                                bl.record_severe_violation(
+                                    ban_ip,
+                                    "Free-tier collateral hijack: tried to claim paid-tier collateral",
+                                )
+                            };
                             if should_disconnect && !is_relayed {
                                 return Err(format!(
                                     "DISCONNECT: free-tier collateral hijack banned {}",
@@ -6541,16 +6562,16 @@ impl MessageHandler {
             self.validate_block_rewards_structure(block)?;
         }
 
-        // 4b. Validate reward distribution and check producer misbehavior
-        // This runs the full pool-distribution check BEFORE voting so we
-        // never endorse a block with tampered rewards.
-        if block.header.height > 0 {
-            context.blockchain.validate_proposal_rewards(block).await?;
-        }
-
-        // 5. SECURITY: Verify VRF proof — confirms proposer is legitimately selected
-        // Skip for old blocks without VRF proof (backward compatibility)
-        if !block.header.vrf_proof.is_empty() && block.header.height > 0 {
+        // 5. SECURITY: Verify VRF proof — confirms proposer is legitimately selected.
+        // MUST run before reward validation (step 4b) so that forged proposals with a
+        // victim's IP as `leader` cannot poison the victim's reward-violation counter
+        // (AV36 — reputation poisoning via unauthenticated block proposals).
+        // Skip for old blocks without VRF proof (backward compatibility).
+        //
+        // `leader_authenticated`: true iff VRF proof is present AND verifies correctly.
+        // Reward violations are only recorded against the leader when this is true;
+        // otherwise the violation is recorded against the sending peer instead.
+        let leader_authenticated = if !block.header.vrf_proof.is_empty() && block.header.height > 0 {
             // Look up the proposer's public key from masternode registry
             let proposer = block.header.leader.clone();
             if proposer.is_empty() {
@@ -6710,6 +6731,33 @@ impl MessageHandler {
                     "Block {} producer signature mismatch (stale key?): {}",
                     block.header.height, e
                 );
+            }
+
+            true // VRF proof present and verified — leader is authenticated
+        } else {
+            false // No VRF proof — cannot authenticate leader identity
+        };
+
+        // 4b. Validate reward distribution and check producer misbehavior.
+        // `leader_authenticated` controls whether failures record violations against the
+        // leader address (true) or are silently rejected (false).  When false the caller
+        // records a violation against self.peer_ip — the actual sender — instead, so an
+        // attacker cannot poison a victim node's reputation by forging its IP as leader.
+        if block.header.height > 0 {
+            if let Err(e) = context
+                .blockchain
+                .validate_proposal_rewards(block, leader_authenticated)
+                .await
+            {
+                if !leader_authenticated {
+                    // Unauthenticated bad proposal — penalise the *sender*, not the claimed leader
+                    warn!(
+                        "❌ [{}] Unauthenticated block proposal from {} has bad rewards (AV36): {}",
+                        self.direction, self.peer_ip, e
+                    );
+                    self.record_vote_violation(context, "unauthenticated block proposal with bad rewards (AV36)").await;
+                }
+                return Err(e);
             }
         }
 
