@@ -2202,8 +2202,7 @@ impl MessageHandler {
         };
         if block_height > max_valid_height {
             warn!(
-                "🚫 [{}] Peer {} announced block {} which exceeds max valid height {} \
-                 (genesis not reached yet) — marking incompatible",
+                "🚫 [{}] Peer {} announced block {} before launch (max valid height: {}) — disconnecting",
                 self.direction, self.peer_ip, block_height, max_valid_height
             );
             context
@@ -2226,7 +2225,10 @@ impl MessageHandler {
                     );
                 }
             }
-            return Ok(None);
+            return Err(format!(
+                "DISCONNECT: peer {} announced pre-launch block {} (max valid height: {})",
+                self.peer_ip, block_height, max_valid_height
+            ));
         }
 
         let our_height = context.blockchain.get_height();
@@ -2402,10 +2404,10 @@ impl MessageHandler {
                     ));
                 } else if e.contains("exceeds maximum expected height") {
                     // Block is from before the genesis launch window — peer is on a
-                    // pre-launch chain.  Mark incompatible and record a violation so
-                    // repeated sends escalate to a temporary ban.
+                    // pre-launch chain.  Mark incompatible, record a violation, and
+                    // disconnect immediately.
                     warn!(
-                        "🚫 [{}] Pre-launch block {} from {} rejected ({})",
+                        "🚫 [{}] Pre-launch block {} from {} — disconnecting ({})",
                         self.direction, block_height, self.peer_ip, e
                     );
                     context
@@ -2425,6 +2427,10 @@ impl MessageHandler {
                             );
                         }
                     }
+                    return Err(format!(
+                        "DISCONNECT: peer {} sent pre-launch block {}: {}",
+                        self.peer_ip, block_height, e
+                    ));
                 } else {
                     warn!(
                         "❌ [{}] Failed to add block {}: {}",
