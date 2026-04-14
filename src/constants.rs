@@ -11,8 +11,9 @@ pub mod genesis {
     pub const TESTNET_GENESIS_HASH: Option<&str> =
         Some("b9523431d4e59a1b41d757a8c0f01ed023c11123761b1455e4644ef9d5599ff6");
 
-    /// Mainnet genesis block hash — set after mainnet launches (2026-04-15).
-    pub const MAINNET_GENESIS_HASH: Option<&str> = None;
+    /// Mainnet genesis block hash — canonical hash confirmed on-chain 2026-04-15.
+    pub const MAINNET_GENESIS_HASH: Option<&str> =
+        Some("8a0ab678e57681eeca587fe1133bccc84d81ed7f04460fa96cc3a7697e19f36f");
 }
 
 /// Storage schema version. Increment whenever on-disk serialization changes

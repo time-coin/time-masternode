@@ -1770,8 +1770,10 @@ async fn handle_peer(
                                     );
                                     context.utxo_manager = Some(Arc::clone(&utxo_mgr));
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&ip_str, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::Subscribe(sub) => {
@@ -1788,8 +1790,10 @@ async fn handle_peer(
                                         Arc::clone(&masternode_registry),
                                     );
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&ip_str, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::GetChainTip => {
@@ -1802,8 +1806,10 @@ async fn handle_peer(
                                         Arc::clone(&masternode_registry),
                                     );
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&ip_str, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::GetPendingTransactions => {
@@ -1824,8 +1830,10 @@ async fn handle_peer(
                                         Arc::clone(&masternode_registry),
                                     );
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&ip_str, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::GetUTXOStateHash => {
@@ -1838,8 +1846,10 @@ async fn handle_peer(
                                         Arc::clone(&masternode_registry),
                                     );
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&ip_str, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::GetUTXOSet => {
@@ -1852,8 +1862,10 @@ async fn handle_peer(
                                         Arc::clone(&masternode_registry),
                                     );
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&ip_str, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::MasternodeAnnouncement { .. } => {
@@ -1886,8 +1898,10 @@ async fn handle_peer(
                                     );
                                     context.utxo_manager = Some(Arc::clone(&consensus.utxo_manager));
                                     context.peer_manager = Some(Arc::clone(&peer_manager));
-                                    if let Ok(Some(response)) = handler.handle_message(&v3_msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&peer.addr, response).await;
+                                    match handler.handle_message(&v3_msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&peer.addr, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::MasternodeAnnouncementV3 { address: _, reward_address, tier, public_key, collateral_outpoint, certificate, started_at } => {
@@ -1915,8 +1929,10 @@ async fn handle_peer(
                                     );
                                     context.utxo_manager = Some(Arc::clone(&consensus.utxo_manager));
                                     context.peer_manager = Some(Arc::clone(&peer_manager));
-                                    if let Ok(Some(response)) = handler.handle_message(&v3_msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&peer.addr, response).await;
+                                    match handler.handle_message(&v3_msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&peer.addr, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::MasternodeAnnouncementV4 { address: _, reward_address, tier, public_key, collateral_outpoint, certificate, started_at, collateral_proof } => {
@@ -1944,8 +1960,10 @@ async fn handle_peer(
                                     );
                                     context.utxo_manager = Some(Arc::clone(&consensus.utxo_manager));
                                     context.peer_manager = Some(Arc::clone(&peer_manager));
-                                    if let Ok(Some(response)) = handler.handle_message(&v4_msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&peer.addr, response).await;
+                                    match handler.handle_message(&v4_msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&peer.addr, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::GetPeers => {
@@ -1961,8 +1979,10 @@ async fn handle_peer(
                                     );
                                     context.peer_manager = Some(Arc::clone(&peer_manager));
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&ip_str, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::GetMasternodes => {
@@ -1975,8 +1995,10 @@ async fn handle_peer(
                                         Arc::clone(&masternode_registry),
                                     );
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&ip_str, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::PeersResponse(peers) => {
@@ -2019,8 +2041,10 @@ async fn handle_peer(
                                         Arc::clone(&masternode_registry),
                                     );
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&ip_str, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::BlockRequest(_) => {
@@ -2035,8 +2059,10 @@ async fn handle_peer(
                                         Arc::clone(&masternode_registry),
                                     );
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&ip_str, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::BlockResponse(block) => {
@@ -2250,8 +2276,10 @@ async fn handle_peer(
                                         Arc::clone(&masternode_registry),
                                     );
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&ip_str, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::GetBlockHash(_) => {
@@ -2264,8 +2292,10 @@ async fn handle_peer(
                                         Arc::clone(&masternode_registry),
                                     );
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&ip_str, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::ConsensusQuery { .. } => {
@@ -2278,8 +2308,10 @@ async fn handle_peer(
                                         Arc::clone(&masternode_registry),
                                     );
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&ip_str, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::GetBlockRange { .. } => {
@@ -2292,8 +2324,10 @@ async fn handle_peer(
                                         Arc::clone(&masternode_registry),
                                     );
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&ip_str, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::BlocksResponse(_) | NetworkMessage::BlockRangeResponse(_) => {
@@ -2358,8 +2392,10 @@ async fn handle_peer(
                                         Arc::clone(&masternode_registry),
                                     );
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&ip_str, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::TimeVoteRequest { txid, tx_hash_commitment, slot_index, tx } => {
@@ -2760,8 +2796,10 @@ async fn handle_peer(
                                         Arc::clone(&masternode_registry),
                                     );
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&ip_str, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::GetChainWorkAt(_) => {
@@ -2774,8 +2812,10 @@ async fn handle_peer(
                                         Arc::clone(&masternode_registry),
                                     );
 
-                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    match handler.handle_message(&msg, &context).await {
+                                        Ok(Some(response)) => { let _ = peer_registry.send_to_peer(&ip_str, response).await; }
+                                        Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
+                                        _ => {}
                                     }
                                 }
                                 NetworkMessage::ChainWorkResponse { height, tip_hash, cumulative_work } => {

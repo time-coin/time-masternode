@@ -354,9 +354,10 @@ mod tests {
     fn test_mainnet_genesis_hash() {
         let genesis = GenesisBlock::mainnet_genesis();
         let hash = hex::encode(genesis.hash());
-        // Mainnet hasn't launched yet; print the hash so it can be recorded when it does.
-        // When MAINNET_GENESIS_HASH is set in constants.rs this assertion can be made exact.
-        assert!(!hash.is_empty(), "mainnet genesis must produce a non-empty hash (got {hash})");
+        assert_eq!(
+            hash, "8a0ab678e57681eeca587fe1133bccc84d81ed7f04460fa96cc3a7697e19f36f",
+            "Hardcoded mainnet genesis must produce the canonical checkpoint hash"
+        );
         assert!(GenesisBlock::verify_structure(&genesis).is_ok());
         assert!(GenesisBlock::verify_rewards(&genesis).is_ok());
         assert_eq!(genesis.header.timestamp, 1776211200); // 2026-04-15T00:00:00Z
