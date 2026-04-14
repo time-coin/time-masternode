@@ -215,6 +215,7 @@ impl RpcHandler {
             "getblacklist" => self.get_blacklist().await,
             "ban" => self.ban_ip(&params_array).await,
             "unban" => self.unban(&params_array).await,
+            "clearbanlist" => self.clear_ban_list().await,
             "auditcollateral" => self.audit_collateral().await,
             "listreceivedbyaddress" => self.list_received_by_address(&params_array).await,
             "listtransactions" => self.list_transactions(&params_array).await,
@@ -4350,6 +4351,46 @@ impl RpcHandler {
                 json!({"result": "not_banned", "ip": ip_str, "message": "IP was not in the ban list (violations cleared anyway)"}),
             )
         }
+    }
+
+    /// Remove ALL bans and violation counts. Whitelisted peers are unaffected.
+    async fn clear_ban_list(&self) -> Result<Value, RpcError> {
+        let mut bl = self.blacklist.write().await;
+        let (permanent, temporary, _, violations) = bl.list_bans();
+        let perm_count = permanent.len();
+        let temp_count = temporary.len();
+        let viol_count = violations.len();
+
+        // Collect all unique IPs across bans and violations
+        let mut all_ips: Vec<std::net::IpAddr> = Vec::new();
+        for (ip_str, _) in &permanent {
+            if let Ok(ip) = ip_str.parse() { all_ips.push(ip); }
+        }
+        for (ip_str, _, _) in &temporary {
+            if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                if !all_ips.contains(&ip) { all_ips.push(ip); }
+            }
+        }
+        for (ip_str, _) in &violations {
+            if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                if !all_ips.contains(&ip) { all_ips.push(ip); }
+            }
+        }
+
+        for ip in &all_ips {
+            bl.unban(*ip);
+        }
+
+        tracing::info!(
+            "🔓 RPC clearbanlist: cleared {} permanent ban(s), {} temporary ban(s), {} violation record(s)",
+            perm_count, temp_count, viol_count
+        );
+        Ok(json!({
+            "result": "success",
+            "permanent_cleared": perm_count,
+            "temporary_cleared": temp_count,
+            "violations_cleared": viol_count,
+        }))
     }
 
     async fn get_best_block_hash(&self) -> Result<Value, RpcError> {

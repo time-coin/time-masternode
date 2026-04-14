@@ -206,6 +206,10 @@ enum Commands {
         ip: String,
     },
 
+    /// Remove ALL bans and violation counts (whitelisted peers are unaffected)
+    #[command(next_help_heading = "Network")]
+    ClearBanList,
+
     /// Add an IP to the whitelist (exempt from bans and rate limits; must be a registered network peer)
     #[command(next_help_heading = "Network")]
     AddWhitelist {
@@ -964,6 +968,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             json!([ip, reason.as_deref().unwrap_or("manual ban via CLI")]),
         ),
         Commands::Unban { ip } => ("unban", json!([ip])),
+        Commands::ClearBanList => ("clearbanlist", json!([])),
         Commands::AddWhitelist { ip } => ("addwhitelist", json!([ip])),
         Commands::GetTxOutSetInfo => ("gettxoutsetinfo", json!([])),
         Commands::GetTxOut { txid, vout } => ("gettxout", json!([txid, vout])),
@@ -1600,7 +1605,7 @@ fn print_human_readable(
                 }
             }
         }
-        Commands::Ban { .. } | Commands::Unban { .. } | Commands::AddWhitelist { .. } => {
+        Commands::Ban { .. } | Commands::Unban { .. } | Commands::ClearBanList | Commands::AddWhitelist { .. } => {
             let msg = result
                 .get("message")
                 .and_then(|v| v.as_str())
