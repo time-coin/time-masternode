@@ -623,6 +623,10 @@ enum Commands {
     #[command(next_help_heading = "Utility")]
     Reindex,
 
+    /// Delete all blocks above height 0 and reset chain to genesis (DANGER: wipes all post-genesis chain data)
+    #[command(next_help_heading = "Utility")]
+    RollbackToBlock0,
+
     /// Reset the BFT finality lock to a lower height (DANGER: only use to recover a stuck fork node)
     #[command(next_help_heading = "Utility")]
     ResetFinalityLock {
@@ -1023,6 +1027,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::GetInfo => ("getinfo", json!([])),
         Commands::ReindexTransactions => ("reindextransactions", json!([])),
         Commands::Reindex => ("reindex", json!([])),
+        Commands::RollbackToBlock0 => ("rollbacktoblock0", json!([])),
         Commands::ResetFinalityLock { height } => ("resetfinalitylock", json!([height])),
         Commands::CleanupLockedUTXOs => ("cleanuplockedutxos", json!([])),
         Commands::ListLockedUTXOs => ("listlockedutxos", json!([])),

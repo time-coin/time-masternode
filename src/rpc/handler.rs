@@ -222,6 +222,7 @@ impl RpcHandler {
             "listtransactionsmulti" => self.list_transactions_multi(&params_array).await,
             "reindextransactions" => self.reindex_transactions().await,
             "reindex" => self.reindex_full().await,
+            "rollbacktoblock0" => self.rollback_to_block0().await,
             "resetfinalitylock" => self.reset_finality_lock_rpc(&params_array).await,
             "gettxindexstatus" => self.get_tx_index_status().await,
             "cleanuplockedutxos" => self.cleanup_locked_utxos().await,
@@ -4390,6 +4391,30 @@ impl RpcHandler {
             "permanent_cleared": perm_count,
             "temporary_cleared": temp_count,
             "violations_cleared": viol_count,
+        }))
+    }
+
+    /// Delete all blocks above height 0, reset chain height to 0, and clear UTXOs.
+    /// The genesis block is preserved. The node will rebuild from block 1 via peer sync.
+    async fn rollback_to_block0(&self) -> Result<Value, RpcError> {
+        let height_before = self.blockchain.get_height();
+        if height_before == 0 {
+            return Ok(json!({
+                "result": "already at genesis",
+                "height": 0,
+                "blocks_removed": 0,
+            }));
+        }
+        tracing::warn!(
+            "⚠️  RPC rollbacktoblock0: reverting chain from height {} to genesis",
+            height_before
+        );
+        self.blockchain.revert_to_after_genesis().await;
+        Ok(json!({
+            "result": "success",
+            "height_before": height_before,
+            "height_after": 0,
+            "blocks_removed": height_before,
         }))
     }
 
