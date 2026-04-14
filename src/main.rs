@@ -1599,9 +1599,29 @@ async fn main() {
             let p2p_port_for_sync = network_type.default_p2p_port();
 
             tokio::spawn(async move {
-                // Wait until fully synced before touching the mempool
+                // Wait until fully synced before touching the mempool.
+                //
+                // Important: `is_syncing()` is `false` at startup (before sync starts).
+                // We must first wait for sync to BEGIN (flag flips to true), then wait
+                // for it to END (flag flips back to false).  If sync never starts within
+                // 60 s (e.g. no peers), proceed anyway — this node is alone and needs to
+                // self-register now.
+                let sync_start_deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(60);
                 loop {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    if collateral_sync_shutdown.is_cancelled() {
+                        return;
+                    }
+                    if collateral_sync_blockchain.is_syncing()
+                        || std::time::Instant::now() >= sync_start_deadline
+                    {
+                        break; // Sync has started (or timed out) — now wait for it to finish
+                    }
+                }
+                // Now wait for the active sync to complete.
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     if collateral_sync_shutdown.is_cancelled() {
                         return;
                     }
