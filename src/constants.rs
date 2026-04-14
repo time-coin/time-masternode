@@ -6,10 +6,12 @@
 /// Genesis block checkpoints — hardcoded hashes like Bitcoin's checkpoints.
 /// Nodes reject any genesis block whose hash doesn't match these values.
 pub mod genesis {
-    /// Testnet genesis block hash — set to None until the clean genesis is produced.
-    pub const TESTNET_GENESIS_HASH: Option<&str> = None;
+    /// Testnet genesis block hash — canonical hash of the live testnet genesis block.
+    /// Hash of the block at height 0 confirmed on-chain 2026-04-14.
+    pub const TESTNET_GENESIS_HASH: Option<&str> =
+        Some("b9523431d4e59a1b41d757a8c0f01ed023c11123761b1455e4644ef9d5599ff6");
 
-    /// Mainnet genesis block hash — set to None until the clean genesis is produced.
+    /// Mainnet genesis block hash — set after mainnet launches (2026-04-15).
     pub const MAINNET_GENESIS_HASH: Option<&str> = None;
 }
 
