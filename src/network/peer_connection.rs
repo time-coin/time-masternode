@@ -884,12 +884,33 @@ impl PeerConnection {
                 }
                 return Ok(());
             }
-            NetworkMessage::Handshake { .. }
-            | NetworkMessage::Ack { .. }
-            | NetworkMessage::Version { .. } => {
-                // Connection-level messages - not handled by MessageHandler
+            NetworkMessage::Handshake { commit_count, .. } => {
+                // Check if the peer is running newer software than us.
+                let our_commits = env!("GIT_COMMIT_COUNT").parse::<u32>().unwrap_or(0);
+                if *commit_count > our_commits && our_commits > 0 {
+                    warn!(
+                        "⬆️  [{:?}] Peer {} is running newer software (commit {}, we are at {}). \
+                        Consider upgrading: https://github.com/time-coin/time-masternode",
+                        self.direction, self.peer_ip, commit_count, our_commits
+                    );
+                }
+                return Ok(());
+            }
+            NetworkMessage::Version { commit_count, .. } => {
+                let our_commits = env!("GIT_COMMIT_COUNT").parse::<u32>().unwrap_or(0);
+                let peer_commits = commit_count.parse::<u32>().unwrap_or(0);
+                if peer_commits > our_commits && our_commits > 0 {
+                    warn!(
+                        "⬆️  [{:?}] Peer {} is running newer software (commit {}, we are at {}). \
+                        Consider upgrading: https://github.com/time-coin/time-masternode",
+                        self.direction, self.peer_ip, peer_commits, our_commits
+                    );
+                }
+                return Ok(());
+            }
+            NetworkMessage::Ack { .. } => {
                 debug!(
-                    "📨 [{:?}] Received connection-level message from {}",
+                    "📨 [{:?}] Received Ack from {}",
                     self.direction, self.peer_ip
                 );
                 return Ok(());

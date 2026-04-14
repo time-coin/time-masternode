@@ -1175,6 +1175,15 @@ async fn handle_peer(
                                                 let _ = writer_tx.send(frame);
                                             }
                                         }
+                                        // Check if the peer is ahead of us — we may be outdated.
+                                        if *commit_count > our_commits && our_commits > 0 {
+                                            tracing::warn!(
+                                                "⬆️  Peer {} is running newer software \
+                                                (commit {}, we are at commit {}). \
+                                                Consider upgrading: https://github.com/time-coin/time-masternode",
+                                                peer.addr, commit_count, our_commits
+                                            );
+                                        }
                                         peer_registry.set_peer_commit_count(&ip_str, *commit_count).await;
                                         tracing::info!(
                                             "✅ Handshake accepted from {} (network: {}, commit: {})",
