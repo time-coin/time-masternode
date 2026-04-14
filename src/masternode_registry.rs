@@ -2152,14 +2152,17 @@ impl MasternodeRegistry {
         let masternodes = self.masternodes.read().await;
 
         // Sort by slot_id (permanent, chain-derived — no drift).
-        // Nodes without a slot_id (slot_id == u32::MAX) are excluded from the bitmap;
-        // they are unconfirmed and should not be eligible for rewards.
-        let mut sorted_mns: Vec<MasternodeInfo> = masternodes
-            .values()
-            .filter(|mn| mn.masternode.slot_id != u32::MAX)
-            .cloned()
-            .collect();
-        sorted_mns.sort_by_key(|mn| mn.masternode.slot_id);
+        // Nodes with valid slot_ids sort first; unregistered nodes (slot_id == u32::MAX)
+        // fall at the end, ordered deterministically by address to prevent position drift.
+        // Including unregistered nodes ensures the bitmap captures all active participants
+        // even when on-chain registration TXs are pending confirmation.
+        let mut sorted_mns: Vec<MasternodeInfo> = masternodes.values().cloned().collect();
+        sorted_mns.sort_by(|a, b| {
+            a.masternode
+                .slot_id
+                .cmp(&b.masternode.slot_id)
+                .then_with(|| a.masternode.address.cmp(&b.masternode.address))
+        });
 
         if sorted_mns.is_empty() {
             return (vec![], 0);
@@ -2200,12 +2203,14 @@ impl MasternodeRegistry {
         let masternodes = self.masternodes.read().await;
 
         // Same sort order as create_active_bitmap_from_voters.
-        let mut sorted_mns: Vec<MasternodeInfo> = masternodes
-            .values()
-            .filter(|mn| mn.masternode.slot_id != u32::MAX)
-            .cloned()
-            .collect();
-        sorted_mns.sort_by_key(|mn| mn.masternode.slot_id);
+        // Valid slot_id nodes first; unregistered (u32::MAX) ordered by address.
+        let mut sorted_mns: Vec<MasternodeInfo> = masternodes.values().cloned().collect();
+        sorted_mns.sort_by(|a, b| {
+            a.masternode
+                .slot_id
+                .cmp(&b.masternode.slot_id)
+                .then_with(|| a.masternode.address.cmp(&b.masternode.address))
+        });
 
         let mut active = Vec::new();
         for (i, mn) in sorted_mns.iter().enumerate() {
