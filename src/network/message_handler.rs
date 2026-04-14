@@ -2191,6 +2191,44 @@ impl MessageHandler {
         block_height: u64,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
+        // Reject inventory for blocks that couldn't possibly exist yet.
+        // max_valid_height = 0 before genesis timestamp; blocks above that are pre-launch.
+        let genesis_ts = context.blockchain.genesis_timestamp();
+        let now = chrono::Utc::now().timestamp();
+        let max_valid_height = if now >= genesis_ts {
+            ((now - genesis_ts) / 600) as u64
+        } else {
+            0
+        };
+        if block_height > max_valid_height {
+            warn!(
+                "🚫 [{}] Peer {} announced block {} which exceeds max valid height {} \
+                 (genesis not reached yet) — marking incompatible",
+                self.direction, self.peer_ip, block_height, max_valid_height
+            );
+            context
+                .peer_registry
+                .mark_genesis_incompatible(
+                    &self.peer_ip,
+                    "pre-launch",
+                    &format!("height_{}_before_genesis", block_height),
+                )
+                .await;
+            if let Some(blacklist) = &context.blacklist {
+                let bare_ip = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
+                if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
+                    blacklist.write().await.record_violation(
+                        ip,
+                        &format!(
+                            "Announced block {} before genesis launch (max valid height: {})",
+                            block_height, max_valid_height
+                        ),
+                    );
+                }
+            }
+            return Ok(None);
+        }
+
         let our_height = context.blockchain.get_height();
 
         if block_height > our_height {
@@ -2362,6 +2400,31 @@ impl MessageHandler {
                         "Peer {} permanently banned: sent reward-hijacking block {}",
                         self.peer_ip, block_height
                     ));
+                } else if e.contains("exceeds maximum expected height") {
+                    // Block is from before the genesis launch window — peer is on a
+                    // pre-launch chain.  Mark incompatible and record a violation so
+                    // repeated sends escalate to a temporary ban.
+                    warn!(
+                        "🚫 [{}] Pre-launch block {} from {} rejected ({})",
+                        self.direction, block_height, self.peer_ip, e
+                    );
+                    context
+                        .peer_registry
+                        .mark_genesis_incompatible(
+                            &self.peer_ip,
+                            "pre-launch",
+                            &format!("block_{}_before_genesis", block_height),
+                        )
+                        .await;
+                    if let Some(blacklist) = &context.blacklist {
+                        let bare_ip = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
+                        if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
+                            blacklist.write().await.record_violation(
+                                ip,
+                                &format!("Sent pre-launch block {}: {}", block_height, e),
+                            );
+                        }
+                    }
                 } else {
                     warn!(
                         "❌ [{}] Failed to add block {}: {}",
