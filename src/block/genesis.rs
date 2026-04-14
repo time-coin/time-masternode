@@ -183,13 +183,13 @@ impl GenesisBlock {
     /// distribution; nodes have ~10 minutes (one block interval) to connect
     /// before block 1 is eligible to be produced.
     ///
-    /// timestamp: 1775001600 = 2026-04-01T00:00:00Z
+    /// timestamp: 1776211200 = 2026-04-15T00:00:00Z
     pub fn mainnet_genesis() -> Block {
         Block {
             header: BlockHeader {
                 version: 1,
                 height: 0,
-                timestamp: 1775001600, // 2026-04-01T00:00:00Z
+                timestamp: 1776211200, // 2026-04-15T00:00:00Z
                 previous_hash: [0u8; 32],
                 merkle_root: [0u8; 32],
                 leader: "".to_string(),
