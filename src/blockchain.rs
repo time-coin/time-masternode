@@ -945,31 +945,6 @@ impl Blockchain {
                     return self.store_hardcoded_genesis();
                 }
 
-                // Auto-checkpoint check: if a genesis_checkpoint was saved when block 1
-                // was first committed, verify our stored genesis matches it.
-                // This catches nodes that upgraded to a new binary with a different genesis
-                // without ever hitting the verify_structure path above.
-                let stored_hash = hex::encode(genesis.hash());
-                if let Some(checkpoint_hex) = self
-                    .storage
-                    .get(b"genesis_checkpoint")
-                    .ok()
-                    .flatten()
-                    .and_then(|b| bincode::deserialize::<String>(&b).ok())
-                {
-                    if checkpoint_hex != stored_hash {
-                        tracing::error!(
-                            "🔄 Genesis checkpoint mismatch: stored={}, checkpoint={} — wiping chain and resyncing",
-                            &stored_hash[..16],
-                            &checkpoint_hex[..16]
-                        );
-                        self.clear_all_blocks().await;
-                        self.current_height.store(0, Ordering::Release);
-                        return self.store_hardcoded_genesis();
-                    }
-                    tracing::info!("✅ Genesis checkpoint verified: {}", &stored_hash[..16]);
-                }
-
                 tracing::info!("✅ Genesis block structure valid");
             } else {
                 tracing::warn!(
@@ -4871,7 +4846,6 @@ impl Blockchain {
 
         // Update chain height
         self.update_chain_height(block.header.height)?;
-        self.maybe_save_genesis_checkpoint(block.header.height).await;
 
         // SCAN FORWARD: After filling a gap, check if blocks above already exist in storage.
         // Skip during sync — blocks arrive sequentially so there are no gaps to fill,
@@ -5576,36 +5550,6 @@ impl Blockchain {
         Ok(())
     }
 
-    /// Save the genesis block hash as a checkpoint the first time block 1 is committed.
-    /// Called from add_block (async context) right after update_chain_height succeeds.
-    /// The checkpoint survives clear_all_blocks() so future startups can detect a
-    /// genesis mismatch and auto-wipe without manual constants.rs edits.
-    async fn maybe_save_genesis_checkpoint(&self, height: u64) {
-        if height != 1 {
-            return;
-        }
-        // Already saved?
-        if self
-            .storage
-            .get(b"genesis_checkpoint")
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            return;
-        }
-        if let Ok(genesis) = self.get_block_by_height(0).await {
-            let hash_hex = hex::encode(genesis.hash());
-            if let Ok(bytes) = bincode::serialize(&hash_hex) {
-                if self.storage.insert(b"genesis_checkpoint", bytes).is_ok() {
-                    tracing::info!(
-                        "🔒 Genesis checkpoint saved: {} — future nodes will auto-wipe on mismatch",
-                        &hash_hex[..16]
-                    );
-                }
-            }
-        }
-    }
 
     /// Get block directly from storage, bypassing cache (for verification)
     fn get_block_from_storage_only(&self, height: u64) -> Result<Block, String> {
