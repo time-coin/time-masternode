@@ -957,37 +957,6 @@ impl Blockchain {
                 );
             }
 
-            // REWARD-HIJACK GUARD: every block from height 1 upward must have
-            // ≥ 3 unique reward recipients. If any block fails this check the
-            // chain is reverted to genesis so honest blocks can be built from
-            // block 1 onward (fork at block 1).
-            if height >= 1 {
-                const MIN_BLOCK_RECIPIENTS: usize = 3;
-                for h in 1..=height {
-                    if let Ok(blk) = self.get_block_by_height(h).await {
-                        // Count only addresses with a POSITIVE payout.
-                        // Zero-amount entries are padding tricks and must not count.
-                        let unique_recipients: std::collections::HashSet<&str> = blk
-                            .masternode_rewards
-                            .iter()
-                            .filter(|(_, amt)| *amt > 0)
-                            .map(|(addr, _)| addr.as_str())
-                            .collect();
-                        if unique_recipients.len() < MIN_BLOCK_RECIPIENTS {
-                            tracing::error!(
-                                "🛡️ Block {} has only {} unique reward recipient(s) (need ≥{}). \
-                                 Reverting to genesis so honest blocks can be produced from block 1.",
-                                h,
-                                unique_recipients.len(),
-                                MIN_BLOCK_RECIPIENTS
-                            );
-                            self.revert_to_after_genesis().await;
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-
             self.current_height.store(height, Ordering::Release);
             tracing::info!("✓ Local blockchain verified (height: {})", height);
             return Ok(());
