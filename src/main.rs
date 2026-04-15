@@ -1087,7 +1087,24 @@ async fn main() {
             );
         }
     }
-    // ── END PRE-GENESIS BLOCK SCAN ────────────────────────────────────────────
+    // ── WRONG-CHAIN BLOCK SCAN ───────────────────────────────────────────────
+    // If block 1's previous_hash doesn't match our genesis, we have stale data
+    // from an incompatible chain (e.g. old April-1 chain).  Purge and resync.
+    {
+        let purged = blockchain.purge_wrong_chain_blocks().await;
+        if purged > 0 {
+            tracing::warn!(
+                "✅ Wrong-chain purge complete — removed {} block(s) referencing a different genesis, \
+                 chain reset to height 0. Will resync from compatible peers.",
+                purged
+            );
+            eprintln!(
+                "⚠️  Removed {} wrong-chain block(s) from sled — chain reset to height 0, will resync.",
+                purged
+            );
+        }
+    }
+    // ── END WRONG-CHAIN BLOCK SCAN ───────────────────────────────────────────
 
     // Build (or rebuild) transaction index on startup.
     // build_tx_index() clears any stale entries before rebuilding from scratch, so it is safe
@@ -2670,9 +2687,60 @@ async fn main() {
 
         tracing::info!("✅ Genesis block ready - starting block production loop");
 
-        // SYNC GATE: Before producing any blocks, ensure we have fresh peer data.
-        // If we're significantly behind expected height, we MUST sync first.
-        // This prevents restarted nodes from entering bootstrap mode and forking.
+        // PEER GATE: Require at least 3 compatible peers before producing any blocks.
+        // This prevents a lone node from producing a chain that forks from the network,
+        // and ensures that peers with invalid/wrong-chain blocks (different genesis) are
+        // excluded from consideration since they won't appear in get_compatible_peers().
+        const MIN_PEERS_FOR_PRODUCTION: usize = 3;
+        const PEER_GATE_LOG_INTERVAL_SECS: u64 = 30;
+        const PEER_GATE_FALLBACK_SECS: u64 = 600; // 10 min — allow solo if truly isolated
+
+        {
+            let mut peer_gate_wait = 0u64;
+            tracing::info!(
+                "🔒 Peer gate: waiting for {} compatible peer(s) before block production",
+                MIN_PEERS_FOR_PRODUCTION
+            );
+            loop {
+                let compatible = block_peer_registry.get_compatible_peers().await;
+                if compatible.len() >= MIN_PEERS_FOR_PRODUCTION {
+                    tracing::info!(
+                        "🔓 Peer gate passed: {} compatible peer(s) connected (waited {}s)",
+                        compatible.len(),
+                        peer_gate_wait
+                    );
+                    break;
+                }
+
+                if peer_gate_wait >= PEER_GATE_FALLBACK_SECS {
+                    tracing::warn!(
+                        "⚠️ Peer gate timeout after {}s with only {}/{} compatible peer(s) — \
+                         proceeding solo (network may be small or starting up)",
+                        peer_gate_wait,
+                        compatible.len(),
+                        MIN_PEERS_FOR_PRODUCTION
+                    );
+                    break;
+                }
+
+                if peer_gate_wait % PEER_GATE_LOG_INTERVAL_SECS == 0 && peer_gate_wait > 0 {
+                    tracing::info!(
+                        "⏳ Peer gate: {}/{} compatible peer(s) connected ({}s elapsed, \
+                         timeout in {}s)",
+                        compatible.len(),
+                        MIN_PEERS_FOR_PRODUCTION,
+                        peer_gate_wait,
+                        PEER_GATE_FALLBACK_SECS - peer_gate_wait
+                    );
+                }
+
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                peer_gate_wait += 2;
+            }
+        }
+
+        // SYNC GATE: Now that we have peers, ensure we have fresh chain data before
+        // producing.  If we're significantly behind expected height, sync first.
         let gate_height = block_blockchain.get_height();
         let gate_expected = block_blockchain.calculate_expected_height();
         let gate_behind = gate_expected.saturating_sub(gate_height);

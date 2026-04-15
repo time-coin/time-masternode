@@ -11,7 +11,7 @@ pub mod genesis {
     pub const TESTNET_GENESIS_HASH: Option<&str> =
         Some("b9523431d4e59a1b41d757a8c0f01ed023c11123761b1455e4644ef9d5599ff6");
 
-    /// Mainnet genesis block hash — canonical hash confirmed on-chain 2026-04-15.
+    /// Mainnet genesis block hash — canonical hash for April-15 genesis with 100 TIME treasury.
     pub const MAINNET_GENESIS_HASH: Option<&str> =
         Some("45181d4c65a3a2bcc2215d037267bee4cc2248f21764466846d2b7218b601ce5");
 }

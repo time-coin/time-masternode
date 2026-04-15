@@ -1637,6 +1637,47 @@ impl Blockchain {
         );
     }
 
+    /// Check whether block 1 belongs to the correct chain by verifying its
+    /// `previous_hash` matches our genesis block's hash.
+    ///
+    /// If block 1 exists but references a different genesis (e.g. stale April-1
+    /// chain data), ALL blocks from height 1 onward are purged and the chain is
+    /// reset to height 0 so the node can resync from the correct genesis.
+    ///
+    /// Returns the number of blocks that were purged (0 = chain was already clean).
+    pub async fn purge_wrong_chain_blocks(&self) -> u64 {
+        let genesis = match self.get_block_by_height(0).await {
+            Ok(g) => g,
+            Err(_) => return 0, // no genesis yet — nothing to purge
+        };
+        let genesis_hash = genesis.hash();
+
+        let block1 = match self.get_block_by_height(1).await {
+            Ok(b) => b,
+            Err(_) => return 0, // no block 1 yet — chain is clean
+        };
+
+        if block1.header.previous_hash == genesis_hash {
+            tracing::info!(
+                "✅ [purge_wrong_chain] Block 1 correctly references our genesis ({}) — chain is clean.",
+                hex::encode(&genesis_hash[..8])
+            );
+            return 0;
+        }
+
+        let height_before = self.get_height();
+        tracing::warn!(
+            "🔁 [purge_wrong_chain] Block 1 previous_hash {} ≠ our genesis {} — \
+             wrong chain detected ({} blocks). Reverting to height 0.",
+            hex::encode(&block1.header.previous_hash[..8]),
+            hex::encode(&genesis_hash[..8]),
+            height_before
+        );
+
+        self.revert_to_after_genesis().await;
+        height_before
+    }
+
     /// Scan sled directly for any stored block (height ≥ 1) whose timestamp
     /// predates the network genesis.  Bypasses `get_block()` / block_cache
     /// entirely so deserialization failures cannot mask bad blocks.
