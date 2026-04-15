@@ -100,9 +100,11 @@ pub struct AttackDetector {
     transaction_history: Arc<RwLock<HashMap<String, TransactionTracker>>>,
     detected_attacks: Arc<RwLock<Vec<AttackPattern>>>,
     time_window: Duration,
-    /// Per-/24 subnet disconnect timestamps for SynchronizedCycling detection.
-    /// Key: subnet prefix (e.g. "154.217.246"), Value: deque of disconnect Unix timestamps.
-    subnet_disconnects: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
+    /// Per-/24 subnet disconnect events for SynchronizedCycling detection.
+    /// Key: subnet prefix (e.g. "154.217.246"), Value: deque of (Unix timestamp, IP address).
+    /// The threshold is based on UNIQUE IPs, not raw event count, so a single peer
+    /// reconnecting multiple times after an error does not trigger a false positive.
+    subnet_disconnects: Arc<RwLock<HashMap<String, VecDeque<(u64, String)>>>>,
     /// Per-IP TLS failure timestamps for TlsFlood detection.
     /// Key: IP address, Value: deque of failure Unix timestamps.
     tls_failure_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
@@ -540,10 +542,16 @@ impl AttackDetector {
         }
     }
 
-    /// Record that a masternode at `addr` disconnected. If ≥5 nodes from the same /24
-    /// subnet disconnect within 30 s, detect SynchronizedCycling and block the specific
+    /// Record that a masternode at `addr` disconnected. If ≥5 DISTINCT IPs from the same
+    /// /24 subnet disconnect within 30 s, detect SynchronizedCycling and block the specific
     /// offending IP. The whole subnet is NOT banned automatically — operators can add
     /// explicit `bansubnet=` entries in time.conf if they are certain a subnet is hostile.
+    ///
+    /// Counting is based on UNIQUE IPs, not raw disconnect events. This prevents false
+    /// positives when a single legitimate peer reconnects multiple times after a frame error
+    /// or TLS race — that looks like 5 disconnects from one IP, not 5 distinct peers. Only
+    /// a genuine coordinated storm (multiple different hosts dropping simultaneously) triggers
+    /// the threshold.
     pub fn record_synchronized_disconnect(&self, addr: &str) {
         // Extract /24 prefix (first 3 octets, e.g. "154.217.246")
         let subnet: String = addr.split('.').take(3).collect::<Vec<_>>().join(".");
@@ -557,16 +565,21 @@ impl AttackDetector {
 
         let should_ban = {
             let mut map = self.subnet_disconnects.write();
-            let timestamps = map.entry(subnet.clone()).or_default();
-            while timestamps
+            let events = map.entry(subnet.clone()).or_default();
+            // Expire events outside the window.
+            while events
                 .front()
-                .map(|t| now.saturating_sub(*t) > SYNC_WINDOW_SECS)
+                .map(|(t, _)| now.saturating_sub(*t) > SYNC_WINDOW_SECS)
                 .unwrap_or(false)
             {
-                timestamps.pop_front();
+                events.pop_front();
             }
-            timestamps.push_back(now);
-            timestamps.len() >= SYNC_THRESHOLD
+            events.push_back((now, addr.to_string()));
+            // Count UNIQUE IPs in the window — a single peer reconnecting N times
+            // must not be mistaken for N distinct attackers.
+            let unique_ips: std::collections::HashSet<&str> =
+                events.iter().map(|(_, ip)| ip.as_str()).collect();
+            unique_ips.len() >= SYNC_THRESHOLD
         };
 
         if should_ban {
