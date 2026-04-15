@@ -238,6 +238,7 @@ pub fn validate_fork_chain(
     common_ancestor_hash: Option<[u8; 32]>,
     blocks: &[Block],
     now: i64,
+    genesis_timestamp: i64,
 ) -> Result<(), String> {
     if blocks.is_empty() {
         return Err("No blocks provided for fork chain validation".to_string());
@@ -269,6 +270,14 @@ pub fn validate_fork_chain(
             return Err(format!(
                 "Block height mismatch: expected {}, got {}",
                 expected_height, block.header.height
+            ));
+        }
+
+        // Validate block timestamps are not before network genesis
+        if block.header.timestamp < genesis_timestamp {
+            return Err(format!(
+                "Block {} timestamp {} predates network genesis {} — pre-launch block rejected",
+                block.header.height, block.header.timestamp, genesis_timestamp
             ));
         }
 

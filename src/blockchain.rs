@@ -8587,6 +8587,11 @@ impl Blockchain {
                     // Fork detected - collect these blocks
                     fork_blocks.push(block.clone());
                 }
+                Err(e) if e.contains("predates network genesis") => {
+                    // Block is from before the genesis launch window — propagate the error
+                    // so the caller (handle_block_response) can disconnect and ban the peer.
+                    return Err(e);
+                }
                 Err(e) => {
                     warn!("Failed to add block {}: {}", block.header.height, e);
                 }
@@ -9653,6 +9658,38 @@ impl Blockchain {
                     *self.fork_state.write().await = ForkResolutionState::None;
                     self.consensus_peers.write().await.clear();
 
+                    // If the reorg was blocked by a pre-launch timestamp, disconnect and
+                    // ban the peer immediately so it cannot keep triggering fork resolution.
+                    if let Err(ref e) = reorg_result {
+                        if e.contains("predates network genesis") {
+                            warn!(
+                                "🚫 Peer {} supplied pre-launch chain — disconnecting and recording violation: {}",
+                                peer_addr, e
+                            );
+                            if let Some(reg) = self.peer_registry.read().await.as_ref() {
+                                reg.mark_genesis_incompatible(
+                                    &peer_addr,
+                                    "pre-launch",
+                                    "fork_chain_before_genesis",
+                                )
+                                .await;
+                            }
+                            if let Some(bl_opt) = self.blacklist.read().await.as_ref() {
+                                let bare_ip =
+                                    peer_addr.split(':').next().unwrap_or(&peer_addr);
+                                if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
+                                    bl_opt.write().await.record_violation(
+                                        ip,
+                                        &format!(
+                                            "Fork chain predates network genesis: {}",
+                                            e
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     reorg_result
                 }
             }
@@ -9764,6 +9801,7 @@ impl Blockchain {
             ancestor_hash,
             &alternate_blocks,
             now,
+            self.genesis_timestamp,
         )?;
 
         // REWARD-HIJACK PRE-FLIGHT: validate reward distribution on ALL new blocks
