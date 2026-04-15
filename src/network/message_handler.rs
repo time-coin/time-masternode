@@ -6135,6 +6135,38 @@ impl MessageHandler {
                         self.peer_ip
                     ));
                 }
+                Err(e) if e.contains("exceeds maximum expected height") => {
+                    // PRE-LAUNCH BLOCK: peer sent a block that was produced before genesis time.
+                    // This peer has an invalid chain — mark incompatible and disconnect immediately.
+                    warn!(
+                        "🚫 [{}] Pre-launch block {} from {} rejected (batch): {}",
+                        self.direction, block.header.height, self.peer_ip, e
+                    );
+                    context
+                        .peer_registry
+                        .mark_genesis_incompatible(
+                            &self.peer_ip,
+                            "pre-launch",
+                            &format!("height_{}_before_genesis", block.header.height),
+                        )
+                        .await;
+                    if let Some(blacklist) = &context.blacklist {
+                        let bare_ip = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
+                        if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
+                            blacklist.write().await.record_violation(
+                                ip,
+                                &format!(
+                                    "Sent pre-launch block batch (height {}): {}",
+                                    block.header.height, e
+                                ),
+                            );
+                        }
+                    }
+                    return Err(format!(
+                        "DISCONNECT: peer {} sent pre-launch block batch (height {}): {}",
+                        self.peer_ip, block.header.height, e
+                    ));
+                }
                 Err(e) => {
                     warn!(
                         "❌ [{}] Failed to add block {} from {}: {}",
