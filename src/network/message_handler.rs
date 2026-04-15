@@ -2402,7 +2402,9 @@ impl MessageHandler {
                         "Peer {} permanently banned: sent reward-hijacking block {}",
                         self.peer_ip, block_height
                     ));
-                } else if e.contains("exceeds maximum expected height") {
+                } else if e.contains("exceeds maximum expected height")
+                    || e.contains("produced too early by")
+                {
                     // Block is from before the genesis launch window — peer is on a
                     // pre-launch chain.  Mark incompatible, record a violation, and
                     // disconnect immediately.
@@ -6135,7 +6137,9 @@ impl MessageHandler {
                         self.peer_ip
                     ));
                 }
-                Err(e) if e.contains("exceeds maximum expected height") => {
+                Err(e) if e.contains("exceeds maximum expected height")
+                    || e.contains("produced too early by") =>
+                {
                     // PRE-LAUNCH BLOCK: peer sent a block that was produced before genesis time.
                     // This peer has an invalid chain — mark incompatible and disconnect immediately.
                     warn!(
