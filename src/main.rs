@@ -1071,36 +1071,20 @@ async fn main() {
     // ── END PRE-LAUNCH HEIGHT GUARD ───────────────────────────────────────────
 
     // ── PRE-GENESIS BLOCK SCAN ────────────────────────────────────────────────
-    // Scan every stored block for timestamps that predate the network genesis.
-    // The height guard above only fires for heights that exceed the current slot,
-    // but a stored block at a plausible height (e.g. block 1 on mainnet stored
-    // before genesis day) with a pre-genesis timestamp slips through.  Roll back
-    // to before the first offending block so the node resyncs the correct chain.
+    // Scan sled directly for any block (height ≥ 1) whose timestamp predates
+    // genesis.  Uses scan_prefix("block_") so every stored block is checked
+    // regardless of deserialization quirks or block_cache state.
     {
-        let stored_height = blockchain.get_height();
-        let genesis_ts = blockchain.genesis_timestamp();
-        let mut first_bad: Option<u64> = None;
-        for h in 1..=stored_height {
-            if let Ok(block) = blockchain.get_block(h) {
-                if block.header.timestamp < genesis_ts {
-                    tracing::warn!(
-                        "🚫 Startup scan: block {} timestamp {} predates genesis {} (early by {}s). \
-                         Rolling back.",
-                        h, block.header.timestamp, genesis_ts,
-                        genesis_ts - block.header.timestamp
-                    );
-                    eprintln!(
-                        "⚠️  Block {} has pre-genesis timestamp — rolling back stored chain.",
-                        h
-                    );
-                    first_bad = Some(h);
-                    break;
-                }
-            }
-        }
-        if first_bad.is_some() {
-            blockchain.revert_to_after_genesis().await;
-            tracing::info!("✅ Pre-genesis scan rollback complete — chain reset to height 0.");
+        let purged = blockchain.purge_pre_genesis_blocks().await;
+        if purged > 0 {
+            tracing::info!(
+                "✅ Startup purge complete — removed {} pre-genesis block(s), chain reset to height 0.",
+                purged
+            );
+            eprintln!(
+                "⚠️  Removed {} pre-genesis block(s) from sled — chain reset to height 0, will resync.",
+                purged
+            );
         }
     }
     // ── END PRE-GENESIS BLOCK SCAN ────────────────────────────────────────────
@@ -1578,30 +1562,20 @@ async fn main() {
                     tokio::select! {
                         _ = integrity_shutdown.cancelled() => break,
                         _ = interval.tick() => {
-                            let genesis_ts = integrity_blockchain.genesis_timestamp();
+                        let genesis_ts = integrity_blockchain.genesis_timestamp();
                             let stored_height = integrity_blockchain.get_height();
                             if stored_height == 0 {
                                 continue;
                             }
-                            // Check the first stored non-genesis block — if its
-                            // timestamp predates genesis the whole chain is invalid.
-                            if let Ok(block1) = integrity_blockchain.get_block(1) {
-                                if block1.header.timestamp < genesis_ts {
-                                    tracing::warn!(
-                                        "🔄 Runtime integrity check: block 1 timestamp {} \
-                                         predates genesis {} (early by {}s) — \
-                                         auto-reverting chain to height 0.",
-                                        block1.header.timestamp,
-                                        genesis_ts,
-                                        genesis_ts - block1.header.timestamp,
-                                    );
-                                    integrity_blockchain.revert_to_after_genesis().await;
-                                    tracing::info!(
-                                        "✅ Runtime chain revert complete — \
-                                         waiting for peers to supply fresh blocks."
-                                    );
-                                }
+                            let purged = integrity_blockchain.purge_pre_genesis_blocks().await;
+                            if purged > 0 {
+                                tracing::info!(
+                                    "✅ Runtime integrity: purged {} pre-genesis block(s), \
+                                     chain reset to height 0.",
+                                    purged
+                                );
                             }
+                            let _ = genesis_ts; // suppress unused warning
                         }
                     }
                 }

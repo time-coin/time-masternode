@@ -1637,6 +1637,89 @@ impl Blockchain {
         );
     }
 
+    /// Scan sled directly for any stored block (height ≥ 1) whose timestamp
+    /// predates the network genesis.  Bypasses `get_block()` / block_cache
+    /// entirely so deserialization failures cannot mask bad blocks.
+    ///
+    /// If pre-genesis blocks are found, calls `revert_to_after_genesis()` and
+    /// returns the number of deleted blocks.  Returns 0 if the chain is clean.
+    pub async fn purge_pre_genesis_blocks(&self) -> u64 {
+        let genesis_ts = self.genesis_timestamp();
+        let mut found: Vec<(u64, i64)> = Vec::new(); // (height, timestamp)
+
+        for result in self.storage.scan_prefix("block_") {
+            let (key_bytes, raw_value) = match result {
+                Ok(pair) => pair,
+                Err(_) => continue,
+            };
+
+            // Extract height from key "block_<N>"
+            let key_str = match std::str::from_utf8(&key_bytes) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let height: u64 = match key_str.strip_prefix("block_").and_then(|s| s.parse().ok()) {
+                Some(h) => h,
+                None => continue,
+            };
+            if height == 0 {
+                continue; // genesis block is always valid
+            }
+
+            // Decompress if needed
+            let data = match crate::storage::decompress_block(&raw_value) {
+                Ok(d) => d,
+                Err(_) => {
+                    tracing::warn!(
+                        "⚠️  [purge_pre_genesis] Block {} failed decompression — treating as invalid",
+                        height
+                    );
+                    found.push((height, 0));
+                    continue;
+                }
+            };
+
+            // Try current format first, then legacy
+            let timestamp: i64 = if let Ok(block) = bincode::deserialize::<Block>(&data) {
+                block.header.timestamp
+            } else if let Some(block) =
+                crate::network::wire::deserialize_legacy_block(&data)
+            {
+                block.header.timestamp
+            } else {
+                tracing::warn!(
+                    "⚠️  [purge_pre_genesis] Block {} failed deserialization — treating as invalid",
+                    height
+                );
+                0 // treat unreadable blocks as pre-genesis (timestamp 0 < any real genesis)
+            };
+
+            if timestamp < genesis_ts {
+                tracing::warn!(
+                    "🚫 [purge_pre_genesis] Block {} has timestamp {} which predates genesis {} \
+                     (early by {}s) — will purge",
+                    height,
+                    timestamp,
+                    genesis_ts,
+                    genesis_ts - timestamp,
+                );
+                found.push((height, timestamp));
+            }
+        }
+
+        if found.is_empty() {
+            tracing::info!("✅ [purge_pre_genesis] No pre-genesis blocks found in sled.");
+            return 0;
+        }
+
+        tracing::warn!(
+            "🔁 [purge_pre_genesis] Found {} pre-genesis block(s) in sled — reverting chain to height 0.",
+            found.len()
+        );
+        self.revert_to_after_genesis().await;
+        found.len() as u64
+    }
+
     /// Return the current BFT confirmed height.
     pub fn get_confirmed_height(&self) -> u64 {
         self.last_locally_confirmed_height.load(Ordering::Acquire)
