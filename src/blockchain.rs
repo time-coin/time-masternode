@@ -1622,6 +1622,12 @@ impl Blockchain {
             tracing::error!("❌ Failed to clear UTXOs during genesis revert: {:?}", e);
         }
 
+        // Clear the in-memory block cache. The startup scan reads blocks into the
+        // cache before calling this function; any pre-genesis blocks still in cache
+        // would let stale "already exists" checks pass and corrupt prev-hash lookups
+        // even after sled keys have been removed.
+        self.block_cache.clear();
+
         let _ = self.storage.flush();
 
         tracing::info!(
