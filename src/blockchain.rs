@@ -6935,19 +6935,37 @@ impl Blockchain {
         // Reject blocks produced before their scheduled time.
         // Expected earliest time = genesis_timestamp + (height * BLOCK_TIME_SECONDS).
         // Allow 30s grace for minor clock skew between nodes.
-        // Only enforce for recent blocks (within 10 of chain tip) — historical blocks
-        // during sync may have been produced under different timing rules.
+        //
+        // UNCONDITIONAL: always reject if the block timestamp is more than 1 hour before
+        // its scheduled slot — no "historical sync" exemption for severe violations.
+        // This closes the pre-launch chain attack: blocks timestamped days before their
+        // slot (e.g. April 1 blocks for April 15 slots) are rejected in all code paths.
+        //
+        // CONDITIONAL: for minor timing violations (30s–3600s early), only enforce for
+        // recent blocks (within 10 of chain tip) to allow historical sync of blocks
+        // that were produced under slightly different timing rules.
         let chain_tip = self.current_height.load(Ordering::Acquire);
         let block_expected_time =
             genesis_timestamp + (block.header.height as i64 * BLOCK_TIME_SECONDS);
-        if block.header.height + 10 > chain_tip && block.header.timestamp < block_expected_time - 30
-        {
+        let early_by = block_expected_time.saturating_sub(block.header.timestamp);
+        if early_by > 3600 {
+            // More than 1 hour early — unconditional rejection (pre-launch chain or fraud)
             return Err(format!(
                 "Block {} timestamp {} is before its scheduled time {} (produced too early by {}s)",
                 block.header.height,
                 block.header.timestamp,
                 block_expected_time,
-                block_expected_time - block.header.timestamp
+                early_by
+            ));
+        }
+        if block.header.height + 10 > chain_tip && early_by > 30 {
+            // Minor timing violation — only enforce for recent blocks
+            return Err(format!(
+                "Block {} timestamp {} is before its scheduled time {} (produced too early by {}s)",
+                block.header.height,
+                block.header.timestamp,
+                block_expected_time,
+                early_by
             ));
         }
 
