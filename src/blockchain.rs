@@ -4211,7 +4211,25 @@ impl Blockchain {
         // CRITICAL: Also require at least MIN_AGREEING_PEERS peers confirming they're
         // on our chain. A solo node must NOT produce blocks just because it has the
         // "longest chain" — it needs confirmation from others.
-        const MIN_AGREEING_PEERS: u32 = 2;
+        //
+        // LIVENESS EXCEPTION: When the chain is significantly stalled (>2x block time
+        // past schedule), reduce to 1. This covers the bootstrap scenario where most
+        // peers have an old chain and haven't rolled back yet — without this, the first
+        // good node can never produce even when it's clearly the only valid chain.
+        let seconds_past_schedule = {
+            let expected_ts = self.genesis_timestamp()
+                + (our_height as i64 + 1) * crate::constants::blockchain::BLOCK_TIME_SECONDS;
+            let now = chrono::Utc::now().timestamp();
+            (now - expected_ts).max(0) as u64
+        };
+        let min_agreeing_peers_threshold = if seconds_past_schedule > crate::constants::blockchain::BLOCK_TIME_SECONDS as u64 * 2 {
+            1u32
+        } else {
+            2u32
+        };
+        const MIN_AGREEING_PEERS: u32 = 0; // unused sentinel — use min_agreeing_peers_threshold
+        let _ = MIN_AGREEING_PEERS; // suppress unused warning
+        let min_agreeing = min_agreeing_peers_threshold;
         let max_peer_height = peer_states.iter().map(|(_, h, _, _)| *h).max().unwrap_or(0);
         if max_peer_height <= our_height {
             let fork_at_our_height = peer_states
@@ -4223,7 +4241,7 @@ impl Blockchain {
                     our_height
                 );
                 // Fall through to weighted agreement check below
-            } else if peers_agreeing >= MIN_AGREEING_PEERS {
+            } else if peers_agreeing >= min_agreeing {
                 tracing::debug!(
                     "✅ Block production allowed: longest chain rule (our height {} >= max peer height {}, {} peers agree, no fork)",
                     our_height,
@@ -4236,7 +4254,7 @@ impl Blockchain {
                     "⚠️ Block production blocked: only {} peers agree (need {} minimum). \
                      Cannot produce blocks without peer confirmation.",
                     peers_agreeing,
-                    MIN_AGREEING_PEERS
+                    min_agreeing
                 );
                 return false;
             }
@@ -4310,7 +4328,7 @@ impl Blockchain {
         // Prevents a single high-weight node from enabling block production.
         // "3 nodes in sync" = us + at least 2 agreeing peers.
         // (MIN_AGREEING_PEERS declared above at the longest-chain-rule check)
-        let enough_peers_in_sync = peers_agreeing >= MIN_AGREEING_PEERS;
+        let enough_peers_in_sync = peers_agreeing >= min_agreeing;
 
         if has_consensus && enough_peers_in_sync {
             tracing::debug!(
@@ -4341,7 +4359,7 @@ impl Blockchain {
                     "⚠️ Block production blocked: only {} peers in sync at height {} (need at least {} for 3-node minimum)",
                     peers_agreeing,
                     our_height,
-                    MIN_AGREEING_PEERS
+                    min_agreeing
                 );
             }
             // Log detailed peer state for diagnostics (rate limited to once per minute)
