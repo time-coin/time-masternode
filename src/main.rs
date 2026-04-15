@@ -1816,11 +1816,12 @@ async fn main() {
                     }
                 }
 
-                // Register the new collateral if conf has one (only for paid tiers)
+                // Register the new collateral if conf has one.
+                // NOTE: Do NOT gate on mn_for_sync.tier here — it may be provisionally
+                // Free if the UTXO lookup failed at startup (chain not yet synced).
+                // conf_outpoint.is_some() is the correct guard for paid-tier registration.
                 if let Some(ref new_outpoint_str) = conf_outpoint {
-                    if on_chain_outpoint.as_deref() != Some(new_outpoint_str.as_str())
-                        && mn_for_sync.tier != types::MasternodeTier::Free
-                    {
+                    if on_chain_outpoint.as_deref() != Some(new_outpoint_str.as_str()) {
                         // Before attempting submission, verify that the node's hot wallet key
                         // actually owns the collateral UTXO. The on-chain MasternodeReg
                         // requires a signature from the key whose address matches utxo.address.
@@ -1913,7 +1914,14 @@ async fn main() {
                 // FREE_TIER_ONCHAIN_HEIGHT eligibility for block rewards requires a
                 // FreeNodeRegistration TX in the chain.  Submit one automatically on
                 // first startup so operators don't need to take any manual action.
+                //
+                // IMPORTANT: conf_outpoint.is_none() guard prevents a paid-tier node
+                // from submitting a Free registration when its tier was provisionally
+                // set to Free at startup because the UTXO lookup failed (chain not
+                // yet synced).  Without this guard the node would overwrite its own
+                // on-chain paid-tier registration with a Free-tier one.
                 if mn_for_sync.tier == types::MasternodeTier::Free
+                    && conf_outpoint.is_none()
                     && !collateral_sync_blockchain.is_free_tier_registered(ip)
                 {
                     tracing::info!(

@@ -51,9 +51,10 @@
 #   --fail-threshold N       Consecutive confirmed "not active" readings before restart (default: 3)
 #   --restart-cooldown N     Min seconds between restarts (default: 60)
 #   --startup-grace N        Seconds to wait after watchdog launches before monitoring (default: 3)
-#   --rpc-timeout N          Seconds to wait for time-cli RPC response (default: 8)
-#   --rpc-busy-max N         Consecutive RPC timeouts while daemon is logging before restart (default: 10)
-#   --daemon-active-secs N   Consider daemon alive if it logged within this many seconds (default: 90)
+#   --post-restart-grace N   Seconds to skip polling after each restart while daemon initializes (default: 20)
+#   --rpc-timeout N          Seconds to wait for time-cli RPC response (default: 5)
+#   --rpc-busy-max N         Consecutive RPC timeouts while daemon is logging before restart (default: 5)
+#   --daemon-active-secs N   Consider daemon alive if it logged within this many seconds (default: 60)
 #   --dry-run                Log what would happen but do not restart
 #   -h, --help               Show this help
 
@@ -64,9 +65,10 @@ POLL_INTERVAL=3
 FAIL_THRESHOLD=3       # confirmed "not active" RPC responses before restart
 RESTART_COOLDOWN=60
 STARTUP_GRACE=3
-RPC_TIMEOUT=8          # seconds to wait for time-cli before treating as failure
-RPC_BUSY_MAX=10        # consecutive timeouts while daemon is still logging → restart
-DAEMON_ACTIVE_SECS=90  # consider daemon alive if it logged within this many seconds
+POST_RESTART_GRACE=20  # seconds to skip polling after each restart (daemon init time)
+RPC_TIMEOUT=5          # seconds to wait for time-cli before treating as failure
+RPC_BUSY_MAX=5         # consecutive timeouts while daemon is still logging → restart
+DAEMON_ACTIVE_SECS=60  # consider daemon alive if it logged within this many seconds
 DRY_RUN=0
 NETWORK="mainnet"
 
@@ -84,6 +86,7 @@ while [[ $# -gt 0 ]]; do
         --fail-threshold)     FAIL_THRESHOLD="$2"; shift 2 ;;
         --restart-cooldown)   RESTART_COOLDOWN="$2"; shift 2 ;;
         --startup-grace)      STARTUP_GRACE="$2"; shift 2 ;;
+        --post-restart-grace) POST_RESTART_GRACE="$2"; shift 2 ;;
         --rpc-timeout)        RPC_TIMEOUT="$2"; shift 2 ;;
         --rpc-busy-max)       RPC_BUSY_MAX="$2"; shift 2 ;;
         --daemon-active-secs) DAEMON_ACTIVE_SECS="$2"; shift 2 ;;
@@ -126,7 +129,7 @@ fi
 CLI_CMD="$CLI"
 [ "$NETWORK" = "testnet" ] && CLI_CMD="$CLI --testnet"
 
-log "Starting ($NETWORK) | poll=${POLL_INTERVAL}s fail-threshold=${FAIL_THRESHOLD} cooldown=${RESTART_COOLDOWN}s grace=${STARTUP_GRACE}s rpc-timeout=${RPC_TIMEOUT}s busy-max=${RPC_BUSY_MAX} daemon-active-secs=${DAEMON_ACTIVE_SECS} dry-run=${DRY_RUN}"
+log "Starting ($NETWORK) | poll=${POLL_INTERVAL}s fail-threshold=${FAIL_THRESHOLD} cooldown=${RESTART_COOLDOWN}s grace=${STARTUP_GRACE}s post-restart-grace=${POST_RESTART_GRACE}s rpc-timeout=${RPC_TIMEOUT}s busy-max=${RPC_BUSY_MAX} daemon-active-secs=${DAEMON_ACTIVE_SECS} dry-run=${DRY_RUN}"
 log "Using CLI: $CLI_CMD"
 
 # ── State ──────────────────────────────────────────────────────────────────────
@@ -134,6 +137,7 @@ fail_streak=0           # consecutive confirmed "not active" RPC responses
 rpc_busy_streak=0       # consecutive RPC timeouts while daemon is still logging
 last_restart_ts=0       # unix timestamp of last restart we triggered
 total_restarts=0
+cooldown_logged=0       # suppress repeated "cooldown active" log spam
 watchdog_start_ts=$(date +%s)   # used for one-time startup grace
 
 # ── Check if timed has logged recently (daemon alive but possibly busy) ────────
@@ -217,7 +221,17 @@ while true; do
         since_last=$(( now - last_restart_ts ))
         if [ "$since_last" -lt "$RESTART_COOLDOWN" ]; then
             remaining=$(( RESTART_COOLDOWN - since_last ))
-            logw "Threshold reached but restart cooldown active (${remaining}s remaining) — waiting"
+            # Log once when cooldown starts, then again at 50% and final 5s — not every poll.
+            if [ "$cooldown_logged" -eq 0 ]; then
+                logw "Threshold reached — restart cooldown active (~${remaining}s remaining)"
+                cooldown_logged=1
+            elif [ "$remaining" -le $(( RESTART_COOLDOWN / 2 )) ] && [ "$cooldown_logged" -eq 1 ]; then
+                logw "Restart cooldown: ${remaining}s remaining"
+                cooldown_logged=2
+            elif [ "$remaining" -le 5 ] && [ "$cooldown_logged" -ge 1 ]; then
+                logw "Restart cooldown almost expired: ${remaining}s remaining"
+                cooldown_logged=3
+            fi
             continue
         fi
         # Cooldown expired — fall through to restart block below.
@@ -242,6 +256,7 @@ while true; do
                 fi
             fi
             last_restart_ts=$now
+            cooldown_logged=0
         else
             remaining=$(( RESTART_COOLDOWN - since_last ))
             logw "timed is not active — restart cooldown active (${remaining}s remaining)"
@@ -260,6 +275,22 @@ while true; do
         log "Startup grace (watchdog age ${watchdog_age}s, grace=${STARTUP_GRACE}s, ${remaining}s remaining)"
         fail_streak=0
         continue
+    fi
+
+    # 2b. Post-restart grace: after each restart give the daemon time to initialize
+    #     before we start polling.  Emits a single log line on entry and skips RPC
+    #     calls until the grace window expires, avoiding silent rpc_busy_streak
+    #     burn-down and false "unresponsive" log noise.
+    if [ "$last_restart_ts" -gt 0 ]; then
+        since_restart=$(( $(date +%s) - last_restart_ts ))
+        if [ "$since_restart" -lt "$POST_RESTART_GRACE" ]; then
+            remaining=$(( POST_RESTART_GRACE - since_restart ))
+            # Log only once when entering grace (first poll after restart)
+            if [ "$remaining" -ge $(( POST_RESTART_GRACE - POLL_INTERVAL - 1 )) ]; then
+                log "⏸️ Post-restart grace: waiting ${POST_RESTART_GRACE}s for daemon to initialize"
+            fi
+            continue
+        fi
     fi
 
     # 3. Query masternodestatus — with hard timeout so a dead RPC socket
@@ -358,5 +389,6 @@ while true; do
 
         last_restart_ts=$now
         fail_streak=0
+        cooldown_logged=0
     fi
 done
