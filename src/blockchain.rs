@@ -9041,6 +9041,32 @@ impl Blockchain {
                 // integrity) already protects against fabricated chains.
                 if peer_tip_height <= our_height {
                     const MIN_PEERS_FOR_ONDEMAND_FORK: usize = 3;
+
+                    // Liveness escape: if the slot for our next block is more than
+                    // 2× BLOCK_TIME overdue, the network is fragmented (e.g. many peers
+                    // were invalidated by the pre-launch detection). Drop the peer-agreement
+                    // requirement to 1 so the hash-tiebreaker can still resolve same-height
+                    // forks instead of deadlocking indefinitely. Block validation (sigs,
+                    // timestamps, chain integrity) still protects against fabricated chains.
+                    let seconds_past_schedule = {
+                        let expected_ts = self.genesis_timestamp()
+                            + (our_height as i64 + 1)
+                                * crate::constants::blockchain::BLOCK_TIME_SECONDS;
+                        let now = chrono::Utc::now().timestamp();
+                        (now - expected_ts).max(0) as u64
+                    };
+                    let effective_min_peers =
+                        if seconds_past_schedule > crate::constants::blockchain::BLOCK_TIME_SECONDS as u64 * 2 {
+                            info!(
+                                "⚡ Fork liveness escape: {}s past schedule at height {}, \
+                                lowering on-demand fork peer threshold from {} to 1",
+                                seconds_past_schedule, our_height, MIN_PEERS_FOR_ONDEMAND_FORK
+                            );
+                            1usize
+                        } else {
+                            MIN_PEERS_FOR_ONDEMAND_FORK
+                        };
+
                     if let Some(registry) = self.get_peer_registry().await {
                         let compatible_peers = registry.get_compatible_peers().await;
                         let mut supporting_peers = 0usize;
@@ -9062,15 +9088,15 @@ impl Blockchain {
                         // testnet, post-partition with few nodes), requiring MIN_PEERS support
                         // creates a permanent deadlock: no side has enough visible peers so
                         // same-height forks never resolve via the hash tiebreaker.
-                        if total_checked >= MIN_PEERS_FOR_ONDEMAND_FORK
-                            && supporting_peers < MIN_PEERS_FOR_ONDEMAND_FORK
+                        if total_checked >= effective_min_peers
+                            && supporting_peers < effective_min_peers
                         {
                             info!(
                                 "🛡️ On-demand fork REJECTED: only {}/{} peers support peer tip \
                                 (need {}). Single-peer fork attempt from {}",
                                 supporting_peers,
                                 total_checked,
-                                MIN_PEERS_FOR_ONDEMAND_FORK,
+                                effective_min_peers,
                                 peer_addr
                             );
                             *self.fork_state.write().await = ForkResolutionState::None;
