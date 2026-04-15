@@ -208,7 +208,7 @@ impl GenesisBlock {
                 vrf_proof: vec![],
                 vrf_score: 0,
                 producer_signature: vec![],
-                treasury_balance: 500_000_000, // 5 TIME first deposit
+                treasury_balance: 10_000_000_000, // 100 TIME first deposit (matches block_reward)
             },
             transactions: vec![],
             masternode_rewards: vec![], // full reward to treasury pool; no masternode distribution
@@ -355,7 +355,7 @@ mod tests {
         let genesis = GenesisBlock::mainnet_genesis();
         let hash = hex::encode(genesis.hash());
         assert_eq!(
-            hash, "8a0ab678e57681eeca587fe1133bccc84d81ed7f04460fa96cc3a7697e19f36f",
+            hash, "45181d4c65a3a2bcc2215d037267bee4cc2248f21764466846d2b7218b601ce5",
             "Hardcoded mainnet genesis must produce the canonical checkpoint hash"
         );
         assert!(GenesisBlock::verify_structure(&genesis).is_ok());

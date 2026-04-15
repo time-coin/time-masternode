@@ -13,7 +13,7 @@ pub mod genesis {
 
     /// Mainnet genesis block hash — canonical hash confirmed on-chain 2026-04-15.
     pub const MAINNET_GENESIS_HASH: Option<&str> =
-        Some("8a0ab678e57681eeca587fe1133bccc84d81ed7f04460fa96cc3a7697e19f36f");
+        Some("45181d4c65a3a2bcc2215d037267bee4cc2248f21764466846d2b7218b601ce5");
 }
 
 /// Storage schema version. Increment whenever on-disk serialization changes

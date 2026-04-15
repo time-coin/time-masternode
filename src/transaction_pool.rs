@@ -50,7 +50,7 @@ pub enum PoolError {
 /// Transaction pool manages pending and confirmed transactions.
 ///
 /// ## Lifecycle
-/// ```
+/// ```text
 /// submit → pending
 ///   ↓  (67% TimeVote threshold — SpentFinalized)
 /// confirmed   ← invisible to mempool display; ready for block archival
