@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tokio::sync::RwLock as TokioRwLock;
+use tokio::sync::{Notify, RwLock as TokioRwLock};
 
 // Resource limits to prevent DOS attacks
 const MAX_MEMPOOL_TRANSACTIONS: usize = 10_000;
@@ -733,6 +733,11 @@ pub struct TimeVoteConsensus {
     /// Saved before cleanup so block production can reference previous block's voters
     last_block_voters: DashMap<Hash256, Vec<String>>,
 
+    /// Notified whenever a prepare or precommit vote is accumulated.
+    /// Allows the block producer to react immediately when consensus is reached
+    /// rather than sleeping until the fixed timeout expires.
+    pub vote_notify: Arc<Notify>,
+
     /// Metrics
     rounds_executed: AtomicUsize,
     txs_finalized: AtomicUsize,
@@ -785,6 +790,7 @@ impl TimeVoteConsensus {
             active_vote_requests: Arc::new(AtomicUsize::new(0)),
             rounds_executed: AtomicUsize::new(0),
             txs_finalized: AtomicUsize::new(0),
+            vote_notify: Arc::new(Notify::new()),
             fallback_activations: AtomicUsize::new(0),
             stall_detections: AtomicUsize::new(0),
             timelock_resolutions: AtomicUsize::new(0),
@@ -1427,6 +1433,9 @@ impl TimeVoteConsensus {
             voter_id,
             current_weight
         );
+
+        // Wake any tasks waiting for vote progress (e.g. block producer)
+        self.vote_notify.notify_waiters();
     }
 
     /// Check if prepare consensus reached (Phase 3D.2)
@@ -1499,6 +1508,9 @@ impl TimeVoteConsensus {
             voter_id,
             current_weight
         );
+
+        // Wake any tasks waiting for vote progress (e.g. block producer)
+        self.vote_notify.notify_waiters();
     }
 
     /// Check if precommit consensus reached (Phase 3E.2)

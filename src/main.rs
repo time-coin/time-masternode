@@ -4059,16 +4059,39 @@ async fn main() {
                     };
 
                     let block_signal = block_blockchain.block_added_signal();
+                    let vote_notify = block_consensus_engine.timevote.vote_notify.clone();
 
-                    // Wait for either: block added (via signal) or timeout
+                    // Wait for: block committed by message handler (full BFT path),
+                    // precommit majority reached via vote accumulation (event-driven early
+                    // exit), or timeout (solo fallback when peers don't participate).
+                    // The select! wakes immediately on any vote arrival so consensus
+                    // completes without sleeping through the full timeout when votes are
+                    // flowing normally.
                     let consensus_reached = tokio::time::timeout(consensus_timeout, async {
                         loop {
-                            block_signal.notified().await;
-                            // Check if OUR block was the one added
-                            if block_blockchain.get_height() >= block_height {
-                                return true;
+                            tokio::select! {
+                                _ = block_signal.notified() => {
+                                    // Check if OUR block was the one added
+                                    if block_blockchain.get_height() >= block_height {
+                                        return true;
+                                    }
+                                    // Signal was for a different block, keep waiting
+                                }
+                                _ = vote_notify.notified() => {
+                                    if block_blockchain.get_height() >= block_height {
+                                        // Already added (race with block_signal path)
+                                        return true;
+                                    }
+                                    if block_consensus_engine
+                                        .timevote
+                                        .check_precommit_consensus(block_hash)
+                                    {
+                                        // Precommit majority reached — caller adds block
+                                        return false;
+                                    }
+                                    // Not enough votes yet, keep waiting
+                                }
                             }
-                            // Signal was for a different block, keep waiting
                         }
                     })
                     .await;
@@ -4080,7 +4103,44 @@ async fn main() {
                                 .timevote
                                 .cleanup_block_votes(block_hash);
                         }
-                        _ => {
+                        Ok(false) => {
+                            // Event-driven: precommit majority accumulated before the
+                            // message handler completed its own add_block call.
+                            let current_height = block_blockchain.get_height();
+                            if current_height >= block_height {
+                                tracing::debug!(
+                                    "✅ Block {} already finalized (chain at {}), skipping vote-majority add",
+                                    block_height,
+                                    current_height
+                                );
+                            } else {
+                                tracing::info!(
+                                    "⚡ Block {} adding via vote majority (precommit consensus reached)",
+                                    block_height
+                                );
+                                if let Err(e) =
+                                    block_blockchain.add_block(block.clone()).await
+                                {
+                                    tracing::error!(
+                                        "❌ Failed to add block via vote majority: {}",
+                                        e
+                                    );
+                                } else {
+                                    let finalized_msg = crate::network::message::NetworkMessage::TimeLockBlockProposal {
+                                        block: block.clone(),
+                                    };
+                                    block_peer_registry.broadcast(finalized_msg).await;
+                                    tracing::info!(
+                                        "✅ Block {} added via vote majority, broadcast to peers",
+                                        block_height
+                                    );
+                                }
+                            }
+                            block_consensus_engine
+                                .timevote
+                                .cleanup_block_votes(block_hash);
+                        }
+                        Err(_) => {
                             // Timeout — check if block was already finalized
                             let current_height = block_blockchain.get_height();
                             if current_height >= block_height {
@@ -4125,7 +4185,17 @@ async fn main() {
                                 // ≤2 so solo fallback is allowed.  This preserves safety for
                                 // normal operation while restoring liveness when the voting
                                 // quorum is permanently unavailable.
-                                let effective_validator_count = if leader_attempt >= 15 {
+                                //
+                                // CATCH-UP OVERRIDE: when far behind (>50 blocks), allow solo
+                                // fallback immediately after the 2s consensus timeout. Votes from
+                                // peers validating the same block are not reliable when many
+                                // nodes are running old code and don't participate in BFT voting.
+                                // The VRF leader election already proves this node was selected;
+                                // near-tip safety checks (check_2_3_consensus_cached, blocks_behind≤10)
+                                // still apply once the chain is close to expected height.
+                                let effective_validator_count = if leader_attempt >= 15
+                                    || blocks_behind > 50
+                                {
                                     validator_count.min(2)
                                 } else {
                                     validator_count
@@ -4207,7 +4277,7 @@ async fn main() {
                             count
                         };
 
-                        if peers_at_our_height < two_thirds {
+                        if peers_at_our_height < two_thirds && blocks_behind <= 50 {
                             // Slower peers are behind — wait for 2/3 to catch up
                             let tip_signal = block_peer_registry.chain_tip_updated_signal();
                             let _ =
