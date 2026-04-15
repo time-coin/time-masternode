@@ -2406,26 +2406,21 @@ impl MessageHandler {
                     || e.contains("produced too early by")
                     || e.contains("predates network genesis")
                 {
-                    // Block is from before the genesis launch window — peer is on a
-                    // pre-launch chain.  Mark incompatible, record a violation, and
-                    // disconnect immediately.
+                    // Block predates the genesis launch window — peer is still on the
+                    // old pre-launch chain.  Apply a 1-hour temporary ban so we stop
+                    // wasting reconnect cycles while the peer updates, but allow them
+                    // back once they've self-healed.  No permanent ban, no
+                    // genesis-incompatible marking.
                     warn!(
-                        "🚫 [{}] Pre-launch block {} from {} — disconnecting ({})",
+                        "🚫 [{}] Pre-launch block {} from {} — 1-hour temp ban ({})",
                         self.direction, block_height, self.peer_ip, e
                     );
-                    context
-                        .peer_registry
-                        .mark_genesis_incompatible(
-                            &self.peer_ip,
-                            "pre-launch",
-                            &format!("block_{}_before_genesis", block_height),
-                        )
-                        .await;
                     if let Some(blacklist) = &context.blacklist {
                         let bare_ip = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
                         if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
-                            blacklist.write().await.record_violation(
+                            blacklist.write().await.add_temp_ban(
                                 ip,
+                                std::time::Duration::from_secs(3600),
                                 &format!("Sent pre-launch block {}: {}", block_height, e),
                             );
                         }
@@ -6142,25 +6137,18 @@ impl MessageHandler {
                     || e.contains("produced too early by")
                     || e.contains("predates network genesis") =>
                 {
-                    // PRE-LAUNCH BLOCK: peer sent a block that was produced before genesis time.
-                    // This peer has an invalid chain — mark incompatible and disconnect immediately.
+                    // Block predates the genesis launch window — 1-hour temp ban then
+                    // allow reconnect once the peer self-heals.  No permanent ban.
                     warn!(
-                        "🚫 [{}] Pre-launch block {} from {} rejected (batch): {}",
+                        "🚫 [{}] Pre-launch block {} from {} rejected — 1-hour temp ban: {}",
                         self.direction, block.header.height, self.peer_ip, e
                     );
-                    context
-                        .peer_registry
-                        .mark_genesis_incompatible(
-                            &self.peer_ip,
-                            "pre-launch",
-                            &format!("height_{}_before_genesis", block.header.height),
-                        )
-                        .await;
                     if let Some(blacklist) = &context.blacklist {
                         let bare_ip = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
                         if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
-                            blacklist.write().await.record_violation(
+                            blacklist.write().await.add_temp_ban(
                                 ip,
+                                std::time::Duration::from_secs(3600),
                                 &format!(
                                     "Sent pre-launch block batch (height {}): {}",
                                     block.header.height, e

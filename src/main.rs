@@ -1561,6 +1561,55 @@ async fn main() {
         });
         shutdown_manager.register_task(health_handle);
 
+        // ── RUNTIME CHAIN INTEGRITY TASK ─────────────────────────────────────
+        // Detect and purge pre-genesis blocks from the stored chain WITHOUT
+        // requiring a coordinated restart.  Nodes that were already running when
+        // bad blocks 1/2 were written will self-heal on the next tick.
+        {
+            let integrity_blockchain = blockchain.clone();
+            let integrity_shutdown = shutdown_token.clone();
+            let integrity_handle = tokio::spawn(async move {
+                // Short initial delay — let the node connect to peers first so
+                // the subsequent resync request finds someone to talk to.
+                tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
+                let mut interval =
+                    tokio::time::interval(tokio::time::Duration::from_secs(60));
+                loop {
+                    tokio::select! {
+                        _ = integrity_shutdown.cancelled() => break,
+                        _ = interval.tick() => {
+                            let genesis_ts = integrity_blockchain.genesis_timestamp();
+                            let stored_height = integrity_blockchain.get_height();
+                            if stored_height == 0 {
+                                continue;
+                            }
+                            // Check the first stored non-genesis block — if its
+                            // timestamp predates genesis the whole chain is invalid.
+                            if let Ok(block1) = integrity_blockchain.get_block(1) {
+                                if block1.header.timestamp < genesis_ts {
+                                    tracing::warn!(
+                                        "🔄 Runtime integrity check: block 1 timestamp {} \
+                                         predates genesis {} (early by {}s) — \
+                                         auto-reverting chain to height 0.",
+                                        block1.header.timestamp,
+                                        genesis_ts,
+                                        genesis_ts - block1.header.timestamp,
+                                    );
+                                    integrity_blockchain.revert_to_after_genesis().await;
+                                    tracing::info!(
+                                        "✅ Runtime chain revert complete — \
+                                         waiting for peers to supply fresh blocks."
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            shutdown_manager.register_task(integrity_handle);
+        }
+        // ── END RUNTIME CHAIN INTEGRITY TASK ─────────────────────────────────
+
         // Start masternode announcement task
         let mn_for_announcement = mn.clone();
         let peer_registry_for_announcement = peer_connection_registry.clone();

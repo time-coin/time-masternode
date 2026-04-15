@@ -9664,32 +9664,22 @@ impl Blockchain {
                     *self.fork_state.write().await = ForkResolutionState::None;
                     self.consensus_peers.write().await.clear();
 
-                    // If the reorg was blocked by a pre-launch timestamp, disconnect and
-                    // ban the peer immediately so it cannot keep triggering fork resolution.
+                    // If the reorg was blocked by a pre-launch timestamp, apply a
+                    // 1-hour temp ban and disconnect — the peer is on the old chain.
                     if let Err(ref e) = reorg_result {
                         if e.contains("predates network genesis") {
                             warn!(
-                                "🚫 Peer {} supplied pre-launch chain — disconnecting and recording violation: {}",
+                                "🚫 Peer {} supplied pre-launch fork chain — 1-hour temp ban: {}",
                                 peer_addr, e
                             );
-                            if let Some(reg) = self.peer_registry.read().await.as_ref() {
-                                reg.mark_genesis_incompatible(
-                                    &peer_addr,
-                                    "pre-launch",
-                                    "fork_chain_before_genesis",
-                                )
-                                .await;
-                            }
                             if let Some(bl_opt) = self.blacklist.read().await.as_ref() {
                                 let bare_ip =
                                     peer_addr.split(':').next().unwrap_or(&peer_addr);
                                 if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
-                                    bl_opt.write().await.record_violation(
+                                    bl_opt.write().await.add_temp_ban(
                                         ip,
-                                        &format!(
-                                            "Fork chain predates network genesis: {}",
-                                            e
-                                        ),
+                                        std::time::Duration::from_secs(3600),
+                                        &format!("Fork chain predates network genesis: {}", e),
                                     );
                                 }
                             }
