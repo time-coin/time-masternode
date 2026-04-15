@@ -5390,8 +5390,8 @@ mod fallback_tests {
     // ========================================================================
 
     /// Test that fallback round tracking is initialized and cleaned up properly
-    #[test]
-    fn test_fallback_tracking_lifecycle() {
+    #[tokio::test]
+    async fn test_fallback_tracking_lifecycle() {
         let config = TimeVoteConfig::default();
         let registry = create_test_registry();
         let consensus = TimeVoteConsensus::new(config, registry).unwrap();
@@ -5471,8 +5471,8 @@ mod fallback_tests {
     }
 
     /// Test proposal-to-transaction mapping operations
-    #[test]
-    fn test_proposal_tx_mapping_operations() {
+    #[tokio::test]
+    async fn test_proposal_tx_mapping_operations() {
         let config = TimeVoteConfig::default();
         let registry = create_test_registry();
         let consensus = TimeVoteConsensus::new(config, registry).unwrap();
@@ -5499,8 +5499,8 @@ mod fallback_tests {
     }
 
     /// Test liveness alerts accumulation structure
-    #[test]
-    fn test_liveness_alerts_accumulation() {
+    #[tokio::test]
+    async fn test_liveness_alerts_accumulation() {
         let config = TimeVoteConfig::default();
         let registry = create_test_registry();
         let consensus = TimeVoteConsensus::new(config, registry).unwrap();
@@ -5523,8 +5523,8 @@ mod fallback_tests {
     }
 
     /// Test fallback votes accumulation structure
-    #[test]
-    fn test_fallback_votes_accumulation() {
+    #[tokio::test]
+    async fn test_fallback_votes_accumulation() {
         let config = TimeVoteConfig::default();
         let registry = create_test_registry();
         let consensus = TimeVoteConsensus::new(config, registry).unwrap();
@@ -5547,8 +5547,8 @@ mod fallback_tests {
     }
 
     /// Test that DashMap operations are thread-safe
-    #[test]
-    fn test_dashmap_concurrent_safety() {
+    #[tokio::test]
+    async fn test_dashmap_concurrent_safety() {
         use std::sync::Arc;
         use std::thread;
 
@@ -5617,8 +5617,8 @@ mod fallback_tests {
     // ========================================================================
 
     /// Test alert accumulation tracking
-    #[test]
-    fn test_phase6_alert_accumulation() {
+    #[tokio::test]
+    async fn test_phase6_alert_accumulation() {
         let config = TimeVoteConfig::default();
         let registry = create_test_registry();
         let consensus = TimeVoteConsensus::new(config, registry).unwrap();
@@ -5660,8 +5660,8 @@ mod fallback_tests {
     }
 
     /// Test vote accumulation tracking
-    #[test]
-    fn test_phase6_vote_accumulation() {
+    #[tokio::test]
+    async fn test_phase6_vote_accumulation() {
         let config = TimeVoteConfig::default();
         let registry = create_test_registry();
         let consensus = TimeVoteConsensus::new(config, registry).unwrap();
@@ -5703,8 +5703,8 @@ mod fallback_tests {
     }
 
     /// Test proposal registration and lookup
-    #[test]
-    fn test_phase6_proposal_tracking() {
+    #[tokio::test]
+    async fn test_phase6_proposal_tracking() {
         let config = TimeVoteConfig::default();
         let registry = create_test_registry();
         let consensus = TimeVoteConsensus::new(config, registry).unwrap();
@@ -5725,8 +5725,8 @@ mod fallback_tests {
     }
 
     /// Test fallback round tracking
-    #[test]
-    fn test_phase6_fallback_round_tracking() {
+    #[tokio::test]
+    async fn test_phase6_fallback_round_tracking() {
         let config = TimeVoteConfig::default();
         let registry = create_test_registry();
         let consensus = TimeVoteConsensus::new(config, registry).unwrap();
@@ -5750,8 +5750,8 @@ mod fallback_tests {
     }
 
     /// Test Q_finality threshold calculation (simple majority)
-    #[test]
-    fn test_phase6_q_finality_threshold() {
+    #[tokio::test]
+    async fn test_phase6_q_finality_threshold() {
         let config = TimeVoteConfig::default();
         let registry = create_test_registry();
         let consensus = TimeVoteConsensus::new(config, registry).unwrap();
@@ -5820,8 +5820,8 @@ mod fallback_tests {
     }
 
     /// Test reject decision reaches Q_finality
-    #[test]
-    fn test_phase6_reject_reaches_quorum() {
+    #[tokio::test]
+    async fn test_phase6_reject_reaches_quorum() {
         let config = TimeVoteConfig::default();
         let registry = create_test_registry();
         let consensus = TimeVoteConsensus::new(config, registry).unwrap();
@@ -5861,8 +5861,8 @@ mod fallback_tests {
     }
 
     /// Test f+1 alert threshold with different network sizes
-    #[test]
-    fn test_phase6_f_plus_1_various_sizes() {
+    #[tokio::test]
+    async fn test_phase6_f_plus_1_various_sizes() {
         let config = TimeVoteConfig::default();
         let registry = create_test_registry();
         let consensus = TimeVoteConsensus::new(config, registry).unwrap();
@@ -5922,8 +5922,8 @@ mod fallback_tests {
     }
 
     /// Test mixed Approve/Reject votes
-    #[test]
-    fn test_phase6_mixed_votes() {
+    #[tokio::test]
+    async fn test_phase6_mixed_votes() {
         let config = TimeVoteConfig::default();
         let registry = create_test_registry();
         let consensus = TimeVoteConsensus::new(config, registry).unwrap();
@@ -5984,8 +5984,8 @@ mod fallback_tests {
     }
 
     /// Test Byzantine detection via internal tracking
-    #[test]
-    fn test_phase6_byzantine_tracking() {
+    #[tokio::test]
+    async fn test_phase6_byzantine_tracking() {
         let config = TimeVoteConfig::default();
         let registry = create_test_registry();
         let consensus = TimeVoteConsensus::new(config, registry).unwrap();
