@@ -1070,6 +1070,41 @@ async fn main() {
     }
     // ── END PRE-LAUNCH HEIGHT GUARD ───────────────────────────────────────────
 
+    // ── PRE-GENESIS BLOCK SCAN ────────────────────────────────────────────────
+    // Scan every stored block for timestamps that predate the network genesis.
+    // The height guard above only fires for heights that exceed the current slot,
+    // but a stored block at a plausible height (e.g. block 1 on mainnet stored
+    // before genesis day) with a pre-genesis timestamp slips through.  Roll back
+    // to before the first offending block so the node resyncs the correct chain.
+    {
+        let stored_height = blockchain.get_height();
+        let genesis_ts = blockchain.genesis_timestamp();
+        let mut first_bad: Option<u64> = None;
+        for h in 1..=stored_height {
+            if let Ok(block) = blockchain.get_block(h) {
+                if block.header.timestamp < genesis_ts {
+                    tracing::warn!(
+                        "🚫 Startup scan: block {} timestamp {} predates genesis {} (early by {}s). \
+                         Rolling back.",
+                        h, block.header.timestamp, genesis_ts,
+                        genesis_ts - block.header.timestamp
+                    );
+                    eprintln!(
+                        "⚠️  Block {} has pre-genesis timestamp — rolling back stored chain.",
+                        h
+                    );
+                    first_bad = Some(h);
+                    break;
+                }
+            }
+        }
+        if first_bad.is_some() {
+            blockchain.revert_to_after_genesis().await;
+            tracing::info!("✅ Pre-genesis scan rollback complete — chain reset to height 0.");
+        }
+    }
+    // ── END PRE-GENESIS BLOCK SCAN ────────────────────────────────────────────
+
     // Build (or rebuild) transaction index on startup.
     // build_tx_index() clears any stale entries before rebuilding from scratch, so it is safe
     // to always run it. A stale index (e.g., from an incomplete rollback) causes

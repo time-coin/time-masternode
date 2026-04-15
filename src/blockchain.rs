@@ -4471,6 +4471,19 @@ impl Blockchain {
         self.consensus.record_block_received(block_hash);
 
         // CRITICAL: Verify block integrity before adding
+        // Check 0: Reject any non-genesis block with a timestamp before network genesis.
+        // This is an absolute guard that catches pre-launch blocks on all code paths
+        // (including the reorg path which calls add_block without validate_block).
+        if block.header.height > 0 {
+            let genesis_ts = self.genesis_timestamp();
+            if block.header.timestamp < genesis_ts {
+                return Err(format!(
+                    "Block {} timestamp {} predates network genesis {} — pre-launch block rejected",
+                    block.header.height, block.header.timestamp, genesis_ts
+                ));
+            }
+        }
+
         // Check 1: Non-genesis blocks must have non-zero previous_hash
         if block.header.height > 0 && block.header.previous_hash == [0u8; 32] {
             tracing::error!(
@@ -6932,6 +6945,19 @@ impl Blockchain {
                 "Block {} timestamp {} is too far in future (now: {}, tolerance: {}s)",
                 block.header.height, block.header.timestamp, now, TIMESTAMP_TOLERANCE_SECS
             ));
+        }
+
+        // Reject any non-genesis block with a timestamp before network genesis (absolute guard).
+        // A block at height 1+ that predates the genesis timestamp is categorically
+        // impossible on the live network — it is a pre-launch or stale-chain block.
+        if block.header.height > 0 {
+            let genesis_ts = self.genesis_timestamp();
+            if block.header.timestamp < genesis_ts {
+                return Err(format!(
+                    "Block {} timestamp {} predates network genesis {} — pre-launch block rejected",
+                    block.header.height, block.header.timestamp, genesis_ts
+                ));
+            }
         }
 
         // Reject blocks that exceed the maximum expected height

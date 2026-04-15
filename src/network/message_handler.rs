@@ -2404,6 +2404,7 @@ impl MessageHandler {
                     ));
                 } else if e.contains("exceeds maximum expected height")
                     || e.contains("produced too early by")
+                    || e.contains("predates network genesis")
                 {
                     // Block is from before the genesis launch window — peer is on a
                     // pre-launch chain.  Mark incompatible, record a violation, and
@@ -6138,7 +6139,8 @@ impl MessageHandler {
                     ));
                 }
                 Err(e) if e.contains("exceeds maximum expected height")
-                    || e.contains("produced too early by") =>
+                    || e.contains("produced too early by")
+                    || e.contains("predates network genesis") =>
                 {
                     // PRE-LAUNCH BLOCK: peer sent a block that was produced before genesis time.
                     // This peer has an invalid chain — mark incompatible and disconnect immediately.
