@@ -6948,8 +6948,8 @@ impl Blockchain {
         let block_expected_time =
             genesis_timestamp + (block.header.height as i64 * BLOCK_TIME_SECONDS);
         let early_by = block_expected_time.saturating_sub(block.header.timestamp);
-        if early_by > 3600 {
-            // More than 1 hour early — unconditional rejection (pre-launch chain or fraud)
+        if early_by > 600 {
+            // More than one block interval (10 min) early — unconditional rejection (pre-launch chain or fraud)
             return Err(format!(
                 "Block {} timestamp {} is before its scheduled time {} (produced too early by {}s)",
                 block.header.height,
