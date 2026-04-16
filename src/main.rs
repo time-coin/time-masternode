@@ -1075,7 +1075,9 @@ async fn main() {
                 stored_height
             );
             blockchain.revert_to_after_genesis().await;
-            tracing::info!("✅ Rollback complete — chain is now at height 0, will resync from peers.");
+            tracing::info!(
+                "✅ Rollback complete — chain is now at height 0, will resync from peers."
+            );
         }
     }
     // ── END PRE-LAUNCH HEIGHT GUARD ───────────────────────────────────────────
@@ -1380,7 +1382,9 @@ async fn main() {
                 tracing::info!("✓ Using masternodeprivkey for consensus signing");
                 mn_key.clone()
             } else {
-                tracing::info!("✓ Using wallet key for consensus signing (no masternodeprivkey in time.conf)");
+                tracing::info!(
+                    "✓ Using wallet key for consensus signing (no masternodeprivkey in time.conf)"
+                );
                 wallet.signing_key().clone()
             };
             if let Err(e) = consensus_engine.set_identity(mn.address.clone(), signing_key) {
@@ -1445,7 +1449,9 @@ async fn main() {
                     })
                     .collect();
                 if !entries.is_empty() {
-                    consensus_engine.utxo_manager.rebuild_collateral_locks(entries);
+                    consensus_engine
+                        .utxo_manager
+                        .rebuild_collateral_locks(entries);
                 }
             }
         } // end if registration_ok
@@ -1583,8 +1589,7 @@ async fn main() {
                 // Short initial delay — let the node connect to peers first so
                 // the subsequent resync request finds someone to talk to.
                 tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
-                let mut interval =
-                    tokio::time::interval(tokio::time::Duration::from_secs(60));
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
                 loop {
                     tokio::select! {
                         _ = integrity_shutdown.cancelled() => break,
@@ -1800,15 +1805,13 @@ async fn main() {
                         } else {
                             tracing::info!(
                                 "📤 Submitting MasternodeDeregistration for {} slot={}",
-                                ip, slot_id
+                                ip,
+                                slot_id
                             );
                             if let Some(dereg_tx) =
                                 build_masternode_dereg_tx(ip, slot_id, &wallet_key_for_sync)
                             {
-                                match collateral_sync_consensus
-                                    .submit_transaction(dereg_tx)
-                                    .await
-                                {
+                                match collateral_sync_consensus.submit_transaction(dereg_tx).await {
                                     Ok(txid) => tracing::info!(
                                         "✅ MasternodeDeregistration submitted: {} (tx {})",
                                         ip,
@@ -1936,7 +1939,8 @@ async fn main() {
                 {
                     tracing::info!(
                         "📤 Auto-submitting FreeNodeRegistration for {} (wallet: {})",
-                        ip, mn_for_sync.wallet_address
+                        ip,
+                        mn_for_sync.wallet_address
                     );
                     if let Some(reg_tx) = build_free_node_reg_tx(
                         ip,
@@ -2029,8 +2033,7 @@ async fn main() {
     {
         let utxo_mgr = consensus_engine.utxo_manager.clone();
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
             loop {
                 interval.tick().await;
                 let purged = utxo_mgr.purge_stale_collateral_locks();
@@ -2927,7 +2930,6 @@ async fn main() {
         let mut sync_attempt_count: u32 = 0;
         let mut last_sync_attempt_time = std::time::Instant::now();
 
-
         loop {
             tokio::select! {
                 _ = shutdown_token_block.cancelled() => {
@@ -3630,9 +3632,7 @@ async fn main() {
             // Fairness bonus: +1 per 10 blocks without reward, uncapped
             // This ensures nodes that haven't produced blocks get increasing priority.
             // Reads from the in-memory counter updated by add_block — O(n), no sled scan.
-            let blocks_without_reward_map = block_registry
-                .get_reward_tracking_from_memory()
-                .await;
+            let blocks_without_reward_map = block_registry.get_reward_tracking_from_memory().await;
 
             let our_blocks_without = blocks_without_reward_map
                 .get(&our_addr)
@@ -4151,9 +4151,7 @@ async fn main() {
                                     "⚡ Block {} adding via vote majority (precommit consensus reached)",
                                     block_height
                                 );
-                                if let Err(e) =
-                                    block_blockchain.add_block(block.clone()).await
-                                {
+                                if let Err(e) = block_blockchain.add_block(block.clone()).await {
                                     tracing::error!(
                                         "❌ Failed to add block via vote majority: {}",
                                         e
@@ -4226,13 +4224,12 @@ async fn main() {
                                 // The VRF leader election already proves this node was selected;
                                 // near-tip safety checks (check_2_3_consensus_cached, blocks_behind≤10)
                                 // still apply once the chain is close to expected height.
-                                let effective_validator_count = if leader_attempt >= 15
-                                    || blocks_behind > 50
-                                {
-                                    validator_count.min(2)
-                                } else {
-                                    validator_count
-                                };
+                                let effective_validator_count =
+                                    if leader_attempt >= 15 || blocks_behind > 50 {
+                                        validator_count.min(2)
+                                    } else {
+                                        validator_count
+                                    };
                                 let min_weight_for_fallback: u64 =
                                     if effective_validator_count <= 2 { 0 } else { 2 };
                                 let should_fallback = prepare_weight >= min_weight_for_fallback
@@ -5306,7 +5303,10 @@ fn build_free_node_reg_tx(
     use ed25519_dalek::Signer;
 
     let pubkey_hex = hex::encode(node_key.verifying_key().as_bytes());
-    let msg = format!("MNREG:{}:{}:{}:none", node_address, wallet_address, pubkey_hex);
+    let msg = format!(
+        "MNREG:{}:{}:{}:none",
+        node_address, wallet_address, pubkey_hex
+    );
     let signature_hex = hex::encode(node_key.sign(msg.as_bytes()).to_bytes());
 
     Some(types::Transaction {
@@ -5365,13 +5365,8 @@ fn setup_logging(
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
     let level = if verbose { "trace" } else { &config.level };
-    // Suppress noisy third-party crate warnings that are informational-only.
-    // rustls logs "Illegal SNI extension: ignoring IP address presented as hostname" at WARN
-    // for every attacker probe that uses the node's IP as SNI — we already handle these in
-    // our TLS accept path, so rustls's own log is pure noise.
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level))
-        .add_directive("rustls=error".parse().expect("valid directive"));
+        .unwrap_or_else(|_| EnvFilter::new(level));
 
     // Detect if running under systemd/journald
     let is_systemd =
