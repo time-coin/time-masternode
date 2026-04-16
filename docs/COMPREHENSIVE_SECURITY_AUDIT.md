@@ -1181,7 +1181,9 @@ Result: tokio worker threads saturate → RPC JSON-RPC handler never gets schedu
 
 ## 15. ADDITIONAL MAINNET ATTACK FINDINGS (April–May 2026)
 
-*Added: May 2026 — Vectors discovered or fixed after the April 7 mainnet incident. Sections 15.1–15.16 cover pool/reward layer attacks, protocol logic bugs, and policy revisions.*
+> **This section is the single source of truth for all known attack vectors.** When a new attack is identified (from live node logs, security review, or analysis), add it here immediately. `CLAUDE.md` contains only the developer workflow for responding to attacks — the canonical vector list lives here.
+
+*Added: May 2026 — Vectors discovered or fixed after the April 7 mainnet incident. Sections 15.1+ cover pool/reward layer attacks, protocol logic bugs, and policy revisions.*
 
 ---
 
