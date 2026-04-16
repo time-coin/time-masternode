@@ -301,6 +301,17 @@ impl IPBlacklist {
         }
     }
 
+    /// Returns all currently banned subnets as CIDR strings (e.g. `"154.217.246.0/24"`).
+    ///
+    /// Used on startup to evict any Free-tier masternodes from subnets that were banned in
+    /// a previous session (i.e. loaded back from persistent storage).
+    pub fn list_banned_subnets(&self) -> Vec<String> {
+        self.subnet_blacklist
+            .iter()
+            .map(|(network, prefix_len, _)| format!("{}/{}", network, prefix_len))
+            .collect()
+    }
+
     /// Returns true if `ip` falls within any banned subnet.
     fn in_banned_subnet(&self, ip: IpAddr) -> Option<String> {
         if let IpAddr::V4(v4) = ip {

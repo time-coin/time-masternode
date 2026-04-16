@@ -105,17 +105,6 @@ const FORK_ALERT_WINDOW: Duration = Duration::from_secs(300);
 /// Rejected cycles within FORK_ALERT_WINDOW before recording a ban violation (AV30).
 const FORK_ALERT_BAN_THRESHOLD: u32 = 5;
 
-/// AV25: Per-/24-subnet rate-limiter for Free-tier MasternodeAnnounce spam.
-/// Stores (last_log_time: Instant, suppressed_count: u32) so we log once per
-/// LOG_INTERVAL for a subnet that is already at cap, instead of once per message.
-fn subnet_announce_limiter() -> &'static dashmap::DashMap<String, (Instant, u32)> {
-    static INSTANCE: std::sync::OnceLock<dashmap::DashMap<String, (Instant, u32)>> =
-        std::sync::OnceLock::new();
-    INSTANCE.get_or_init(dashmap::DashMap::new)
-}
-/// How often to emit a single log line for a subnet that is already at the Free-tier cap.
-const SUBNET_ANNOUNCE_LOG_INTERVAL: Duration = Duration::from_secs(10);
-
 /// Per-outpoint timestamp of the last accepted V4 proof eviction.
 fn v4_eviction_cooldown() -> &'static dashmap::DashMap<String, std::time::Instant> {
     static INSTANCE: std::sync::OnceLock<dashmap::DashMap<String, std::time::Instant>> =
@@ -4342,51 +4331,6 @@ impl MessageHandler {
             // Free tier — no collateral verification needed.
             // For Free tier, announced_address == masternode_ip (relay detection still applies
             // but Free tier nodes are not authenticated so we use peer_ip as fallback).
-
-            // ── AV25: Early subnet-cap drop ──────────────────────────────────
-            // The attacker subnet (154.217.246.x) floods us with 50-100 Free-tier
-            // MasternodeAnnounce messages per second.  Even though the registry
-            // rejects them all at the cap, every message still deserializes, builds
-            // a Masternode struct, acquires the registry map, and logs a WARN.
-            //
-            // This guard does a lock-free atomic read BEFORE any work.  If the /24
-            // subnet is already at the cap AND the peer is not already registered,
-            // we drop the message silently, logging at most once every 10 seconds
-            // per subnet so the log stays readable.
-            if context
-                .masternode_registry
-                .is_free_tier_subnet_at_cap(&masternode_ip)
-                && context.masternode_registry.get(&masternode_ip).await.is_none()
-            {
-                let subnet_key = {
-                    let ip_only = masternode_ip.split(':').next().unwrap_or(&masternode_ip);
-                    let parts: Vec<&str> = ip_only.split('.').collect();
-                    if parts.len() >= 3 {
-                        format!("{}.{}.{}", parts[0], parts[1], parts[2])
-                    } else {
-                        ip_only.to_string()
-                    }
-                };
-                let now = Instant::now();
-                let limiter = subnet_announce_limiter();
-                let mut entry = limiter.entry(subnet_key.clone()).or_insert_with(|| {
-                    (
-                        now - SUBNET_ANNOUNCE_LOG_INTERVAL - Duration::from_secs(1),
-                        0u32,
-                    )
-                });
-                entry.1 += 1;
-                if now.duration_since(entry.0) >= SUBNET_ANNOUNCE_LOG_INTERVAL {
-                    warn!(
-                        "🚫 [AV25] Dropping Free-tier announce flood from subnet {}: {} msgs suppressed",
-                        subnet_key, entry.1
-                    );
-                    entry.0 = now;
-                    entry.1 = 0;
-                }
-                return Ok(None);
-            }
-            // ── End AV25 early-drop ──────────────────────────────────────────
 
             // Ghost-registration guard: banned nodes must not re-enter the registry
             // via gossip relay from legitimate peers.

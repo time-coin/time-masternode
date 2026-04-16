@@ -1177,6 +1177,295 @@ During the ghost connection OOM this contributed ~15 extra concurrent futures ev
 
 Result: tokio worker threads saturate → RPC JSON-RPC handler never gets scheduled → `masternodestatus` RPC times out in 3s → watchdog calls it "de-registration" and restarts the node → **restart every ~10 minutes**.
 
+---
+
+## 15. ADDITIONAL MAINNET ATTACK FINDINGS (April–May 2026)
+
+*Added: May 2026 — Vectors discovered or fixed after the April 7 mainnet incident. Sections 15.1–15.16 cover pool/reward layer attacks, protocol logic bugs, and policy revisions.*
+
+---
+
+### 15.1 ✅ FIXED — Non-Deterministic Tier Sort (AV1)
+**Status:** **FIXED**
+**Severity:** High — chain stall
+
+**Attack:** When a masternode operator registers the same wallet address at multiple tiers (e.g., Silver at IP_A and Free at IP_B), `tier_for_wallet()` iterated a `HashMap` whose iteration order is non-deterministic across runs and machines. Different nodes classified the same wallet differently, causing block producer and some validators to agree while others disagreed → every proposal rejected → chain stall.
+
+**Root Cause:** `tier_for_wallet()` used an unsorted map, yielding non-deterministic results on hash collision reordering.
+
+**Fix Implemented:** All tier lookups now sort by collateral outpoint (highest tier wins in case of wallet overlap). The sort key is the full `txid:vout` string, giving a stable total order across all nodes.
+
+**Code References:**
+- `src/masternode_registry.rs` — `tier_for_wallet()` deterministic sort by collateral outpoint
+
+---
+
+### 15.2 ✅ FIXED — Reward Squatter / Free Pool Double-Payment (AV2)
+**Status:** **FIXED**
+**Severity:** High — double-payment exploit
+
+**Attack:** A node with a wallet address appearing in both a paid tier and the Free tier could extract a reward from both pools in the same block. The block producer included the address in the Silver (or Bronze/Gold) pool entry AND again in the Free-tier recipient list. Validators accepted because per-pool totals were correct.
+
+**Root Cause:** Missing per-tier wallet exclusion: a wallet that received a paid-tier reward was not excluded from the Free pool selection in the same block.
+
+**Fix Implemented:** `paid_tier_wallet_set` is built before Free-pool selection; any wallet already paid at Bronze/Silver/Gold tier is excluded from Free-tier recipients.
+
+**Code References:**
+- `src/blockchain.rs` — `paid_tier_wallet_set` exclusion in Free-tier pool selection
+
+---
+
+### 15.3 ✅ FIXED — Fee Validation False-Positive (AV5)
+**Status:** **FIXED**
+**Severity:** High — 20-second chain stall per fee-bearing block
+
+**Attack / Bug:** Any block containing transactions that paid fees was rejected by every validator, causing the block to be re-proposed by a different node 20 seconds later. This was not a deliberate attack but a latent protocol bug that an attacker could trigger by submitting fee-bearing transactions.
+
+**Root Cause:** `validate_proposal_rewards()` passed a hardcoded `fees = 0` to its reward calculation. The block producer correctly included transaction fees in the coinbase; the validator computed a different expected reward → mismatch → rejection.
+
+**Fix Implemented:** `compute_block_fees(block)` helper introduced; validators now pass the actual sum of transaction fees to `validate_proposal_rewards()`.
+
+**Code References:**
+- `src/blockchain.rs` — `compute_block_fees()`; `validate_proposal_rewards()` fee parameter
+
+---
+
+### 15.4 ✅ FIXED — Bitmap Position Drift (AV6)
+**Status:** **FIXED**
+**Severity:** High — wrong reward recipients; false-positive reward-violation bans
+
+**Attack:** Between block production and block validation, the active masternode set can change (a node connects or disconnects). Because reward-distribution bitmaps were keyed on volatile IP string positions, the producer and validator could assign different slot indices to the same node → validator saw mismatched recipients → false-positive `record_reward_violation()` → legitimate nodes accumulate bans.
+
+**Root Cause:** Bitmap positions were derived from the sort order of `ip:port` strings, which changes whenever any node joins or leaves.
+
+**Fix Implemented:** Each masternode is assigned a permanent `slot_id` at registration time. Bitmap positions are keyed on `slot_id` rather than IP. The `slot_id` is stable across all network topology changes, so producer and validator always agree on which bit maps to which node.
+
+**Code References:**
+- `src/masternode_registry.rs` — `slot_id` field assigned at `register()`; `bitmap_position_for()` uses `slot_id`
+
+---
+
+### 15.5 ✅ FIXED — Reward Hijack (AV7)
+**Status:** **FIXED**
+**Severity:** High — theft of block rewards from legitimate participants
+
+**Attack:** A modified block producer submitted blocks in which the reward outputs paid addresses not belonging to any active masternode (or paid the attacker's own address for tiers it had not earned). Validators accepted because the total coinbase amount was correct, not because the recipient identities were verified.
+
+**Root Cause:** Block validation checked reward *amounts* but not recipient *identity* against the active masternode set for each tier.
+
+**Fix Implemented:** Reward recipient verification added to block validation. If ≥3 violations are recorded against a producer within a 1-hour sliding window, its collateral is slashed and the node is deregistered. The violation counter decays after 1 hour to avoid permanent bans from transient fork confusion.
+
+**Code References:**
+- `src/blockchain.rs` — `validate_reward_recipients()`; `record_reward_violation()`; 3-violation deregistration threshold
+- `src/masternode_registry.rs` — `slash_collateral()`
+
+---
+
+### 15.6 ✅ FIXED — Sync Loop DoS (AV11)
+**Status:** **FIXED**
+**Severity:** Medium — CPU and bandwidth exhaustion; delays fork resolution
+
+**Attack:** A malicious peer sent ≥20 identical `GetBlocks` requests within a 30-second window, repeatedly triggering full chain-scan responses. On a VPS with limited disk I/O this saturated the sled read path and delayed all other network processing.
+
+**Root Cause:** No sync request deduplication or per-peer rate limiting on `GetBlocks` handling.
+
+**Fix Implemented:** `record_sync_flood()` tracks per-peer `GetBlocks` request counts in a 30-second sliding window. After 20 identical requests the peer is rate-limited via `RateLimitPeer`; subsequent floods escalate to `BlockPeer`.
+
+**Code References:**
+- `src/network/message_handler.rs` — `record_sync_flood()` call in `GetBlocks` handler
+- `src/ai/attack_detector.rs` — `SyncLoopFlooding` attack type; `record_sync_flood()`
+
+---
+
+### 15.7 ✅ POLICY CHANGE — Free-Tier Subnet Registration Cap Removed (AV25)
+**Status:** **POLICY REVISED**
+**Severity:** Medium (original OOM risk retained via task cap; cap removal is safe)
+
+**Original Fix (April 7, 2026):** A per-/24 registration cap (max 5 Free-tier nodes per subnet) and a PHASE3 reconnect cap (max 3 active reconnects per subnet) were introduced in commit `6170dee` to prevent OOM from subnet flooding.
+
+**Policy Reversal:** Both subnet caps were subsequently **removed**. Operators who legitimately own an entire /24 subnet (e.g., a data centre operator running many Free-tier masternodes) were incorrectly blocked. The caps also provided little security benefit against attackers using VPS providers spread across many /24 prefixes.
+
+**Current Approach:** Free-tier nodes from any subnet are accepted in unlimited numbers. Individual misbehavior is detected and penalized per-node by the AI attack detector:
+- Rapid cycling → AV3 back-and-forth lockout (600s) + AV26 migration frequency limit (max 3/30 min)
+- Invalid vote signature spam → AV27 sliding-window violation (5 failures/30s)
+- Unregistered voter spam → AV28 sliding-window violation (10 rejections/60s)
+- Sync loop flooding → AV11 `record_sync_flood()` rate-limit
+
+OOM prevention is retained via an overall PHASE3 reconnect concurrency cap (not subnet-gated).
+
+**Code References:**
+- `src/network/client.rs` — PHASE3 overall task concurrency cap
+- `src/masternode_registry.rs` — `register()` (subnet cap removed)
+
+---
+
+### 15.8 ✅ FIXED — Multi-Hop Collateral Pool Rotation (AV26)
+**Status:** **FIXED**
+**Severity:** High — evades AV3 back-and-forth cycling detection
+
+**Attack:** AV3 detects A→B→A cycling by checking `collateral_migration_from` (the last source IP). Attackers adapted by using rotation pools: A→B, then B→C, then C→D, then D→A. Each hop looked like a fresh migration because the last source IP was always different. A 4-node pool with a 300s migration cooldown could rotate indefinitely, re-squatting collateral outpoints every 20 minutes.
+
+**Root Cause:** `collateral_migration_from` stored only the immediately previous IP; multi-hop rotations that never revisit the same IP pair in adjacent hops evaded detection entirely.
+
+**Fix Implemented:** A sliding-window migration frequency limit: `collateral_migration_counts` tracks `(count, window_start)` per `txid:vout` outpoint. If an outpoint has been migrated ≥3 times within 1800 seconds (30 minutes), the next migration is rejected regardless of which IP it comes from.
+
+**Code References:**
+- `src/masternode_registry.rs` — `collateral_migration_counts`; `MAX_MIGRATIONS_PER_WINDOW = 3`; `MIGRATION_WINDOW_SECS = 1800`
+
+---
+
+### 15.9 ✅ FIXED — Invalid Vote Signature Spam (AV27)
+**Status:** **FIXED**
+**Severity:** Medium — CPU waste from sustained Ed25519 verification failures
+
+**Attack:** Already-connected attacker IPs (observed: `154.217.246.86`) sent `TimeVotePrepare` / `TimeVotePrecommit` messages with forged Ed25519 signatures at ~1–3/second. Each message passed the length check (64 bytes) but failed `public_key.verify()`. The original code returned `Ok(false)` with no violation recorded, allowing the flood to continue indefinitely for the lifetime of the TCP session.
+
+**Root Cause:** `verify_vote_signature()` had no violation recording on the invalid-signature path.
+
+**Fix Implemented:** `invalid_sig_vote_window` sliding-window counter added in `message_handler.rs`. After **5 Ed25519 failures within 30 seconds** from the same peer IP, `record_invalid_vote_sig_spam()` is called on the `AttackDetector`. Structurally malformed votes (empty or wrong-length signatures) record a violation immediately without waiting for the threshold.
+
+**Severity:** Medium
+**AI Detection:** `InvalidVoteSignatureSpam` → `RateLimitPeer`
+
+**Code References:**
+- `src/network/message_handler.rs` — `invalid_sig_vote_window` per-peer sliding window; `record_invalid_vote_sig_spam()`
+- `src/ai/attack_detector.rs` — `InvalidVoteSignatureSpam` attack type; `record_invalid_vote_sig_spam()`
+
+---
+
+### 15.10 ✅ FIXED — Unregistered Voter Spam (AV28)
+**Status:** **FIXED**
+**Severity:** Medium — registry lookup overhead from sustained spam of votes for non-existent voters
+
+**Attack:** Attacker nodes relayed `TimeVotePrepare` / `TimeVotePrecommit` messages for voter IDs not present in the masternode registry at ~15/second. Each message triggered an async DashMap read on the registry. The `verify_vote_signature()` unregistered-voter path returned `Ok(false)` with no violation recorded.
+
+**Root Cause:** No rate limiting on the unregistered-voter rejection path. Votes are gossiped on behalf of remote nodes, so a lenient threshold is needed to avoid false positives from transient deregistrations.
+
+**Fix Implemented:** `unregistered_vote_window` sliding-window counter tracks per-peer rejections. After **10 unregistered-voter rejections within 60 seconds**, `record_unregistered_voter_spam()` is called, recording one violation. The 10-rejection threshold accommodates legitimate relay nodes forwarding votes for recently-deregistered masternodes.
+
+**Severity:** Medium
+**AI Detection:** `UnregisteredVoterSpam` → `RateLimitPeer`
+
+**Code References:**
+- `src/network/message_handler.rs` — `unregistered_vote_window` per-peer sliding window; `record_unregistered_voter_spam()`
+- `src/ai/attack_detector.rs` — `UnregisteredVoterSpam` attack type; `record_unregistered_voter_spam()`
+
+---
+
+### 15.11 ✅ CONFIRMED NON-ISSUE — SNI False-Flag / Reputation Poisoning (AV29)
+**Status:** **NO FIX NEEDED**
+**Severity:** Low (operator confusion only; no protocol impact)
+
+**Scenario:** An attacker sets the TLS SNI field in connection attempts to a victim node's own IP address (e.g., hex-encoded `69.167.168.176`), making log entries appear to attribute TLS violations to a friendly node. An operator observing `getblacklist` output might mistakenly believe a trusted peer is attacking the network.
+
+**Why This Is Not a Real Attack:** Ban attribution in `IPBlacklist` is always based on the real TCP source IP obtained from `TcpStream::peer_addr()` at `accept()` time — not from the TLS SNI field. An attacker can forge the SNI value but not the TCP source IP (without IP spoofing, which breaks the TCP handshake). The `getblacklist` CLI command (added in commit `a4d7daa`) allows operators to inspect actual banned IPs and verify that no friendly nodes have been incorrectly penalized.
+
+**Code References:**
+- `src/network/server.rs` — `peer_addr()` from `accept()` used for all violation attribution
+- `src/bin/time-cli.rs` — `getblacklist` command
+
+---
+
+### 15.12 ✅ FIXED — Producer Pool Self-Award (AV33)
+**Status:** **FIXED**
+**Severity:** High — reward theft; enables sustained unfair monopolization of block rewards
+
+**Attack:** A modified block producer assigned the Silver, Bronze, or Gold tier pool to itself every block, ignoring the fairness rotation that ensures all masternodes of a given tier receive rewards in turn. Validators accepted these blocks because the total payout amounts per tier were correct — only the *identity* of the winner within each tier was wrong.
+
+**Root Cause:** `validate_pool_distribution()` Step 3 verified that each tier's pool was distributed with the correct total amount per tier but did not verify *which specific node* within the tier received the pool payout.
+
+**Fix Implemented:** Step 3b added to `validate_pool_distribution()`: the fairness-rotation winner for each tier is computed from on-chain `blocks_without_reward` history (same algorithm used by the producer). The validator checks that the actual recipient matches the expected winner. A bitmap drift guard prevents false positives when the active node set changes between production and validation. The `tier_winner` map tracks the actual recipient per tier for audit logging.
+
+**Severity:** High
+**Code References:**
+- `src/blockchain.rs` — `validate_pool_distribution()` Step 3b; `tier_winner` map; `blocks_without_reward` history lookup
+
+---
+
+### 15.13 ✅ FIXED — Targeted Disconnect / Reward Theft (AV34)
+**Status:** **FIXED**
+**Severity:** Medium — temporary reward exclusion for honest nodes; sophisticated attacker can sustain for multiple blocks
+
+**Attack:** An attacker floods a paid-tier masternode with garbage connections or sends spoofed TCP RST packets to force a disconnect. With the node marked inactive, it is excluded from the next block's reward pool. A paid-tier node using the pre-fix PHASE3 reconnect logic could take up to 30 seconds to re-establish (one full block slot at 600 seconds); during that window the attacker's own nodes could absorb the displaced rewards.
+
+**Root Cause:** Paid-tier node disconnect → PHASE3 reconnect → AI cooldown delay (up to 30s). No grace window kept recently-disconnected nodes eligible for rewards. Free-tier nodes were removed from the registry immediately on disconnect.
+
+**Fix Implemented:**
+- **90-second reward-eligibility grace window** (`ELIGIBILITY_GRACE_SECS = 90`): `last_seen_at` timestamp preserved on disconnect; nodes disconnected within the grace window remain in all three eligible-pool passes.
+- **Priority reconnect on disconnect**: paid-tier node disconnect fires `priority_reconnect_notify` so PHASE3 wakes immediately, bypassing the AI reconnect cooldown for Bronze/Silver/Gold tier.
+- **Free-tier registry grace period**: Free-tier nodes kept in registry for 300 seconds after disconnect before stale-cleanup removes them.
+
+**Code References:**
+- `src/masternode_registry.rs` — `ELIGIBILITY_GRACE_SECS = 90`; `last_seen_at`; grace window in eligible-pool passes
+- `src/network/client.rs` — `priority_reconnect_notify` channel; Bronze+ cooldown bypass
+
+---
+
+### 15.14 ✅ FIXED — Free-Tier Reward Monopolisation (AV35)
+**Status:** **FIXED**
+**Severity:** High — sustained unfair monopolization of Free-tier (8 TIME) pool
+
+**Attack:** A modified block producer excluded all but one Free-tier address from the 8 TIME pool each block. The pre-fix validator only checked the total Free-tier payout amount, not which specific Free-tier addresses were chosen. The fairness formula had a "dead zone" (`blocks_without_reward / 10`) that allowed a recently-paid node to win every tiebreak for up to 9 consecutive blocks.
+
+**Root Cause:** `validate_pool_distribution()` Step 3b did not apply to the Free tier. The `/10` divisor in the fairness formula created a dead zone where a node with `counter = 0` (just paid) could still score higher than nodes with low counters, allowing repeated self-selection.
+
+**Fix Implemented:**
+- `FAIRNESS_V2_HEIGHT = 1730`: gates the switch from the `/10` formula to a direct counter comparison. At this chain height the fairness formula becomes `counter` (no divisor), eliminating the dead zone.
+- Step 3b extended to Free tier: a block is rejected if a freshly-paid address (`blocks_without_reward = 0`) receives a Free-tier reward while other Free-tier nodes with higher counters were skipped.
+
+**Code References:**
+- `src/blockchain.rs` — `FAIRNESS_V2_HEIGHT = 1730`; Step 3b Free-tier extension in `validate_pool_distribution()`
+
+---
+
+### 15.15 ✅ FIXED — Reputation Poisoning / Blacklist Manipulation (AV36)
+**Status:** **FIXED**
+**Severity:** High — targeted banning of honest nodes; can silence legitimate block producers
+
+**Attack:** Three sub-paths were identified:
+
+**Sub-path A — Forged block proposals:** Attacker forges a `BlockProposal` with the victim's IP as the `leader` field and a bad reward distribution. Every validator that processes it calls `record_reward_violation(victim_ip)`. After 3 violations the victim is banned from producing blocks.
+
+**Sub-path B — Relay-forwarded gossip hijack:** Attacker relays a `MasternodeAnnounce` with the victim's IP as `masternode_ip` pointing to an already-locked collateral outpoint. Every node that processes it calls `record_severe_violation(victim_ip)`, triggering a 1-hour ban on the first attempt.
+
+**Sub-path C — Threshold exploitation:** A legitimate peer with clock drift or a key rotation in progress may naturally breach the AV27/AV28 sliding-window thresholds and accumulate violations that should only apply to actual spammers.
+
+**Root Causes:**
+- (A) `validate_proposal_rewards()` recorded violations before verifying leader identity via VRF proof.
+- (B) `CollateralAlreadyLocked` path always attributed violations to `masternode_ip` regardless of whether the message was relayed.
+- (C) Inherent in sliding-window thresholds with no decay.
+
+**Fix Implemented:**
+- (A) `validate_block_before_vote()` now authenticates the claimed leader via VRF proof **before** calling `validate_proposal_rewards()`. Unauthenticated proposals record a violation against the *sending peer* (not the claimed leader) and pass `record_violations: false` to prevent poisoning.
+- (B) Both `CollateralAlreadyLocked` paths now attribute violations to the *relay peer* (minor violation) rather than the claimed `masternode_ip` when `is_relayed = true`.
+- (C) Mitigated by 1-hour decay on reward violations and 30s/60s sliding windows on AV27/AV28 that reset automatically.
+
+**Code References:**
+- `src/blockchain.rs` — `validate_block_before_vote()`; VRF auth before `validate_proposal_rewards()`; `record_violations` flag
+- `src/network/message_handler.rs` — `is_relayed` attribution in `CollateralAlreadyLocked` paths
+
+---
+
+## SUMMARY TABLE — Additional Vectors (Section 15)
+
+| ID | Name | Severity | Status |
+|----|------|----------|--------|
+| AV1 | Non-deterministic tier sort | High | ✅ Fixed |
+| AV2 | Reward squatter / free pool double-payment | High | ✅ Fixed |
+| AV5 | Fee validation false-positive | High | ✅ Fixed |
+| AV6 | Bitmap position drift | High | ✅ Fixed |
+| AV7 | Reward hijack | High | ✅ Fixed |
+| AV11 | Sync loop DoS | Medium | ✅ Fixed |
+| AV25 | Free-tier subnet flooding — registration cap | Medium | ✅ Policy changed (cap removed; per-node detection) |
+| AV26 | Multi-hop collateral pool rotation | High | ✅ Fixed |
+| AV27 | Invalid vote signature spam | Medium | ✅ Fixed |
+| AV28 | Unregistered voter spam | Medium | ✅ Fixed |
+| AV29 | SNI false-flag / reputation poisoning | Low | ✅ Confirmed non-issue |
+| AV33 | Producer pool self-award | High | ✅ Fixed |
+| AV34 | Targeted disconnect / reward theft | Medium | ✅ Fixed |
+| AV35 | Free-tier reward monopolisation | High | ✅ Fixed |
+| AV36 | Reputation poisoning / blacklist manipulation | High | ✅ Fixed |
+
 **Observed (April 8 watchdog log):**
 ```
 16:20:24 🔁 De-registration detected after 2 consecutive checks — restarting timed (restart #12)

@@ -201,6 +201,10 @@ impl NetworkServer {
     ///
     /// Loads previously banned IPs/subnets/violations from sled and enables
     /// write-through on all future mutations.  Call once after `new_with_blacklist`.
+    ///
+    /// After reloading persisted subnet bans, this also runs an **eviction sweep**:
+    /// any Free-tier masternodes from a previously-banned /24 that somehow re-registered
+    /// before the ban was enforced are immediately evicted and their TCP connections kicked.
     pub async fn enable_blacklist_persistence(&self, db: &sled::Db) {
         self.blacklist.write().await.attach_storage(db);
         tracing::info!("🔒 Blacklist persistence enabled — bans will survive restarts");
@@ -216,6 +220,50 @@ impl NetworkServer {
                 }
                 // Whitelist our own IP permanently so future self-connections never ban us.
                 bl.add_to_whitelist(ip, "local node IP");
+            }
+        }
+
+        // Startup eviction sweep: for each subnet that was persisted as banned in a
+        // previous session, evict any Free-tier masternodes that are currently registered
+        // from that subnet.  This handles two cases:
+        //   (a) Nodes from a banned subnet that were registered *before* the ban was applied.
+        //   (b) Nodes that re-registered while the daemon was offline and the ban was not
+        //       yet in memory.
+        // We do NOT evict paid-tier nodes — they have on-chain collateral, and a subnet ban
+        // should never be used as a mechanism to remove a legitimately funded node.
+        let banned_subnets = self.blacklist.read().await.list_banned_subnets();
+        if !banned_subnets.is_empty() {
+            tracing::info!(
+                "🔒 Running startup eviction sweep for {} persisted banned subnet(s)",
+                banned_subnets.len()
+            );
+            for cidr in &banned_subnets {
+                // Extract 3-octet prefix from CIDR (e.g. "154.217.246.0/24" → "154.217.246")
+                let prefix: String = cidr
+                    .split('/')
+                    .next()
+                    .unwrap_or("")
+                    .split('.')
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join(".");
+                if prefix.is_empty() || prefix.contains(':') {
+                    continue; // IPv6 or malformed — skip
+                }
+                let evicted = self
+                    .masternode_registry
+                    .evict_free_tier_subnet(&prefix)
+                    .await;
+                for ip in &evicted {
+                    self.peer_registry.kick_peer(ip).await;
+                }
+                if !evicted.is_empty() {
+                    tracing::warn!(
+                        "🔒 Startup sweep: evicted {} stale Free-tier node(s) from previously-banned subnet {}/24",
+                        evicted.len(),
+                        prefix
+                    );
+                }
             }
         }
     }
@@ -261,6 +309,7 @@ impl NetworkServer {
             let enforce_ai = ai.clone();
             let enforce_blacklist = self.blacklist.clone();
             let enforce_registry = self.peer_registry.clone();
+            let enforce_mn_registry = self.masternode_registry.clone();
             // Grab the notifier before entering the task so we don't hold an Arc<AISystem>
             // reference just for the notifier.
             let enforce_notify = enforce_ai.attack_detector.ban_notifier();
@@ -286,6 +335,8 @@ impl NetworkServer {
                     // Collect peers to kick *before* dropping the blacklist lock.
                     // kick_peer() is async and must not be called while holding the lock.
                     let mut to_kick: Vec<String> = Vec::new();
+                    // Collect subnet prefixes (3-octet) that need registry eviction.
+                    let mut to_evict_subnets: Vec<String> = Vec::new();
 
                     {
                         let mut blacklist = enforce_blacklist.write().await;
@@ -361,11 +412,38 @@ impl NetworkServer {
                                         attack.attack_type,
                                         attack.confidence * 100.0
                                     );
+                                    // Extract the 3-octet prefix from the CIDR for registry eviction.
+                                    // e.g. "154.217.246.0/24" → "154.217.246"
+                                    let prefix = subnet_str
+                                        .split('/')
+                                        .next()
+                                        .unwrap_or("")
+                                        .split('.')
+                                        .take(3)
+                                        .collect::<Vec<_>>()
+                                        .join(".");
+                                    if !prefix.is_empty() {
+                                        // Also schedule all individual IPs from the attack for kicking
+                                        for src_ip in &attack.source_ips {
+                                            to_kick.push(src_ip.clone());
+                                        }
+                                        to_evict_subnets.push(prefix);
+                                    }
                                 }
                                 _ => {} // Monitor, EmergencySync, HaltProduction — log only
                             }
                         }
                     } // blacklist write lock released here
+
+                    // Evict Free-tier masternodes from banned subnets and kick their connections.
+                    for subnet_prefix in &to_evict_subnets {
+                        let evicted = enforce_mn_registry
+                            .evict_free_tier_subnet(subnet_prefix)
+                            .await;
+                        for ip in evicted {
+                            enforce_registry.kick_peer(&ip).await;
+                        }
+                    }
 
                     // Now close the TCP connections for every banned peer.
                     // kick_peer() removes the peer from the registry and drops the writer
