@@ -201,8 +201,33 @@ impl AttackDetector {
                     .is_some_and(|s| *s == primary_source)
                 && now.saturating_sub(existing.last_seen) <= ATTACK_DEDUP_SECS
             {
-                // Duplicate within dedup window — just refresh the timestamp.
+                // Check if this is a severity escalation (e.g. RateLimitPeer → BlockPeer).
+                // If so, upgrade the existing entry and wake the enforcement loop so the
+                // stronger mitigation is applied immediately.
+                let is_escalation = matches!(
+                    (&existing.recommended_action, &attack.recommended_action),
+                    (MitigationAction::RateLimitPeer(_), MitigationAction::BlockPeer(_))
+                        | (MitigationAction::Monitor, MitigationAction::RateLimitPeer(_))
+                        | (MitigationAction::Monitor, MitigationAction::BlockPeer(_))
+                );
                 existing.last_seen = now;
+                if is_escalation {
+                    tracing::warn!(
+                        "🔺 AI: escalating mitigation for {:?} from {:?} → {:?}",
+                        existing.attack_type,
+                        existing.recommended_action,
+                        attack.recommended_action
+                    );
+                    existing.recommended_action = attack.recommended_action;
+                    existing.confidence = attack.confidence;
+                    existing.severity = attack.severity;
+                    existing.indicators.extend(attack.indicators);
+                    existing.mitigation_applied_at = None; // re-arm so enforcement loop acts
+                    drop(attacks);
+                    self.ban_notify.notify_one();
+                    self.persist_attacks();
+                    return true;
+                }
                 drop(attacks);
                 self.persist_attacks();
                 return false;
