@@ -17,6 +17,10 @@ type PendingCollateralLock = (OutPoint, String, u64, u64);
 
 const MIN_COLLATERAL_CONFIRMATIONS: u64 = 3; // Minimum confirmations for collateral UTXO (30 minutes at 10 min/block)
 
+/// Maximum number of Free-tier masternodes allowed to register from the same /24 subnet.
+/// Exported so the AI overflow scanner in server.rs can reference the canonical value.
+pub const MAX_FREE_TIER_PER_SUBNET: u32 = 5;
+
 // Gossip-based status tracking constants
 const MIN_PEER_REPORTS: usize = 3; // Masternode must be seen by at least 3 peers to be active
 const REPORT_EXPIRY_SECS: u64 = 300; // Reports older than 5 minutes are stale
@@ -504,15 +508,14 @@ impl MasternodeRegistry {
         }
     }
 
-    /// AV25: Fast (lock-free) check whether a /24 subnet is already at the Free-tier cap.
-    /// Used by the message handler to drop excess announcements before acquiring registry locks.
+    /// Returns true if a /24 subnet has reached the Free-tier registration cap.
+    /// Always returns false now that subnet-based registration caps have been removed —
+    /// operators legitimately controlling a subnet may run as many Free-tier nodes as
+    /// they wish; misbehavior is enforced per-node by the AI attack detector.
+    /// Kept for API compatibility with existing call sites.
+    #[allow(unused_variables)]
     pub fn is_free_tier_subnet_at_cap(&self, ip: &str) -> bool {
-        const MAX_FREE_TIER_PER_SUBNET: u32 = 5;
-        let subnet = Self::free_tier_subnet(ip);
-        self.free_tier_subnet_counts
-            .get(&subnet)
-            .map(|c| *c >= MAX_FREE_TIER_PER_SUBNET)
-            .unwrap_or(false)
+        false
     }
 
     /// Update the current blockchain height. Called from block production loop
@@ -1309,40 +1312,17 @@ impl MasternodeRegistry {
             return Ok(());
         }
 
-        // AV25: Per-/24 subnet cap for Free-tier nodes.
-        // Attackers flood the registry from one subnet; cap each /24 at 5 Free-tier nodes.
-        // Paid tiers are not capped — they have on-chain collateral as proof-of-stake.
-        const MAX_FREE_TIER_PER_SUBNET: u32 = 5;
+        // Free-tier nodes are allowed from any subnet in any quantity.
+        // Operators legitimately controlling a subnet should not be blocked from running
+        // multiple masternodes. Individual misbehavior (cycling, vote spam, sync flood, etc.)
+        // is detected and penalized per-node by the AI attack detector (AV3, AV27, AV28, …).
+        // We still track subnet counts so monitoring tools can report on distribution.
         if masternode.tier == crate::types::MasternodeTier::Free {
             let subnet = Self::free_tier_subnet(&masternode.address);
-            let count = self
-                .free_tier_subnet_counts
-                .get(&subnet)
-                .map(|c| *c)
-                .unwrap_or(0);
-            if count >= MAX_FREE_TIER_PER_SUBNET {
-                // Rate-limit this WARN to at most once per 30s per subnet.
-                // During AV3 cycling windows, 100+ nodes burst in simultaneously
-                // after the old 5 disconnect — logging each one creates WARN floods.
-                static SUBNET_REJECT_LIMITER: std::sync::OnceLock<
-                    dashmap::DashMap<String, std::time::Instant>,
-                > = std::sync::OnceLock::new();
-                let limiter = SUBNET_REJECT_LIMITER.get_or_init(dashmap::DashMap::new);
-                let needs_log = limiter
-                    .get(&subnet)
-                    .map(|t| t.elapsed().as_secs() >= 30)
-                    .unwrap_or(true);
-                if needs_log {
-                    limiter.insert(subnet.clone(), std::time::Instant::now());
-                    tracing::warn!(
-                        "🚫 [AV25] Free-tier registration rejected: /24 {} already has {} nodes (max {})",
-                        subnet,
-                        count,
-                        MAX_FREE_TIER_PER_SUBNET
-                    );
-                }
-                return Err(RegistryError::InvalidCollateral);
-            }
+            self.free_tier_subnet_counts
+                .entry(subnet)
+                .and_modify(|c| *c += 1)
+                .or_insert(1);
         }
 
         let current_h = self
@@ -2227,6 +2207,84 @@ impl MasternodeRegistry {
     #[allow(dead_code)]
     pub async fn get_all(&self) -> Vec<MasternodeInfo> {
         self.masternodes.read().await.values().cloned().collect()
+    }
+
+    /// Scan the registry for /24 subnets that have more Free-tier nodes than `cap`.
+    ///
+    /// Returns a list of `(subnet_prefix, [ip, ...])` for each overflowing /24, where
+    /// `subnet_prefix` is the three-octet prefix (e.g. "154.217.246").  Used by the AI
+    /// overflow scanner on startup and periodically to detect AV25 bypasses from nodes
+    /// that registered before the per-subnet cap was enforced.
+    pub async fn find_overflowing_free_subnets(&self, cap: usize) -> Vec<(String, Vec<String>)> {
+        let nodes = self.masternodes.read().await;
+        let mut subnet_ips: HashMap<String, Vec<String>> = HashMap::new();
+        for (addr, info) in nodes.iter() {
+            if info.masternode.tier == crate::types::MasternodeTier::Free {
+                let subnet = Self::free_tier_subnet(addr);
+                subnet_ips.entry(subnet).or_default().push(addr.clone());
+            }
+        }
+        subnet_ips
+            .into_iter()
+            .filter(|(_, ips)| ips.len() > cap)
+            .collect()
+    }
+
+    /// Evict all Free-tier masternodes whose address starts with `subnet_prefix`
+    /// (e.g. "154.217.246").  Returns the list of evicted IP addresses so the caller
+    /// can kick their active TCP connections.
+    ///
+    /// Paid-tier nodes are never evicted by this method — they have on-chain collateral
+    /// and cannot be displaced by a subnet-level ban decision.
+    pub async fn evict_free_tier_subnet(&self, subnet_prefix: &str) -> Vec<String> {
+        let to_evict: Vec<String> = {
+            let nodes = self.masternodes.read().await;
+            nodes
+                .keys()
+                .filter(|addr| {
+                    let node_subnet = Self::free_tier_subnet(addr);
+                    node_subnet == subnet_prefix
+                })
+                .cloned()
+                .collect()
+        };
+
+        let mut evicted = Vec::new();
+        for addr in &to_evict {
+            // Only evict Free-tier nodes — paid-tier collateral is on-chain and cannot be
+            // displaced by an AI subnet ban decision.
+            let is_free = self
+                .masternodes
+                .read()
+                .await
+                .get(addr)
+                .map(|m| m.masternode.tier == crate::types::MasternodeTier::Free)
+                .unwrap_or(false);
+            if !is_free {
+                continue;
+            }
+            match self.unregister(addr).await {
+                Ok(Some(_)) => {
+                    tracing::warn!("🚫 [AI] Evicted banned Free-tier masternode {}", addr);
+                    evicted.push(addr.clone());
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("⚠️  Failed to evict masternode {}: {:?}", addr, e);
+                }
+            }
+        }
+
+        if !evicted.is_empty() {
+            tracing::warn!(
+                "🚫 [AI] Evicted {} Free-tier node(s) from banned subnet {}.x/24: [{}]",
+                evicted.len(),
+                subnet_prefix,
+                evicted.join(", ")
+            );
+        }
+
+        evicted
     }
 
     pub async fn set_peer_manager(&self, peer_manager: Arc<crate::peer_manager::PeerManager>) {
@@ -3687,6 +3745,7 @@ impl MasternodeRegistry {
     ///
     /// Assigns the next available slot ID and stores the on-chain record.
     /// Returns the assigned slot ID on success.
+    #[allow(clippy::too_many_arguments)]
     pub async fn apply_masternode_registration(
         &self,
         node_address: &str,

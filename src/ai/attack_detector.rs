@@ -7,6 +7,10 @@ use std::time::{Duration, SystemTime};
 
 use parking_lot::RwLock;
 
+/// Convenience alias for per-subnet disconnect event queues.
+/// Each entry is `(unix_timestamp_secs, ip_address_string)`.
+type SubnetEventMap = Arc<RwLock<HashMap<String, VecDeque<(u64, String)>>>>;
+
 /// Dedup window: suppress re-reporting the same attack type from the same peer within this window.
 const ATTACK_DEDUP_SECS: u64 = 300; // 5 minutes
 /// Fork-bombing window: only flag if N forks occur within this sliding window.
@@ -104,7 +108,12 @@ pub struct AttackDetector {
     /// Key: subnet prefix (e.g. "154.217.246"), Value: deque of (Unix timestamp, IP address).
     /// The threshold is based on UNIQUE IPs, not raw event count, so a single peer
     /// reconnecting multiple times after an error does not trigger a false positive.
-    subnet_disconnects: Arc<RwLock<HashMap<String, VecDeque<(u64, String)>>>>,
+    subnet_disconnects: SubnetEventMap,
+    /// Per-/16 subnet disconnect events for cross-/24 SynchronizedCycling detection.
+    /// Catches attackers that spread nodes across multiple /24s within the same /16
+    /// to stay under the per-/24 threshold (e.g. 47.79.38.x + 47.79.39.x + 47.79.32.x).
+    /// Key: /16 prefix (e.g. "47.79"), Value: deque of (Unix timestamp, IP address).
+    subnet16_disconnects: SubnetEventMap,
     /// Per-IP TLS failure timestamps for TlsFlood detection.
     /// Key: IP address, Value: deque of failure Unix timestamps.
     tls_failure_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
@@ -131,6 +140,7 @@ impl AttackDetector {
             detected_attacks: Arc::new(RwLock::new(detected_attacks)),
             time_window: Duration::from_secs(300),
             subnet_disconnects: Arc::new(RwLock::new(HashMap::new())),
+            subnet16_disconnects: Arc::new(RwLock::new(HashMap::new())),
             tls_failure_times: Arc::new(RwLock::new(HashMap::new())),
             subnet_tls_failures: Arc::new(RwLock::new(HashMap::new())),
             ping_flood_times: Arc::new(RwLock::new(HashMap::new())),
@@ -611,9 +621,67 @@ impl AttackDetector {
                 mitigation_applied_at: None,
             });
         }
+
+        // /16 cross-subnet check: catch attackers that spread nodes across multiple /24s
+        // within the same /16 to stay under the per-/24 threshold.
+        // Example: 47.79.38.x + 47.79.39.x + 47.79.32.x all part of the same attack cluster.
+        // When ≥5 distinct IPs from the same /16 disconnect within 30s, block each one.
+        // We do NOT auto-ban the /16 — that would be 65,536 addresses and would catch
+        // legitimate nodes on the same cloud AS.
+        let sixteen_prefix: String = addr.split('.').take(2).collect::<Vec<_>>().join(".");
+        if sixteen_prefix.len() >= 3 && !sixteen_prefix.contains(':') {
+            const SYNC16_WINDOW_SECS: u64 = 30;
+            const SYNC16_THRESHOLD: usize = 5;
+
+            let ips_to_block: Vec<String> = {
+                let mut map = self.subnet16_disconnects.write();
+                let events = map.entry(sixteen_prefix.clone()).or_default();
+                while events
+                    .front()
+                    .map(|(t, _)| now.saturating_sub(*t) > SYNC16_WINDOW_SECS)
+                    .unwrap_or(false)
+                {
+                    events.pop_front();
+                }
+                events.push_back((now, addr.to_string()));
+                let unique_ips: std::collections::HashSet<String> =
+                    events.iter().map(|(_, ip)| ip.clone()).collect();
+                if unique_ips.len() >= SYNC16_THRESHOLD {
+                    unique_ips.into_iter().collect()
+                } else {
+                    vec![]
+                }
+            };
+
+            if !ips_to_block.is_empty() {
+                tracing::warn!(
+                    "🛡️ Cross-/24 synchronized disconnect from {}.x.x/16 (AV3) — blocking {} IPs",
+                    sixteen_prefix,
+                    ips_to_block.len()
+                );
+                for ip in ips_to_block {
+                    self.maybe_add_attack(AttackPattern {
+                        attack_type: AttackType::SynchronizedCycling,
+                        confidence: 0.90,
+                        severity: AttackSeverity::High,
+                        indicators: vec![
+                            format!(
+                                "≥{} nodes from {}.x.x/16 disconnected within {}s (cross-/24 AV3)",
+                                SYNC16_THRESHOLD, sixteen_prefix, SYNC16_WINDOW_SECS
+                            ),
+                            format!("Blocking individual IP {} from /16 cluster", ip),
+                        ],
+                        first_detected: now,
+                        last_seen: now,
+                        source_ips: vec![ip.clone()],
+                        recommended_action: MitigationAction::BlockPeer(ip),
+                        mitigation_applied_at: None,
+                    });
+                }
+            }
+        }
     }
 
-    /// Record a TLS handshake failure from `addr`.
     /// Two thresholds are checked:
     /// 1. Per-IP: ≥5 failures from the same IP within 60s → BlockPeer (per-IP TLS flood).
     /// 2. Per-/24 subnet: ≥20 failures from the same /24 within 60s → BlockPeer for the
