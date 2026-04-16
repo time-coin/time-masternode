@@ -1150,6 +1150,14 @@ async fn handle_peer(
     const MAX_UTXO_LOCKS_PER_TX: u32 = 50;
 
     let mut ping_excess_streak: u32 = 0;
+    let mut tx_finalized_excess_streak: u32 = 0;
+
+    // Per-connection rate-limit drop counters.  Declared here (outside the per-message
+    // loop) so they accumulate across messages on the same connection, enabling the
+    // suppression log ("N msgs suppressed in last 60s") and the record_severe_violation
+    // escalation path (≥10 drops) to actually fire.
+    let mut rl_drop_count: u32 = 0;
+    let mut rl_last_log = std::time::Instant::now() - std::time::Duration::from_secs(61);
 
     let magic_bytes = network_type.magic_bytes();
 
@@ -1433,17 +1441,8 @@ async fn handle_peer(
 
                             // Phase 2.2: Rate limiting and blacklist enforcement
                             //
-                            // Per-connection flood counter: tracks how many messages on THIS
-                            // connection have been dropped by the rate limiter.  Used to:
-                            //   • Suppress duplicate log lines (only log the first in a burst,
-                            //     then summarize with a "suppressed N" log every 60 s).
-                            //   • Escalate to `record_severe_violation` when the connection is
-                            //     clearly being used for DoS rather than normal re-registration.
-                            //
-                            // (declared here so the macro can capture it by &mut ref)
-                            let mut rl_drop_count: u32 = 0;
-                            let mut rl_last_log = std::time::Instant::now()
-                                - std::time::Duration::from_secs(61);
+                            // rl_drop_count / rl_last_log are declared outside this loop so
+                            // they accumulate across messages on the same connection.
 
                             // Define helper macro for rate limit checking with auto-ban
                             macro_rules! check_rate_limit {
@@ -1688,7 +1687,33 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::TransactionFinalized { txid, tx } => {
-                                    check_rate_limit!("tx_finalized");
+                                    // AV40: inline rate check with AI escalation.
+                                    // The generic check_rate_limit! macro calls record_violation()
+                                    // which is subject to whitelist exemption and never reaches
+                                    // record_finality_injection().  By inlining here (mirroring
+                                    // ping_excess_streak) we feed sustained flooding into the
+                                    // AV38 relay-safe two-tier escalation in AttackDetector.
+                                    {
+                                        let rate_ok = {
+                                            let mut limiter = rate_limiter.write().await;
+                                            limiter.check("tx_finalized", &ip_str)
+                                        };
+                                        if !rate_ok {
+                                            tx_finalized_excess_streak += 1;
+                                            tracing::warn!(
+                                                "⚠️  Rate limit exceeded for tx_finalized from {} (excess streak: {})",
+                                                peer.addr, tx_finalized_excess_streak
+                                            );
+                                            if tx_finalized_excess_streak >= 5 {
+                                                if let Some(ref ai) = ai_system {
+                                                    ai.attack_detector.record_finality_injection(&ip_str);
+                                                }
+                                                tx_finalized_excess_streak = 0;
+                                            }
+                                            continue;
+                                        }
+                                        tx_finalized_excess_streak = 0;
+                                    }
 
                                     // Drop mempool transactions while syncing — the UTXOs they
                                     // reference likely don't exist in our local UTXO set yet, so

@@ -4,8 +4,8 @@
 **Date:** January 23, 2026  
 **Version:** 1.4  
 **Audit Scope:** Full system security analysis against known cryptocurrency vulnerabilities + Bitcoin development insights  
-**Last Verification:** April 7, 2026  
-**Last Updated:** April 7, 2026 — Section 14 added (April 2026 mainnet attack findings)
+**Last Verification:** April 16, 2026  
+**Last Updated:** April 16, 2026 — AV40 added (Section 15.17): `tx_finalized` rate-limit saturation without peer escalation
 
 ---
 
@@ -17,7 +17,7 @@ This document provides a comprehensive security analysis of TimeCoin against all
 
 ### Key Findings
 - ✅ **22 attack vectors fully mitigated** (+6 from April 2026 mainnet findings)
-- ⚠️ **4 attack vectors with recommended enhancements**
+- ⚠️ **5 attack vectors with recommended enhancements** (+1: AV40 `tx_finalized` rate-limit non-escalation)
 - ❌ **0 critical vulnerabilities**
 - 🟢 **Already 2106-safe** (ahead of Bitcoin's uint32 → uint64 migration)
 
@@ -1478,6 +1478,47 @@ A height gate is required because all existing nodes have already replayed the s
 
 ---
 
+### 15.17 ⚠️ OPEN — `tx_finalized` Rate-Limit Saturation Without Peer Escalation (AV40)
+
+**Status:** **OPEN** (observed April 16, 2026 — fix recommended)
+**Severity:** Medium — log flooding, minor CPU overhead, attacker never banned
+
+**Attack:** An attacker (or coordinated group) floods `TransactionFinalized` messages at a rate exceeding the per-peer cap (20/10 s). The rate limiter in `rate_limiter.rs` correctly drops the excess messages, but because the handler body is never reached for rate-limited messages, `record_finality_injection()` is never called. The AttackDetector accumulates no signal, so the escalation tiers (≥5 → `RateLimitPeer`, ≥20 → `BlockPeer`) defined in AV38 are never triggered. The flooding peer stays connected and can sustain the attack indefinitely.
+
+**Observed attack (April 16, 2026 — LW-Michigan, 17:04:12–17:04:31):**
+- `43.119.35.195` — 30+ rate-limit hits at 17:04:12, 9 TXs slipped through at 17:04:31, then ~150 more rate-limit hits in the same second. Peer never disconnected.
+- `154.64.252.184` — ~40 rate-limit hits at 17:04:33–34. Peer never disconnected.
+- `165.84.215.117` — 26 rate-limit hits at 17:04:42. Peer never disconnected.
+- `50.28.104.50` — 10 rate-limit hits at 17:04:47–50. Peer never disconnected.
+- Four peers flooding simultaneously — coordinated campaign.
+
+**Root cause:** The `"tx_finalized"` rate limiter in `rate_limiter.rs` drops messages silently and returns an error to the caller. The `TransactionFinalized` handler discards the error without recording a violation. Unlike ping handling (which has a `ping_excess_streak` counter that escalates after 3 consecutive rate-limit hits into `record_violation()` + `record_ping_flood()`), `tx_finalized` has no equivalent streak escalation.
+
+**Impact:**
+- Hundreds of WARN lines per second obscure real events in the log
+- The rate-limit check itself runs on every incoming message, consuming CPU per flooded packet
+- Attackers are never penalized, so the attack has zero cost to sustain
+- Coordinated multi-peer flooding is not detected as an aggregate signal
+
+**Recommended Fix:**
+Add a `tx_finalized_excess_streak` counter (mirroring `ping_excess_streak`) in the message dispatch path. After N consecutive rate-limit exceedances (e.g., 5), call `record_finality_injection()` so that the existing AV38 two-tier escalation (`RateLimitPeer` / `BlockPeer`) kicks in normally.
+
+```rust
+// In the TransactionFinalized dispatch path, after rate_limiter.check() returns Err:
+tx_finalized_excess_streak += 1;
+if tx_finalized_excess_streak >= 5 {
+    attack_detector.record_finality_injection(&peer_ip);
+    tx_finalized_excess_streak = 0;
+}
+```
+
+**Code References:**
+- `src/network/server.rs` — `TransactionFinalized` handler; `ping_excess_streak` escalation model
+- `src/network/rate_limiter.rs` — `"tx_finalized"` rate-limit entry
+- `src/ai/attack_detector.rs` — `record_finality_injection()` two-tier sliding-window detection
+
+---
+
 ## SUMMARY TABLE — Additional Vectors (Section 15)
 
 | ID | Name | Severity | Status |
@@ -1498,6 +1539,7 @@ A height gate is required because all existing nodes have already replayed the s
 | AV35 | Free-tier reward monopolisation | High | ✅ Fixed |
 | AV36 | Reputation poisoning / blacklist manipulation | High | ✅ Fixed |
 | AV37 | Registration spam / slot ID exhaustion | High | ✅ Fixed (height-gated, fork height 200) |
+| AV40 | `tx_finalized` rate-limit saturation without peer escalation | Medium | ⚠️ Open |
 
 **Observed (April 8 watchdog log):**
 ```
@@ -1968,8 +2010,12 @@ With unique TXIDs on every injection, the bloom-filter dedup never fires, and th
 
 ---
 
-**Document Version:** 1.4
+**Document Version:** 1.5
 **Last Updated:** April 16, 2026
+**Changes from v1.4:**
+- Updated executive summary: 5 attack vectors with recommended enhancements (+1: AV40)
+- Added AV40 (Section 15.17): `tx_finalized` rate-limit saturation without peer escalation — observed live April 16, 2026 (LW-Michigan); fix recommended
+
 **Changes from v1.3:**
 - Updated executive summary: 24 attack vectors fully mitigated (+2 from April 2026 live-attack findings)
 - Added AV-13 (Section 14.13): Finality Injection / Broadcast Amplification (AV38) — fixed in v1.4.36
