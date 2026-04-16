@@ -17,7 +17,8 @@ This document provides a comprehensive security analysis of TimeCoin against all
 
 ### Key Findings
 - ✅ **22 attack vectors fully mitigated** (+6 from April 2026 mainnet findings)
-- ⚠️ **5 attack vectors with recommended enhancements** (+1: AV40 `tx_finalized` rate-limit non-escalation)
+- ✅ **24 attack vectors fully mitigated** (+2 from April 16, 2026: AV40 + AV41)
+- ⚠️ **4 attack vectors with recommended enhancements**
 - ❌ **0 critical vulnerabilities**
 - 🟢 **Already 2106-safe** (ahead of Bitcoin's uint32 → uint64 migration)
 
@@ -1519,6 +1520,40 @@ if tx_finalized_excess_streak >= 5 {
 
 ---
 
+### 15.18 ✅ FIXED — Ghost Special_data Transaction Mempool Flood (AV41)
+
+**Status:** **FIXED** (v1.4.37)
+**Severity:** Medium — mempool resource exhaustion; ghost TXs occupy slots indefinitely
+
+**Attack:** The attacker crafts transactions with 0 inputs, 0 outputs, and a `special_data` field set to `Some(MasternodeRegistration { node_address: "", pubkey: "garbage", ... })`. These TXs:
+1. Pass the AV39 null-TX guard (which only drops when `special_data.is_none()`)
+2. Pass `process_transaction()` via the special-TX early return (`is_masternode_reg()` → `return Ok(0)` — skips all fee/value checks)
+3. Enter the mempool as ghost entries that can never be mined and never expire
+
+**Observed attack (April 16, 2026 — dashboard):**
+- 71 pending + 71 finalized ghost TXs occupying the mempool
+- All showed 0.00 TIME amount, 0.00 fee, 0 inputs, 0 outputs, ~331 bytes (fake special_data)
+- Age: several minutes — persisted across gossip cleanup cycles with no eviction
+
+**Root cause (two paths):**
+1. `process_transaction()` in `consensus.rs`: `is_masternode_reg() || is_masternode_dereg()` triggers an unconditional `return Ok(0)` before any field validation. A TX with a structurally valid (deserializable) but semantically empty `MasternodeRegistration` bypasses all economic checks.
+2. `TransactionFinalized` AV38 unknown-TX path in `server.rs`: calls `tx_pool.add_pending()` directly. The AV39 null-TX guard checks `special_data.is_none()`, which is false for ghost special_data TXs — so they also bypass this path.
+
+**Fixes Applied:**
+- **`SpecialTransactionData::validate_fields()`** (new method in `types.rs`): checks that all required string fields are non-empty, `pubkey` is exactly 64 hex chars (32-byte Ed25519), and `node_address` contains `:` (IP:port format). Returns `Err(&'static str)` on failure.
+- **`process_transaction()` guard** (`consensus.rs`): before `return Ok(0)` for masternode TXs, calls `sd.validate_fields()`. Invalid fields → `Err("Invalid special_data fields (AV41): ...")` → TX rejected from mempool entry.
+- **AV38 handler guard** (`server.rs`): after the null-TX guard, added a second check for `inputs.is_empty() && outputs.is_empty()` — if `special_data.is_none()` OR `validate_fields()` fails, drop the TX and call `record_finality_injection()` (relay-safe AI escalation).
+- **`TransactionPool::purge_ghost_transactions()`** (new method in `transaction_pool.rs`): sweeps both pending and confirmed pools, removes any TX with 0 inputs, 0 outputs, and invalid/no special_data. Runs at startup (after mempool restore) and every 5 minutes via a dedicated periodic task in `server.rs`.
+
+**Code References:**
+- `src/types.rs` — `SpecialTransactionData::validate_fields()`
+- `src/consensus.rs` — `process_transaction()` AV41 guard (before special-TX early return)
+- `src/network/server.rs` — AV38 handler ghost special_data guard + periodic sweep task
+- `src/transaction_pool.rs` — `purge_ghost_transactions()`
+- `src/main.rs` — startup ghost purge after mempool restore
+
+---
+
 ## SUMMARY TABLE — Additional Vectors (Section 15)
 
 | ID | Name | Severity | Status |
@@ -1539,7 +1574,8 @@ if tx_finalized_excess_streak >= 5 {
 | AV35 | Free-tier reward monopolisation | High | ✅ Fixed |
 | AV36 | Reputation poisoning / blacklist manipulation | High | ✅ Fixed |
 | AV37 | Registration spam / slot ID exhaustion | High | ✅ Fixed (height-gated, fork height 200) |
-| AV40 | `tx_finalized` rate-limit saturation without peer escalation | Medium | ⚠️ Open |
+| AV40 | `tx_finalized` rate-limit saturation without peer escalation | Medium | ✅ Fixed |
+| AV41 | Ghost special_data transaction mempool flood | Medium | ✅ Fixed |
 
 **Observed (April 8 watchdog log):**
 ```
@@ -2013,8 +2049,9 @@ With unique TXIDs on every injection, the bloom-filter dedup never fires, and th
 **Document Version:** 1.5
 **Last Updated:** April 16, 2026
 **Changes from v1.4:**
-- Updated executive summary: 5 attack vectors with recommended enhancements (+1: AV40)
-- Added AV40 (Section 15.17): `tx_finalized` rate-limit saturation without peer escalation — observed live April 16, 2026 (LW-Michigan); fix recommended
+- Updated executive summary: 24 vectors fully mitigated (+2: AV40, AV41)
+- Added AV40 (Section 15.17): `tx_finalized` rate-limit saturation without peer escalation — fixed in v1.4.37
+- Added AV41 (Section 15.18): Ghost special_data transaction mempool flood — fixed in v1.4.37
 
 **Changes from v1.3:**
 - Updated executive summary: 24 attack vectors fully mitigated (+2 from April 2026 live-attack findings)

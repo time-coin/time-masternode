@@ -2576,8 +2576,23 @@ impl ConsensusEngine {
         // economic checks (input/output balance, dust, minimum send, fee) for these.
         // Structural / signature validity is enforced in blockchain.rs when the containing
         // block is applied, so we just accept them here without further checks.
+        //
+        // AV41: validate special_data fields before accepting into the mempool.
+        // An attacker can craft a TX with MasternodeRegistration { empty fields } that
+        // satisfies is_masternode_reg() but carries no meaningful payload.  Without this
+        // check such ghost TXs would pass all guards and sit in the mempool indefinitely.
         if tx.is_masternode_reg() || tx.is_masternode_dereg() {
+            if let Some(ref sd) = tx.special_data {
+                if let Err(reason) = sd.validate_fields() {
+                    return Err(format!("Invalid special_data fields (AV41): {}", reason));
+                }
+            }
             return Ok(0);
+        }
+        if let Some(ref sd) = tx.special_data {
+            if let Err(reason) = sd.validate_fields() {
+                return Err(format!("Invalid special_data fields (AV41): {}", reason));
+            }
         }
 
         // 2. Check inputs exist and are unspent (or locked/finalized by this tx)

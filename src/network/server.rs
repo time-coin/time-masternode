@@ -486,6 +486,27 @@ impl NetworkServer {
             tracing::info!("🔍 Collateral audit sweep started (5-minute interval)");
         }
 
+        // AV41: Ghost transaction mempool sweep — runs every 5 minutes.
+        // Catches any ghost TXs (0 inputs, 0 outputs, invalid/no special_data) that
+        // slipped in before the fix was deployed or via a race with the guard.
+        {
+            let ghost_consensus = self.consensus.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300));
+                loop {
+                    interval.tick().await;
+                    let removed = ghost_consensus.tx_pool.purge_ghost_transactions();
+                    if removed > 0 {
+                        tracing::warn!(
+                            "🛡️ [AV41] Periodic sweep: purged {} ghost transaction(s) from mempool",
+                            removed
+                        );
+                    }
+                }
+            });
+            tracing::info!("🔍 Ghost TX mempool sweep started (5-minute interval)");
+        }
+
         // Note: Deduplication filter handles its own cleanup with automatic rotation
 
         // Per-/24 subnet connection rate limiter: throttles inbound floods before TLS.
@@ -1751,6 +1772,30 @@ async fn handle_peer(
                                             ai.attack_detector.record_finality_injection(&ip_str);
                                         }
                                         continue;
+                                    }
+
+                                    // AV41: ghost special_data guard.  The attacker crafts a TX
+                                    // with 0 inputs, 0 outputs, and a MasternodeRegistration
+                                    // special_data carrying empty/garbage fields.  This satisfies
+                                    // is_masternode_reg() and bypasses the null-TX guard above
+                                    // (special_data.is_some() → guard evaluates false).  We apply
+                                    // the same relay-safe finality-injection tracking so innocent
+                                    // relay nodes are not penalised.
+                                    if tx.inputs.is_empty() && tx.outputs.is_empty() {
+                                        let field_err = tx.special_data.as_ref().map_or(
+                                            true, // no special_data — already caught above, belt-and-suspenders
+                                            |sd| sd.validate_fields().is_err(),
+                                        );
+                                        if field_err {
+                                            tracing::debug!(
+                                                "🗑️ Ghost special_data TX {} via TransactionFinalized from {} — dropped (AV41)",
+                                                hex::encode(*txid), peer.addr
+                                            );
+                                            if let Some(ref ai) = ai_system {
+                                                ai.attack_detector.record_finality_injection(&ip_str);
+                                            }
+                                            continue;
+                                        }
                                     }
 
                                     // If the TX is already in the finalized pool, skip entirely

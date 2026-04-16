@@ -167,6 +167,88 @@ pub enum SpecialTransactionData {
     },
 }
 
+impl SpecialTransactionData {
+    /// Structural field validation for mempool admission.
+    ///
+    /// This is NOT full signature/collateral verification — that happens in
+    /// `blockchain.rs` at block-application time.  The purpose here is to
+    /// reject ghost transactions that carry syntactically empty or obviously
+    /// malformed fields so they cannot be used as zero-cost mempool spam
+    /// (AV41: fake-special_data ghost TX flood).
+    ///
+    /// Rules:
+    /// - All string fields that must be non-empty are checked.
+    /// - `pubkey` must be exactly 64 hex chars (32-byte Ed25519 public key).
+    /// - `node_address` must contain ':' (IP:port format).
+    ///
+    /// Returns `Ok(())` if the fields pass basic sanity, `Err(reason)` otherwise.
+    pub fn validate_fields(&self) -> Result<(), &'static str> {
+        match self {
+            SpecialTransactionData::MasternodeRegistration {
+                node_address,
+                wallet_address,
+                pubkey,
+                signature,
+                ..
+            } => {
+                if node_address.is_empty() {
+                    return Err("MasternodeRegistration: node_address is empty");
+                }
+                if !node_address.contains(':') {
+                    return Err("MasternodeRegistration: node_address missing port (expected IP:port)");
+                }
+                if wallet_address.is_empty() {
+                    return Err("MasternodeRegistration: wallet_address is empty");
+                }
+                if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err("MasternodeRegistration: pubkey must be 64 hex chars");
+                }
+                if signature.is_empty() {
+                    return Err("MasternodeRegistration: signature is empty");
+                }
+                Ok(())
+            }
+            SpecialTransactionData::MasternodeDeregistration {
+                node_address,
+                pubkey,
+                signature,
+                ..
+            } => {
+                if node_address.is_empty() {
+                    return Err("MasternodeDeregistration: node_address is empty");
+                }
+                if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err("MasternodeDeregistration: pubkey must be 64 hex chars");
+                }
+                if signature.is_empty() {
+                    return Err("MasternodeDeregistration: signature is empty");
+                }
+                Ok(())
+            }
+            SpecialTransactionData::MasternodePayoutUpdate {
+                node_address,
+                new_reward_address,
+                pubkey,
+                signature,
+            } => {
+                if node_address.is_empty() {
+                    return Err("MasternodePayoutUpdate: node_address is empty");
+                }
+                if new_reward_address.is_empty() {
+                    return Err("MasternodePayoutUpdate: new_reward_address is empty");
+                }
+                if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err("MasternodePayoutUpdate: pubkey must be 64 hex chars");
+                }
+                if signature.is_empty() {
+                    return Err("MasternodePayoutUpdate: signature is empty");
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// On-chain record for a registered masternode (any tier).
 /// Stored in blockchain sled DB under key `mnreg:{node_address}`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

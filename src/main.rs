@@ -938,6 +938,16 @@ async fn main() {
         tracing::info!("📂 Restored {} mempool transaction(s) from disk", restored);
     }
 
+    // AV41: purge any ghost TXs (0 inputs, 0 outputs, invalid/no special_data)
+    // that persisted in the sled mempool from before this fix was deployed.
+    let ghost_purged = consensus_engine.tx_pool.purge_ghost_transactions();
+    if ghost_purged > 0 {
+        tracing::warn!(
+            "🛡️ [AV41] Startup: purged {} ghost transaction(s) from restored mempool",
+            ghost_purged
+        );
+    }
+
     let consensus_engine = Arc::new(consensus_engine);
     tracing::info!("✓ Consensus engine initialized with AI validation and TimeLock voting");
 

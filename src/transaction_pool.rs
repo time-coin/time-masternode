@@ -583,6 +583,85 @@ impl TransactionPool {
         Ok(evicted)
     }
 
+    /// AV41: Purge ghost transactions from both the pending and confirmed pools.
+    ///
+    /// A ghost TX has 0 inputs AND 0 outputs AND either no special_data or
+    /// special_data that fails basic field validation.  These TXs transfer
+    /// nothing, pay no fee, and can never be mined — they are pure mempool spam.
+    ///
+    /// Run at startup (after mempool restore) and periodically in the gossip
+    /// cleanup task.  Returns the number of TXs removed.
+    pub fn purge_ghost_transactions(&self) -> usize {
+        let mut removed = 0usize;
+
+        // Pending pool sweep
+        let ghost_pending: Vec<[u8; 32]> = self
+            .pending
+            .iter()
+            .filter(|e| {
+                let tx = &e.value().tx;
+                if !tx.inputs.is_empty() || !tx.outputs.is_empty() {
+                    return false;
+                }
+                match &tx.special_data {
+                    None => true, // pure null TX
+                    Some(sd) => sd.validate_fields().is_err(),
+                }
+            })
+            .map(|e| *e.key())
+            .collect();
+
+        for txid in &ghost_pending {
+            if let Some((_, entry)) = self.pending.remove(txid) {
+                self.pending_count.fetch_sub(1, Ordering::Relaxed);
+                self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
+                self.sled_remove(txid);
+                tracing::info!(
+                    "🗑️ [AV41] Purged ghost TX {} from pending pool",
+                    hex::encode(txid)
+                );
+                removed += 1;
+            }
+        }
+
+        // Confirmed (finalized) pool sweep — ghost TXs that arrived via the
+        // TransactionFinalized path before the AV41 guard was applied.
+        let ghost_confirmed: Vec<[u8; 32]> = self
+            .confirmed
+            .iter()
+            .filter(|e| {
+                let tx = &e.value().tx;
+                if !tx.inputs.is_empty() || !tx.outputs.is_empty() {
+                    return false;
+                }
+                match &tx.special_data {
+                    None => true,
+                    Some(sd) => sd.validate_fields().is_err(),
+                }
+            })
+            .map(|e| *e.key())
+            .collect();
+
+        for txid in &ghost_confirmed {
+            if self.confirmed.remove(txid).is_some() {
+                self.sled_remove(txid);
+                tracing::info!(
+                    "🗑️ [AV41] Purged ghost TX {} from finalized pool",
+                    hex::encode(txid)
+                );
+                removed += 1;
+            }
+        }
+
+        if removed > 0 {
+            tracing::warn!(
+                "🛡️ [AV41] Purged {} ghost transaction(s) from mempool (0-input/0-output spam)",
+                removed
+            );
+        }
+        removed
+    }
+
     /// Phase 2.4: Get mempool pressure status
     pub fn get_pressure_status(&self) -> MemPoolPressure {
         let pressure = self.get_memory_pressure();
