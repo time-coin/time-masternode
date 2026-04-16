@@ -136,6 +136,25 @@ pub mod masternode_authority {
     pub const REWARD_VIOLATION_THRESHOLD: u64 = 3;
 }
 
+/// Consensus upgrade fork heights
+///
+/// These constants gate behaviour changes that affect on-chain state (bitmap positions,
+/// slot assignment, reward rules) so that all nodes — including those replaying from
+/// genesis — compute identical results for every block.  Always set to a height that
+/// is far enough in the future for all operators to upgrade before the chain reaches it.
+pub mod fork_heights {
+    /// Height at which the "one slot per IP" registration rule activates.
+    ///
+    /// Before this height: each MasternodeRegistration transaction for an IP that already
+    /// has a sled record will burn a new slot_id (legacy behaviour — matches the on-chain
+    /// history that all existing nodes have already replayed).
+    ///
+    /// From this height onward: a re-registration with a different txid reuses the IP's
+    /// existing slot_id instead of allocating a new one, preventing registration-spam
+    /// slot exhaustion (AV-NEW / AV37).
+    pub const SLOT_UNIQUENESS_FORK_HEIGHT: u64 = 200;
+}
+
 /// Performance tuning constants
 pub mod performance {
     /// Number of blocks to process in parallel during validation

@@ -3760,20 +3760,42 @@ impl MasternodeRegistry {
     ) -> Result<u32, String> {
         use ed25519_dalek::Verifier;
 
-        // Idempotency guard: if this node is already registered with the same txid
-        // (applied earlier at SpentFinalized by apply_finality_result), skip re-application.
-        // If registration_height > 0 (i.e. we have the real block height now), update it.
+        // Slot-uniqueness / idempotency guard.
+        //
+        // Each node IP is assigned exactly ONE slot_id for the lifetime of the chain.
+        // Re-registration with a new txid (e.g. wallet/key rotation) is allowed but
+        // REUSES the existing slot_id rather than burning a new one.  This prevents
+        // registration-spam attacks where an attacker submits hundreds of valid
+        // MasternodeRegistration transactions for the same IP with different wallet
+        // addresses, exhausting the slot counter and flooding the in-memory registry.
+        //
+        // Cases:
+        //   1. No existing sled record  → fresh node; verify sig, assign new slot.
+        //   2. Same txid                → fully idempotent; update height if needed, return slot.
+        //   3. Different txid, same IP  → re-registration / key-rotation; verify sig,
+        //                                 update wallet/key/txid, REUSE existing slot_id.
+        // Slot-uniqueness / idempotency guard.
+        //
+        // Cases:
+        //   1. No existing sled record  → fresh node; verify sig, assign new slot.
+        //   2. Same txid                → fully idempotent; update height if needed, return slot.
+        //   3. Different txid, same IP, height >= SLOT_UNIQUENESS_FORK_HEIGHT
+        //                              → re-registration / key-rotation; reuse existing slot.
+        //   4. Different txid, same IP, height <  SLOT_UNIQUENESS_FORK_HEIGHT
+        //                              → legacy behaviour: assign new slot so that chain
+        //                                replay produces the same slot_ids that existing
+        //                                nodes already have in their sled state (consensus
+        //                                compatibility for pre-fork history).
         let key = format!("mnreg:{}", node_address);
-        if let Ok(Some(existing_bytes)) = self.db.get(key.as_bytes()) {
+        let existing_slot: Option<u32> = if let Ok(Some(existing_bytes)) = self.db.get(key.as_bytes()) {
             if let Ok(mut existing) = bincode::deserialize::<crate::types::MasternodeOnchainInfo>(&existing_bytes) {
                 if existing.registration_txid == registration_txid {
-                    // Already applied. If we now have the real block height, update it.
+                    // Case 2: exact same txid — fully idempotent.
                     if registration_height > 0 && existing.registration_height == 0 {
                         existing.registration_height = registration_height;
                         if let Ok(bytes) = bincode::serialize(&existing) {
                             let _ = self.db.insert(key.as_bytes(), bytes);
                         }
-                        // Also update in-memory registration_height
                         if let Some(info) = self.masternodes.write().await.get_mut(node_address) {
                             info.registration_height = registration_height;
                             if let RegistrationSource::OnChain(_) = info.registration_source {
@@ -3787,10 +3809,23 @@ impl MasternodeRegistry {
                     }
                     return Ok(existing.slot_id);
                 }
+                // Different txid, same IP.
+                // Case 3: at/after fork height → reuse slot (spam protection).
+                // Case 4: before fork height  → return None so a new slot is assigned,
+                //         preserving pre-fork consensus with existing nodes.
+                if registration_height >= crate::constants::fork_heights::SLOT_UNIQUENESS_FORK_HEIGHT {
+                    Some(existing.slot_id)
+                } else {
+                    None
+                }
+            } else {
+                None
             }
-        }
+        } else {
+            None // Case 1: new IP
+        };
 
-        // Verify signature
+        // Verify signature (required for both new registrations and re-registrations).
         let pubkey_bytes = hex::decode(pubkey).map_err(|e| format!("invalid pubkey hex: {}", e))?;
         let pubkey_arr: [u8; 32] = pubkey_bytes.try_into().map_err(|_| "pubkey must be 32 bytes")?;
         let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_arr)
@@ -3803,8 +3838,17 @@ impl MasternodeRegistry {
         verifying_key.verify(msg.as_bytes(), &sig)
             .map_err(|_| "MasternodeRegistration signature verification failed")?;
 
-        // Assign next slot ID (atomically from sled counter)
-        let slot_id = self.assign_next_slot_id()?;
+        // Use existing slot for re-registrations; assign a fresh one for new IPs.
+        let slot_id = match existing_slot {
+            Some(s) => {
+                tracing::debug!(
+                    "↪ MasternodeRegistration re-registration: {} reusing slot={} new_txid={}",
+                    node_address, s, registration_txid
+                );
+                s
+            }
+            None => self.assign_next_slot_id()?,
+        };
 
         // Determine tier and lock collateral for paid-tier nodes
         let (tier, collateral_amount, outpoint_opt) = if collateral_outpoint.is_empty() {
