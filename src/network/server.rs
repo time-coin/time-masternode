@@ -345,20 +345,14 @@ impl NetworkServer {
                                 crate::ai::MitigationAction::BlockPeer(ip_str) => {
                                     if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
                                         if blacklist.is_whitelisted(ip) {
-                                            // Use severe violation for whitelisted peers
-                                            // (overrides whitelist on 2nd offense)
-                                            let should_disconnect =
-                                                blacklist.record_severe_violation(
-                                                    ip,
-                                                    &format!("{:?}", attack.attack_type),
-                                                );
-                                            if should_disconnect {
-                                                tracing::warn!(
-                                                    "🛡️ AI: Severe violation for whitelisted peer {} ({:?})",
-                                                    ip, attack.attack_type
-                                                );
-                                                to_kick.push(ip_str.clone());
-                                            }
+                                            // Whitelisted peers are operator-trusted — never
+                                            // disconnect them regardless of AI confidence.
+                                            // They may be relaying attacker traffic innocently;
+                                            // banning them would drop legitimate stake weight.
+                                            tracing::warn!(
+                                                "⚠️ AI: BlockPeer suppressed for whitelisted peer {} ({:?}) — log only",
+                                                ip, attack.attack_type
+                                            );
                                         } else {
                                             let should_disconnect = blacklist.record_violation(
                                                 ip,
@@ -378,18 +372,27 @@ impl NetworkServer {
                                 }
                                 crate::ai::MitigationAction::RateLimitPeer(ip_str) => {
                                     if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
-                                        // Rate limit = record as violation (escalates automatically)
-                                        let should_disconnect = blacklist.record_violation(
-                                            ip,
-                                            &format!("Rate limited: {:?}", attack.attack_type),
-                                        );
-                                        if should_disconnect {
+                                        if blacklist.is_whitelisted(ip) {
+                                            // Never penalize whitelisted peers for rate-limit
+                                            // violations — they may be relaying legitimately.
                                             tracing::warn!(
-                                                "🚫 AI: Rate-limited peer {} escalated to ban ({:?})",
-                                                ip,
-                                                attack.attack_type
+                                                "⚠️ AI: RateLimitPeer suppressed for whitelisted peer {} ({:?}) — log only",
+                                                ip, attack.attack_type
                                             );
-                                            to_kick.push(ip_str.clone());
+                                        } else {
+                                            // Rate limit = record as violation (escalates automatically)
+                                            let should_disconnect = blacklist.record_violation(
+                                                ip,
+                                                &format!("Rate limited: {:?}", attack.attack_type),
+                                            );
+                                            if should_disconnect {
+                                                tracing::warn!(
+                                                    "🚫 AI: Rate-limited peer {} escalated to ban ({:?})",
+                                                    ip,
+                                                    attack.attack_type
+                                                );
+                                                to_kick.push(ip_str.clone());
+                                            }
                                         }
                                     }
                                 }
