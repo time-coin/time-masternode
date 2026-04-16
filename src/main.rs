@@ -1189,7 +1189,7 @@ async fn main() {
 
     // Check for missing blocks in the chain (continuity check)
     tracing::info!("🔍 Checking blockchain continuity...");
-    let missing_blocks = blockchain.check_chain_continuity();
+    let missing_blocks = blockchain.verify_chain_integrity().await;
     if !missing_blocks.is_empty() {
         tracing::warn!(
             "⚠️ Detected {} missing blocks in chain",
@@ -1932,7 +1932,7 @@ async fn main() {
                 // on-chain paid-tier registration with a Free-tier one.
                 if mn_for_sync.tier == types::MasternodeTier::Free
                     && conf_outpoint.is_none()
-                    && !collateral_sync_blockchain.is_free_tier_registered(ip)
+                    && !collateral_sync_blockchain.is_masternode_registered(ip)
                 {
                     tracing::info!(
                         "📤 Auto-submitting FreeNodeRegistration for {} (wallet: {})",

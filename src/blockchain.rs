@@ -601,11 +601,7 @@ impl Blockchain {
             .map_err(|e| format!("Failed to clear UTXOs: {:?}", e))?;
 
         // Reset treasury balance (will be rebuilt from block replay)
-        self.treasury_balance
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-        if let Ok(bytes) = bincode::serialize(&0u64) {
-            let _ = self.storage.insert("treasury_balance", bytes);
-        }
+        self.set_treasury_balance(0);
 
         // Step 2: Replay all blocks from genesis to current height
         let mut blocks_processed = 0u64;
@@ -626,11 +622,7 @@ impl Blockchain {
                                 );
                             }
                             // Sync treasury balance from the block header (authoritative).
-                            let t = block.header.treasury_balance;
-                            self.treasury_balance.store(t, std::sync::atomic::Ordering::Relaxed);
-                            if let Ok(bytes) = bincode::serialize(&t) {
-                                let _ = self.storage.insert("treasury_balance", bytes);
-                            }
+                            self.set_treasury_balance(block.header.treasury_balance);
                         }
                         Err(e) => {
                             tracing::error!(
@@ -904,10 +896,7 @@ impl Blockchain {
         self.current_height.store(0, Ordering::Release);
         // Sync treasury balance from the genesis block header.
         let t = genesis.header.treasury_balance;
-        self.treasury_balance.store(t, std::sync::atomic::Ordering::Relaxed);
-        if let Ok(bytes) = bincode::serialize(&t) {
-            let _ = self.storage.insert("treasury_balance", bytes);
-        }
+        self.set_treasury_balance(t);
         tracing::info!(
             "🏦 Genesis treasury balance: {} TIME ({} satoshis)",
             t / 100_000_000,
@@ -3928,7 +3917,7 @@ impl Blockchain {
         let free_tier_registered: std::collections::HashSet<String> = active_bitmap_nodes
             .iter()
             .filter(|info| info.masternode.tier == MasternodeTier::Free)
-            .filter(|info| self.is_free_tier_registered(&info.masternode.address))
+            .filter(|info| self.is_masternode_registered(&info.masternode.address))
             .map(|info| info.masternode.address.clone())
             .collect();
 
@@ -5330,37 +5319,6 @@ impl Blockchain {
         self.get_block_hash(height).ok()
     }
 
-    /// Check chain continuity and detect missing blocks
-    /// Returns a list of missing block heights
-    pub fn check_chain_continuity(&self) -> Vec<u64> {
-        let height = self.get_height();
-        let mut missing = Vec::new();
-
-        tracing::info!("🔍 Checking chain continuity from 0 to {}", height);
-
-        for h in 0..=height {
-            if self.get_block(h).is_err() {
-                missing.push(h);
-            }
-        }
-
-        if !missing.is_empty() {
-            tracing::warn!(
-                "⚠️ Chain has {} missing blocks: {:?}",
-                missing.len(),
-                if missing.len() > 20 {
-                    format!("{:?}...and {} more", &missing[..20], missing.len() - 20)
-                } else {
-                    format!("{:?}", missing)
-                }
-            );
-        } else {
-            tracing::info!("✓ Chain is continuous from 0 to {}", height);
-        }
-
-        missing
-    }
-
     /// Diagnose storage issues for a range of blocks
     pub fn diagnose_missing_blocks(&self, start: u64, end: u64) {
         tracing::info!("🔬 Diagnosing blocks {} to {}", start, end);
@@ -5960,11 +5918,6 @@ impl Blockchain {
         self.storage.get(key.as_bytes()).ok().flatten().is_some()
     }
 
-    /// Legacy alias used by reward_calculator and validate_pool_distribution.
-    pub fn is_free_tier_registered(&self, node_address: &str) -> bool {
-        self.is_masternode_registered(node_address)
-    }
-
     /// Returns all on-chain masternode registrations.
     /// The `current_height` parameter is kept for API compatibility but no longer used
     /// to gate eligibility — all confirmed registrations are immediately eligible.
@@ -6367,7 +6320,7 @@ impl Blockchain {
         let free_tier_registered: std::collections::HashSet<String> = active_bitmap_nodes
             .iter()
             .filter(|info| info.masternode.tier == MasternodeTier::Free)
-            .filter(|info| self.is_free_tier_registered(&info.masternode.address))
+            .filter(|info| self.is_masternode_registered(&info.masternode.address))
             .map(|info| info.masternode.address.clone())
             .collect();
 
@@ -6556,14 +6509,19 @@ impl Blockchain {
         self.treasury_balance.load(Ordering::Relaxed)
     }
 
-    /// Deposit satoshis into the treasury (used by slashing).
-    pub fn treasury_deposit(&self, amount: u64) {
-        self.treasury_balance.fetch_add(amount, Ordering::Relaxed);
-        // Persist to disk
-        let new_balance = self.get_treasury_balance();
-        if let Ok(bytes) = bincode::serialize(&new_balance) {
+    /// Atomically set the treasury balance in memory and persist it to sled.
+    /// All code that updates the treasury must go through this method.
+    fn set_treasury_balance(&self, amount: u64) {
+        self.treasury_balance.store(amount, Ordering::Relaxed);
+        if let Ok(bytes) = bincode::serialize(&amount) {
             let _ = self.storage.insert("treasury_balance", bytes);
         }
+    }
+
+    /// Deposit satoshis into the treasury (used by slashing).
+    pub fn treasury_deposit(&self, amount: u64) {
+        let new_balance = self.treasury_balance.fetch_add(amount, Ordering::Relaxed) + amount;
+        self.set_treasury_balance(new_balance);
     }
 
     /// Validate a block proposal's reward distribution BEFORE voting.
