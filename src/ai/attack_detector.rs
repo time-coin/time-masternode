@@ -37,6 +37,8 @@ pub enum AttackType {
     MessageFlood,           // Raw pre-channel message flood (>500 msgs/s before deserialization)
     InvalidVoteSignatureSpam, // Forged Ed25519 vote signatures at ≥5/30s (AV27)
     UnregisteredVoterSpam,  // Votes from unregistered IDs at ≥10/60s (AV28)
+    FinalityInjectionSpam,  // TransactionFinalized for unknown TXs to force 49-validator broadcast amplification (AV38)
+    NullTransactionFlood,   // Transactions with 0 inputs + 0 outputs to exhaust mempool at zero cost (AV39)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +127,12 @@ pub struct AttackDetector {
     ping_flood_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
     /// Per-peer raw message flood timestamps for MessageFlood detection.
     message_flood_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
+    /// Per-peer TransactionFinalized injection timestamps for FinalityInjectionSpam detection (AV38).
+    /// Key: peer IP, Value: deque of Unix timestamps for injected-finality events.
+    finality_injection_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
+    /// Per-peer null-TX flood timestamps for NullTransactionFlood detection (AV39).
+    /// Key: peer IP, Value: deque of Unix timestamps for null-TX broadcast events.
+    null_tx_flood_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
     /// Fires when a new (non-duplicate) attack is detected so the enforcement
     /// loop can wake up immediately instead of waiting the full 30-second tick.
     ban_notify: Arc<tokio::sync::Notify>,
@@ -145,6 +153,8 @@ impl AttackDetector {
             subnet_tls_failures: Arc::new(RwLock::new(HashMap::new())),
             ping_flood_times: Arc::new(RwLock::new(HashMap::new())),
             message_flood_times: Arc::new(RwLock::new(HashMap::new())),
+            finality_injection_times: Arc::new(RwLock::new(HashMap::new())),
+            null_tx_flood_times: Arc::new(RwLock::new(HashMap::new())),
             ban_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
@@ -820,6 +830,128 @@ impl AttackDetector {
             recommended_action: MitigationAction::RateLimitPeer(addr.to_string()),
             mitigation_applied_at: None,
         });
+    }
+
+    /// Record that a peer sent `TransactionFinalized` for a TX unknown to this node,
+    /// or forwarded a null TX via `TransactionFinalized` (AV38+AV39 combined attack).
+    ///
+    /// A single occurrence may be an honest relay node that received the attacker's flood
+    /// and forwarded it before our structural check could stop it.  We therefore use a
+    /// relay-safe mitigation: the first threshold (≥5/30s) triggers `RateLimitPeer` only;
+    /// a secondary threshold (≥20/30s) — reachable only by the true originator or a
+    /// heavily-compromised relay — escalates to `BlockPeer`.
+    pub fn record_finality_injection(&self, addr: &str) {
+        let now = Self::now_secs();
+        const FINALITY_INJECT_WINDOW_SECS: u64 = 30;
+        const RATE_LIMIT_THRESHOLD: usize = 5;
+        const BLOCK_THRESHOLD: usize = 20;
+
+        let count = {
+            let mut map = self.finality_injection_times.write();
+            let timestamps = map.entry(addr.to_string()).or_default();
+            while timestamps
+                .front()
+                .map(|t| now.saturating_sub(*t) > FINALITY_INJECT_WINDOW_SECS)
+                .unwrap_or(false)
+            {
+                timestamps.pop_front();
+            }
+            timestamps.push_back(now);
+            timestamps.len()
+        };
+
+        if count >= BLOCK_THRESHOLD {
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::FinalityInjectionSpam,
+                confidence: 0.97,
+                severity: AttackSeverity::Critical,
+                indicators: vec![
+                    format!(
+                        "≥{} TransactionFinalized injections for unknown/null TXs from {} within {}s (AV38+AV39) — likely originator",
+                        BLOCK_THRESHOLD, addr, FINALITY_INJECT_WINDOW_SECS
+                    ),
+                    "Volume exceeds honest relay capacity — source is generating novel TXIDs".to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        } else if count >= RATE_LIMIT_THRESHOLD {
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::FinalityInjectionSpam,
+                confidence: 0.75,
+                severity: AttackSeverity::Medium,
+                indicators: vec![
+                    format!(
+                        "≥{} TransactionFinalized injections for unknown/null TXs from {} within {}s (AV38) — may be relay",
+                        RATE_LIMIT_THRESHOLD, addr, FINALITY_INJECT_WINDOW_SECS
+                    ),
+                    "Rate-limiting rather than banning to protect innocent relay nodes".to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::RateLimitPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        }
+    }
+
+    /// Record a null-transaction broadcast from `addr` (0 inputs, 0 outputs, no special_data).
+    ///
+    /// A single occurrence is not penalised — the peer may be an innocent relay that forwarded
+    /// the TX before our validation could stop it.  Only if the same peer sends ≥3 distinct
+    /// null TXs within 60 s do we conclude it is the originator (or an aggressive relay that
+    /// deserves the same treatment) and escalate to BlockPeer.
+    ///
+    /// Honest relay nodes only ever forward each unique TX once (bloom-filter dedup prevents
+    /// re-relay), so they will never accumulate 3 events within the window.
+    pub fn record_null_tx_flood(&self, addr: &str) {
+        let now = Self::now_secs();
+        const NULL_TX_WINDOW_SECS: u64 = 60;
+        const NULL_TX_THRESHOLD: usize = 3;
+
+        let should_block = {
+            let mut map = self.null_tx_flood_times.write();
+            let timestamps = map.entry(addr.to_string()).or_default();
+            while timestamps
+                .front()
+                .map(|t| now.saturating_sub(*t) > NULL_TX_WINDOW_SECS)
+                .unwrap_or(false)
+            {
+                timestamps.pop_front();
+            }
+            timestamps.push_back(now);
+            timestamps.len() >= NULL_TX_THRESHOLD
+        };
+
+        if should_block {
+            tracing::warn!(
+                "🚫 NullTransactionFlood detected from {} — ≥{} null TXs within {}s (AV39)",
+                addr, NULL_TX_THRESHOLD, NULL_TX_WINDOW_SECS
+            );
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::NullTransactionFlood,
+                confidence: 0.95,
+                severity: AttackSeverity::High,
+                indicators: vec![
+                    format!(
+                        "≥{} null transactions (0 inputs, 0 outputs) from {} within {}s (AV39)",
+                        NULL_TX_THRESHOLD, addr, NULL_TX_WINDOW_SECS
+                    ),
+                    "Null TXs cost nothing to produce and never clear from the mempool — \
+                     relay nodes only forward each TX once so repeated sends indicate the originator"
+                        .to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        }
     }
 
     /// Record a sustained ping rate-limit exceedance from `addr`.

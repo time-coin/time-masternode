@@ -1656,6 +1656,20 @@ async fn handle_peer(
                                             let err_str = e.to_string();
                                             if err_str.contains("already in pool") || err_str.contains("Already") {
                                                 tracing::debug!("🔁 Transaction {} already in pool (from {})", hex::encode(txid), peer.addr);
+                                            } else if err_str.contains("no inputs") || err_str.contains("no outputs") {
+                                                // AV39: null transaction (0 inputs / 0 outputs).
+                                                // Do NOT record a blacklist violation here — the peer may be
+                                                // an innocent relay that forwarded the TX before our structural
+                                                // check could stop it.  The AI sliding-window detector
+                                                // (record_null_tx_flood) only escalates after ≥3 such TXs
+                                                // within 60 s, which innocent relays never reach.
+                                                tracing::debug!(
+                                                    "🗑️ Null TX {} from {} rejected ({})",
+                                                    hex::encode(txid), peer.addr, err_str
+                                                );
+                                                if let Some(ref ai) = ai_system {
+                                                    ai.attack_detector.record_null_tx_flood(&ip_str);
+                                                }
                                             } else {
                                                 tracing::warn!("❌ Transaction {} rejected: {}", hex::encode(txid), e);
 
@@ -1674,6 +1688,8 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::TransactionFinalized { txid, tx } => {
+                                    check_rate_limit!("tx_finalized");
+
                                     // Drop mempool transactions while syncing — the UTXOs they
                                     // reference likely don't exist in our local UTXO set yet, so
                                     // every validation would fail with "input not in storage".
@@ -1692,6 +1708,25 @@ async fn handle_peer(
 
                                     tracing::info!("✅ Transaction {} finalized (from {})",
                                         hex::encode(*txid), peer.addr);
+
+                                    // AV38+AV39 combined guard: drop null TXs that arrive as
+                                    // TransactionFinalized.  The attacker feeds honest relay nodes
+                                    // with null TXs (0 inputs, 0 outputs, no special_data), which
+                                    // those nodes then re-broadcast as TransactionFinalized.  By
+                                    // dropping here we stop the amplification WITHOUT banning the
+                                    // relay (which is also a victim).  The AI tracker records the
+                                    // event at a relay-safe threshold so only the true source is
+                                    // eventually penalised.
+                                    if tx.inputs.is_empty() && tx.outputs.is_empty() && tx.special_data.is_none() {
+                                        tracing::debug!(
+                                            "🗑️ Null TX {} via TransactionFinalized from {} — dropped (AV38+AV39)",
+                                            hex::encode(*txid), peer.addr
+                                        );
+                                        if let Some(ref ai) = ai_system {
+                                            ai.attack_detector.record_finality_injection(&ip_str);
+                                        }
+                                        continue;
+                                    }
 
                                     // If the TX is already in the finalized pool, skip entirely
                                     if consensus.tx_pool.is_finalized(txid) {
@@ -1754,30 +1789,26 @@ async fn handle_peer(
                                         continue;
                                     }
 
-                                    // Add to pool if not present. process_transaction may auto-finalize
-                                    // (when <3 validators), which handles UTXO state transitions internally.
+                                    // Add to pool if not present.  We deliberately do NOT call
+                                    // process_transaction() here — that would broadcast a
+                                    // TimeVoteRequest to all validators, giving a 49x amplification
+                                    // to an attacker who injects TransactionFinalized for unknown
+                                    // TXs (AV38: Finality Injection).  Instead, add directly to the
+                                    // pending pool and let the manual finalization path below handle
+                                    // the UTXO state transitions.
                                     let auto_finalized = if !consensus.tx_pool.has_transaction(txid) {
-                                        tracing::warn!("⚠️ Received TransactionFinalized but TX {} not in pool - adding it now", hex::encode(*txid));
-                                        match consensus.process_transaction(tx.clone(), None).await {
-                                            Ok(()) => {
-                                                // Check if process_transaction already finalized it
-                                                consensus.tx_pool.is_finalized(txid)
-                                            }
-                                            Err(e) if e.contains("already in pool") => {
-                                                // Race: TX was added concurrently between has_transaction
-                                                // check and process_transaction call. Fall through to
-                                                // manual finalization path.
-                                                tracing::debug!(
-                                                    "TX {} already in pool (race condition), proceeding with finalization",
-                                                    hex::encode(*txid)
-                                                );
-                                                consensus.tx_pool.is_finalized(txid)
-                                            }
-                                            Err(e) => {
-                                                tracing::error!("❌ Failed to process transaction {}: {}", hex::encode(*txid), e);
-                                                continue;
-                                            }
+                                        tracing::warn!(
+                                            "⚠️ TransactionFinalized for unknown TX {} from {} — \
+                                             adding to pool without consensus re-broadcast (AV38 guard)",
+                                            hex::encode(*txid), peer.addr
+                                        );
+                                        // Record for AI sliding-window detection (AV38).
+                                        if let Some(ref ai) = ai_system {
+                                            ai.attack_detector.record_finality_injection(&ip_str);
                                         }
+                                        // Add directly without triggering TimeVote broadcast.
+                                        let _ = consensus.tx_pool.add_pending(tx.clone(), 0);
+                                        false // let the manual finalization path below run
                                     } else {
                                         false
                                     };

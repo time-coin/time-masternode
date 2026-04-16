@@ -3020,7 +3020,15 @@ impl ConsensusEngine {
             return Err("No masternodes available".to_string());
         }
 
-        // NOTE: Validation already done in lock_and_validate_transaction before this is called
+        // AV39: Reject structurally null transactions before touching any state.
+        // Masternode reg/dereg TXs legitimately have no inputs/outputs (they carry
+        // special_data instead), so they are exempt from this check.
+        if tx.inputs.is_empty() && tx.special_data.is_none() {
+            return Err("Transaction has no inputs".to_string());
+        }
+        if tx.outputs.is_empty() && tx.special_data.is_none() {
+            return Err("Transaction has no outputs".to_string());
+        }
         // UTXOs are already in Locked state - DO NOT transition to SpentPending here
         // That transition happens when voting actually starts (after broadcast)
 

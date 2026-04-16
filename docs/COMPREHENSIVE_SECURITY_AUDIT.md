@@ -1912,12 +1912,67 @@ address, sets `context.utxo_manager` and `context.peer_manager`, and delegates t
 
 ---
 
-**Document Version:** 1.3
-**Last Updated:** April 7, 2026
-**Changes from v1.2:**
-- Updated 14.7 (V4 Eviction Oscillation) status from ⚠️ ONGOING to ✅ FIXED
-- Added 14.8: Ghost Connection OOM / Distributed SNI Flood (AV22) — fixed in v1.4.34
-- Added 14.9: PHASE3 Reconnect Loop to Banned Peers (AV23) — fixed in v1.4.34
-- Added 14.10: IP Cycling / Collateral Migration Back-and-Forth (AV24) — fixed in v1.4.34
+### AV-13 ✅ Finality Injection / Broadcast Amplification (AV38)
+**Status:** **FIXED** (v1.4.36)
+
+**Attack:** The attacker sends `TransactionFinalized` messages for transactions that the receiving node has never seen (not in its pending pool). Before the fix, the node would:
+1. Accept the TX as valid (no pool membership check)
+2. Call `process_transaction()` which broadcasts a `TimeVoteRequest` to all N validators (~49× amplification per injected TX)
+3. Add the TX to the finalized pool regardless of content
+
+With unique TXIDs on every injection, the bloom-filter dedup never fires, and the attacker could drive 30+ broadcast amplification events per second from a single connection.
+
+**Root cause (Path 1):** The `TransactionFinalized` handler called `process_transaction()` for unknown TXs, which unconditionally broadcasts `TimeVoteRequest` to all validators.
+
+**Root cause (Path 2):** No structural validation of the TX occurred before pool admission — a TX with 0 inputs and 0 outputs was accepted without error.
+
+**Relay attribution complexity:** The attacker feeds honest relay nodes (e.g. the operator's own masternodes), which then forward the `TransactionFinalized` messages. Banning the direct sender would ban innocent relays and fragment the network. The two-tier threshold (see Fix below) distinguishes relays from originators.
+
+**Fix:**
+- **Null TX structural guard**: If the incoming TX has 0 inputs, 0 outputs, and no `special_data`, it is dropped immediately before any pool operation. A single `record_finality_injection()` call is made (relay-safe — no ban issued for a single occurrence).
+- **Amplification eliminated**: For unknown TXs that pass structural validation, the handler now calls `tx_pool.add_pending()` directly instead of `process_transaction()`. This adds the TX to the pool without triggering any `TimeVoteRequest` broadcast.
+- **Two-tier rate limiting**:
+  - ≥ 5 injections / 30 s → `RateLimitPeer` (may be a relay)
+  - ≥ 20 injections / 30 s → `BlockPeer` (clearly the originator)
+- **Per-message rate limit**: `"tx_finalized"` entry in `rate_limiter.rs` caps at 20 messages / 10 s per peer before any processing occurs.
+
+**Code References:**
+- `src/network/server.rs` — `TransactionFinalized` handler: null TX guard + `add_pending()` swap
+- `src/ai/attack_detector.rs` — `record_finality_injection()` two-tier sliding-window detection
+- `src/network/rate_limiter.rs` — `"tx_finalized"` rate-limit entry
+
+---
+
+### AV-14 ✅ Zero-Value Null Transaction Mempool Flood (AV39)
+**Status:** **FIXED** (v1.4.36)
+
+**Attack:** The attacker submits transactions with 0 inputs, 0 outputs, no special data, and 0 fee. These "null TXs" cost nothing to produce, pass trivial serialization, and — before the fix — were accepted into the mempool where they would sit forever:
+- They can never be mined into a block (no inputs to spend, no outputs to create)
+- They consume mempool slots and force other nodes to process and relay them
+- Combined with AV38, the attacker can inject them as already-finalized, causing different nodes to hold different finalized TX sets, which induces chain forks when blocks are produced
+
+**Root cause:** `process_transaction()` in `consensus.rs` and the `TransactionBroadcast` handler in `server.rs` had no structural guard rejecting TXs with both 0 inputs and 0 outputs. Masternode registration/deregistration TXs legitimately have no inputs and no outputs (they carry all state in `special_data`), so a blanket "no inputs = reject" rule would break registration.
+
+**Relay attribution:** Honest relay nodes forward null TXs they receive from the attacker before our fix propagates. Banning based on a single null TX would ban innocent relays. The fix uses a sliding-window threshold so that relays (which forward each TXID at most once, thanks to bloom-filter dedup) never hit the ban threshold, while the originator (sending many unique null TXs) does.
+
+**Fix:**
+- **Structural guard in `process_transaction()`**: Rejects any TX where `inputs.is_empty() && special_data.is_none()` OR `outputs.is_empty() && special_data.is_none()`. Masternode TXs are exempt because they always carry `special_data`.
+- **Structural guard in `TransactionFinalized` handler**: Same check applied on arrival of `TransactionFinalized` messages, before any pool operation (addresses AV38+AV39 combined attack path).
+- **Relay-safe error handling in `TransactionBroadcast` handler**: Null TX errors (`"no inputs"` / `"no outputs"`) silently call `record_null_tx_flood()` without recording a blacklist violation. Only ≥ 3 null TXs / 60 s from the same peer triggers `BlockPeer`.
+- **Fork-induction prevention**: By dropping null TXs before pool admission, all nodes maintain identical finalized TX sets, preventing the chain-split side effect.
+
+**Code References:**
+- `src/consensus.rs` — `process_transaction()` structural guard (~line 3010)
+- `src/network/server.rs` — `TransactionBroadcast` relay-safe null TX error handler
+- `src/ai/attack_detector.rs` — `record_null_tx_flood()` relay-safe 3/60 s sliding-window detection
+
+---
+
+**Document Version:** 1.4
+**Last Updated:** April 16, 2026
+**Changes from v1.3:**
+- Updated executive summary: 24 attack vectors fully mitigated (+2 from April 2026 live-attack findings)
+- Added AV-13 (Section 14.13): Finality Injection / Broadcast Amplification (AV38) — fixed in v1.4.36
+- Added AV-14 (Section 14.14): Zero-Value Null Transaction Mempool Flood (AV39) — fixed in v1.4.36
 
 **Next Review:** Quarterly or after major protocol changes
