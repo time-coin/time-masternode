@@ -3745,12 +3745,27 @@ async fn main() {
                 if let Some(existing) = cache.get_by_height(next_height) {
                     if existing.header.vrf_score > 0 {
                         if existing.header.leader == our_addr {
-                            // Our own cached proposal — already produced and broadcast
-                            tracing::debug!(
-                                "⏭️  Already proposed block for height {}, waiting for consensus",
-                                next_height,
-                            );
-                            continue;
+                            if leader_attempt >= 15 {
+                                // Stalled proposal: 150+ seconds with no peer consensus.
+                                // Evict the stale cached entry so the production flow runs
+                                // again with a fresh block, and the extended-deadlock solo
+                                // fallback (leader_attempt ≥ 15 → allow solo add_block) fires.
+                                tracing::warn!(
+                                    "⏱️  Cached proposal for height {} stalled {} attempts, \
+                                     evicting for fresh repropose",
+                                    next_height,
+                                    leader_attempt
+                                );
+                                cache.remove(&existing.hash());
+                                // Fall through to production flow
+                            } else {
+                                // Our own cached proposal — already produced and broadcast
+                                tracing::debug!(
+                                    "⏭️  Already proposed block for height {}, waiting for consensus",
+                                    next_height,
+                                );
+                                continue;
+                            }
                         } else if existing.header.vrf_score < vrf_score && leader_attempt == 0 {
                             // A peer's proposal has a strictly better (lower) VRF score.
                             // Only defer on the first attempt — after one timeout window the peer
