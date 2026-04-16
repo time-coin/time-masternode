@@ -1446,6 +1446,36 @@ OOM prevention is retained via an overall PHASE3 reconnect concurrency cap (not 
 
 ---
 
+### 15.16 ✅ FIXED — Registration Spam / Slot ID Exhaustion (AV37)
+
+**Status:** **FIXED** (v1.4.35, commit `268eaa9`)
+**Severity:** High — exhausts slot namespace; corrupts fairness-rotation bitmaps; floods in-memory registry
+
+**Attack:** An attacker submits hundreds of valid `MasternodeRegistration` transactions for the same IP address, each with a different wallet address and txid. Every call to `apply_masternode_registration()` passed the old idempotency guard (which only matched on txid equality), caused `assign_next_slot_id()` to increment the global counter, and overwrote the sled record with the new slot. Net effect: N registrations for the same IP burn N slot_ids, but only one DashMap entry survives (the last one). The orphaned slot_ids corrupt the sorted bitmap used for reward distribution and leader election.
+
+**Observed attack (height 160):**
+- `188.26.80.38` registered 49 times — slot_ids 187900–188146 burned
+- `50.28.104.50` registered 29 times
+- `64.91.241.10` registered 23 times
+- All 250+ registrations arrived within one second at the same block height
+
+**Root Cause:** `apply_masternode_registration()` idempotency guard checked `existing.registration_txid == registration_txid`. A different txid for the same IP fell through to `assign_next_slot_id()`, treating it as a brand-new node.
+
+**Fix Implemented — Height-Gated (consensus-safe):**
+
+A height gate is required because all existing nodes have already replayed the spam transactions and have the *last* (highest) slot_id for each attacker IP in their sled state. Changing the assignment rule retroactively would cause fresh nodes replaying from genesis to compute different slot_ids, breaking bitmap consensus.
+
+- **`constants::fork_heights::SLOT_UNIQUENESS_FORK_HEIGHT = 200`** — fork activation height
+- **Before height 200:** legacy behaviour preserved — each re-registration with a new txid allocates a fresh slot_id. Chain replay produces identical slot_ids on all nodes regardless of code version.
+- **From height 200 onward:** a re-registration with a different txid reuses the IP's existing slot_id. New IPs still receive a fresh slot.
+- **Idempotent same-txid path** (Case 2) is unaffected and works at any height.
+
+**Code References:**
+- `src/constants.rs` — `fork_heights::SLOT_UNIQUENESS_FORK_HEIGHT`
+- `src/masternode_registry.rs` — `apply_masternode_registration()` slot-uniqueness guard (Cases 1–4)
+
+---
+
 ## SUMMARY TABLE — Additional Vectors (Section 15)
 
 | ID | Name | Severity | Status |
@@ -1465,6 +1495,7 @@ OOM prevention is retained via an overall PHASE3 reconnect concurrency cap (not 
 | AV34 | Targeted disconnect / reward theft | Medium | ✅ Fixed |
 | AV35 | Free-tier reward monopolisation | High | ✅ Fixed |
 | AV36 | Reputation poisoning / blacklist manipulation | High | ✅ Fixed |
+| AV37 | Registration spam / slot ID exhaustion | High | ✅ Fixed (height-gated, fork height 200) |
 
 **Observed (April 8 watchdog log):**
 ```
