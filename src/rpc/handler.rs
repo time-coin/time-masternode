@@ -1027,8 +1027,7 @@ impl RpcHandler {
         {
             let parts: Vec<&str> = collateral_outpoint.split(':').collect();
             if parts.len() == 2 {
-                if let (Ok(txid_bytes), Ok(vout)) =
-                    (hex::decode(parts[0]), parts[1].parse::<u32>())
+                if let (Ok(txid_bytes), Ok(vout)) = (hex::decode(parts[0]), parts[1].parse::<u32>())
                 {
                     if txid_bytes.len() == 32 {
                         let mut txid_arr = [0u8; 32];
@@ -2433,8 +2432,7 @@ impl RpcHandler {
             };
 
             let current_height = self.blockchain.get_height();
-            let is_free =
-                matches!(local_mn.masternode.tier, crate::types::MasternodeTier::Free);
+            let is_free = matches!(local_mn.masternode.tier, crate::types::MasternodeTier::Free);
 
             // No maturity gate — all on-chain registered nodes are immediately eligible.
             let is_mature = true;
@@ -3389,7 +3387,7 @@ impl RpcHandler {
             }
 
             // Sort by value descending (use largest UTXOs first for efficiency)
-            utxos.sort_by(|a, b| b.value.cmp(&a.value));
+            utxos.sort_by_key(|b| std::cmp::Reverse(b.value));
 
             // Calculate fee using governance-adjustable tiered schedule
             let fee_schedule = crate::consensus::FeeSchedule::default();
@@ -4141,7 +4139,7 @@ impl RpcHandler {
 
         let violations_list: Vec<Value> = {
             let mut v = violations;
-            v.sort_by(|a, b| b.1.cmp(&a.1));
+            v.sort_by_key(|b| std::cmp::Reverse(b.1));
             v.into_iter()
                 .map(|(ip, count)| json!({"ip": ip, "violations": count}))
                 .collect()
@@ -4179,7 +4177,11 @@ impl RpcHandler {
 
         let mut bl = self.blacklist.write().await;
         bl.add_permanent_ban(ip_addr, reason);
-        tracing::info!("🔨 RPC: Permanently banned {} (reason: {})", ip_addr, reason);
+        tracing::info!(
+            "🔨 RPC: Permanently banned {} (reason: {})",
+            ip_addr,
+            reason
+        );
         Ok(json!({
             "result": "success",
             "ip": ip_str,
@@ -4259,7 +4261,10 @@ impl RpcHandler {
             if claimants.len() < 2 {
                 continue;
             }
-            let outpoint = match claimants.first().and_then(|c| c.masternode.collateral_outpoint.clone()) {
+            let outpoint = match claimants
+                .first()
+                .and_then(|c| c.masternode.collateral_outpoint.clone())
+            {
                 Some(op) => op,
                 None => continue,
             };
@@ -4365,16 +4370,22 @@ impl RpcHandler {
         // Collect all unique IPs across bans and violations
         let mut all_ips: Vec<std::net::IpAddr> = Vec::new();
         for (ip_str, _) in &permanent {
-            if let Ok(ip) = ip_str.parse() { all_ips.push(ip); }
+            if let Ok(ip) = ip_str.parse() {
+                all_ips.push(ip);
+            }
         }
         for (ip_str, _, _) in &temporary {
             if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
-                if !all_ips.contains(&ip) { all_ips.push(ip); }
+                if !all_ips.contains(&ip) {
+                    all_ips.push(ip);
+                }
             }
         }
         for (ip_str, _) in &violations {
             if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
-                if !all_ips.contains(&ip) { all_ips.push(ip); }
+                if !all_ips.contains(&ip) {
+                    all_ips.push(ip);
+                }
             }
         }
 
@@ -6362,7 +6373,7 @@ impl RpcHandler {
             "status": status_str,
             "yes_weight": yes_weight,
             "total_weight": total_weight,
-            "quorum_pct": if total_weight > 0 { yes_weight * 100 / total_weight } else { 0 },
+            "quorum_pct": (yes_weight * 100).checked_div(total_weight).unwrap_or(0),
             "votes": votes_json,
         }))
     }

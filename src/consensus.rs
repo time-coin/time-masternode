@@ -5363,7 +5363,7 @@ pub fn compute_fallback_leader(
         .collect();
 
     // Leader is the masternode with minimum hash score
-    scores.sort_by(|a, b| a.0.cmp(&b.0));
+    scores.sort_by_key(|a| a.0);
 
     scores.first().map(|(_, mn_id)| mn_id.clone())
 }
