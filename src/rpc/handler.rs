@@ -223,6 +223,7 @@ impl RpcHandler {
             "reindextransactions" => self.reindex_transactions().await,
             "reindex" => self.reindex_full().await,
             "rollbacktoblock0" => self.rollback_to_block0().await,
+            "rollbacktoheight" => self.rollback_to_height_rpc(&params_array).await,
             "resetfinalitylock" => self.reset_finality_lock_rpc(&params_array).await,
             "gettxindexstatus" => self.get_tx_index_status().await,
             "cleanuplockedutxos" => self.cleanup_locked_utxos().await,
@@ -4427,6 +4428,43 @@ impl RpcHandler {
             "height_after": 0,
             "blocks_removed": height_before,
         }))
+    }
+
+    async fn rollback_to_height_rpc(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let target_height = params
+            .first()
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "rollbacktoheight requires a block height argument (u64)".to_string(),
+            })?;
+
+        let height_before = self.blockchain.get_height();
+        if target_height >= height_before {
+            return Ok(json!({
+                "result": "nothing to do",
+                "height": height_before,
+                "blocks_removed": 0,
+            }));
+        }
+
+        tracing::warn!(
+            "⚠️  RPC rollbacktoheight: reverting chain from height {} to {}",
+            height_before, target_height
+        );
+
+        match self.blockchain.rollback_to_height(target_height).await {
+            Ok(new_height) => Ok(json!({
+                "result": "success",
+                "height_before": height_before,
+                "height_after": new_height,
+                "blocks_removed": height_before - new_height,
+            })),
+            Err(e) => Err(RpcError {
+                code: -32000,
+                message: e,
+            }),
+        }
     }
 
     async fn get_best_block_hash(&self) -> Result<Value, RpcError> {

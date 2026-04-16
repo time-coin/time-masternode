@@ -627,6 +627,13 @@ enum Commands {
     #[command(next_help_heading = "Utility")]
     RollbackToBlock0,
 
+    /// Roll back the chain to a specific block height (DANGER: drops all blocks above target height)
+    #[command(next_help_heading = "Utility")]
+    RollbackToHeight {
+        /// Target height to roll back to (e.g. 274)
+        height: u64,
+    },
+
     /// Reset the BFT finality lock to a lower height (DANGER: only use to recover a stuck fork node)
     #[command(next_help_heading = "Utility")]
     ResetFinalityLock {
@@ -897,7 +904,10 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
         let node_address = format!("{}:{}", masternode_ip, p2p_port);
         let pubkey_hex = hex::encode(signing_key.verifying_key().as_bytes());
-        let msg = format!("MNREG:{}:{}:{}:{}", node_address, payout_address, pubkey_hex, outpoint_str);
+        let msg = format!(
+            "MNREG:{}:{}:{}:{}",
+            node_address, payout_address, pubkey_hex, outpoint_str
+        );
         let signature_hex = hex::encode(signing_key.sign(msg.as_bytes()).to_bytes());
 
         // Build the transaction
@@ -907,14 +917,16 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             outputs: vec![],
             lock_time: 0,
             timestamp: chrono::Utc::now().timestamp(),
-            special_data: Some(timed::types::SpecialTransactionData::MasternodeRegistration {
-                node_address: node_address.clone(),
-                wallet_address: payout_address.clone(),
-                reward_address: String::new(),
-                collateral_outpoint: outpoint_str.clone(),
-                pubkey: pubkey_hex.clone(),
-                signature: signature_hex,
-            }),
+            special_data: Some(
+                timed::types::SpecialTransactionData::MasternodeRegistration {
+                    node_address: node_address.clone(),
+                    wallet_address: payout_address.clone(),
+                    reward_address: String::new(),
+                    collateral_outpoint: outpoint_str.clone(),
+                    pubkey: pubkey_hex.clone(),
+                    signature: signature_hex,
+                },
+            ),
             encrypted_memo: None,
         };
 
@@ -1028,6 +1040,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::ReindexTransactions => ("reindextransactions", json!([])),
         Commands::Reindex => ("reindex", json!([])),
         Commands::RollbackToBlock0 => ("rollbacktoblock0", json!([])),
+        Commands::RollbackToHeight { height } => ("rollbacktoheight", json!([height])),
         Commands::ResetFinalityLock { height } => ("resetfinalitylock", json!([height])),
         Commands::CleanupLockedUTXOs => ("cleanuplockedutxos", json!([])),
         Commands::ListLockedUTXOs => ("listlockedutxos", json!([])),
@@ -1513,10 +1526,7 @@ fn print_human_readable(
                 .get("squatters_evicted")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            let warnings = result
-                .get("warnings")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            let warnings = result.get("warnings").and_then(|v| v.as_u64()).unwrap_or(0);
             println!("=== Collateral Audit Results ===");
             println!("Squatters evicted:  {}", evicted);
             println!("Unresolved (stalemate, V4 required): {}", warnings);
@@ -1610,7 +1620,10 @@ fn print_human_readable(
                 }
             }
         }
-        Commands::Ban { .. } | Commands::Unban { .. } | Commands::ClearBanList | Commands::AddWhitelist { .. } => {
+        Commands::Ban { .. }
+        | Commands::Unban { .. }
+        | Commands::ClearBanList
+        | Commands::AddWhitelist { .. } => {
             let msg = result
                 .get("message")
                 .and_then(|v| v.as_str())
