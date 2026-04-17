@@ -2390,11 +2390,13 @@ impl MessageHandler {
                     || e.contains("reward-hijacking")
                     || e.contains("reward_hijack")
                     || e.contains("under-subscribed genesis")
+                    || e.contains("reward manipulation")
+                    || e.contains("unknown masternodes")
                 {
                     // The peer sent a block that violates the reward distribution
-                    // rules (e.g. single-payout block 1).  This is a permanent
-                    // protocol violation — ban the peer immediately so it cannot
-                    // stall our chain-building.
+                    // rules (e.g. single-payout block 1, pool manipulation, ghost
+                    // masternodes in bitmap).  This is a permanent protocol violation
+                    // — ban the peer immediately so it cannot stall our chain-building.
                     error!(
                         "🚨 [{}] Reward-hijacking block {} from {} — PERMANENTLY BANNING: {}",
                         self.direction, block_height, self.peer_ip, e
@@ -5898,7 +5900,9 @@ impl MessageHandler {
                         || e.contains("reward_hijack")
                         || e.contains("under-subscribed genesis")
                         || e.contains("unknown recipient")
-                        || e.contains("exceeds max tier pool") =>
+                        || e.contains("exceeds max tier pool")
+                        || e.contains("reward manipulation")
+                        || e.contains("unknown masternodes") =>
                 {
                     // Block 1 specifically: node may have bootstrapped before enough peers
                     // connected, giving itself a single-payout block 1. This is a reset
@@ -5906,8 +5910,8 @@ impl MessageHandler {
                     // mark so the peer can reconnect after resetting, and does not drain
                     // our quorum pool for block 1 production.
                     //
-                    // Blocks > 1: the chain is established; single-payout is a clear
-                    // reward-hijacking attempt. Apply a permanent IP ban.
+                    // Blocks > 1: reward manipulation or ghost masternodes in bitmap are a
+                    // clear protocol violation. Apply a permanent IP ban.
                     let block_height = block.header.height;
                     if block_height <= 1 {
                         warn!(

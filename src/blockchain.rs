@@ -1712,9 +1712,7 @@ impl Blockchain {
             // Try current format first, then legacy
             let timestamp: i64 = if let Ok(block) = bincode::deserialize::<Block>(&data) {
                 block.header.timestamp
-            } else if let Some(block) =
-                crate::network::wire::deserialize_legacy_block(&data)
-            {
+            } else if let Some(block) = crate::network::wire::deserialize_legacy_block(&data) {
                 block.header.timestamp
             } else {
                 tracing::warn!(
@@ -3781,8 +3779,8 @@ impl Blockchain {
         let base_reward = self.get_current_block_reward();
         let treasury_share = constants::blockchain::TREASURY_POOL_SATOSHIS;
         let total_reward = base_reward + finalized_txs_fees - treasury_share; // coinbase outputs (no treasury UTXO)
-        // NOTE: Treasury deposit happens in add_block(), not here, to avoid
-        // double-deposit when the producer's own node processes the block.
+                                                                              // NOTE: Treasury deposit happens in add_block(), not here, to avoid
+                                                                              // double-deposit when the producer's own node processes the block.
 
         // Build active masternode bitmap FIRST, then compute rewards deterministically.
         // reward_calculator::compute is the single source of truth — both producer and
@@ -3864,8 +3862,7 @@ impl Blockchain {
                         } else if let Some(ref local_addr) =
                             self.masternode_registry.get_local_address().await
                         {
-                            let local_ip =
-                                local_addr.split(':').next().unwrap_or(local_addr);
+                            let local_ip = local_addr.split(':').next().unwrap_or(local_addr);
                             if mn_ip == local_ip {
                                 on_chain_voters.push(mn.masternode.address.clone());
                             }
@@ -4058,7 +4055,9 @@ impl Blockchain {
         } else {
             0
         };
-        let prev_treasury = self.treasury_balance.load(std::sync::atomic::Ordering::Relaxed);
+        let prev_treasury = self
+            .treasury_balance
+            .load(std::sync::atomic::Ordering::Relaxed);
         let new_treasury_balance = prev_treasury
             .saturating_add(constants::blockchain::TREASURY_POOL_SATOSHIS)
             .saturating_sub(governance_deduction);
@@ -4341,7 +4340,9 @@ impl Blockchain {
             let now = chrono::Utc::now().timestamp();
             (now - expected_ts).max(0) as u64
         };
-        let min_agreeing_peers_threshold = if seconds_past_schedule > crate::constants::blockchain::BLOCK_TIME_SECONDS as u64 * 2 {
+        let min_agreeing_peers_threshold = if seconds_past_schedule
+            > crate::constants::blockchain::BLOCK_TIME_SECONDS as u64 * 2
+        {
             1u32
         } else {
             2u32
@@ -4736,7 +4737,11 @@ impl Blockchain {
                     .iter()
                     .map(|b| b.count_ones() as usize)
                     .sum();
-                let min_paid_recipients = if bitmap_eligible >= 3 { 3 } else { bitmap_eligible.max(1) };
+                let min_paid_recipients = if bitmap_eligible >= 3 {
+                    3
+                } else {
+                    bitmap_eligible.max(1)
+                };
                 let paid: std::collections::HashSet<&str> = block
                     .masternode_rewards
                     .iter()
@@ -5643,7 +5648,6 @@ impl Blockchain {
         Ok(())
     }
 
-
     /// Get block directly from storage, bypassing cache (for verification)
     fn get_block_from_storage_only(&self, height: u64) -> Result<Block, String> {
         let key = format!("block_{}", height);
@@ -5833,13 +5837,17 @@ impl Blockchain {
                         Ok(slot_id) => {
                             tracing::info!(
                                 "✅ MasternodeRegistration applied: {} -> {} slot={} (tx {})",
-                                node_address, wallet_address, slot_id, &txid_hex[..16]
+                                node_address,
+                                wallet_address,
+                                slot_id,
+                                &txid_hex[..16]
                             );
                         }
                         Err(e) => {
                             tracing::warn!(
                                 "⚠️ Invalid MasternodeRegistration tx {}: {}",
-                                &txid_hex[..16], e
+                                &txid_hex[..16],
+                                e
                             );
                         }
                     }
@@ -5865,13 +5873,16 @@ impl Blockchain {
                         Ok(()) => {
                             tracing::info!(
                                 "✅ MasternodeDeregistration applied: {} slot={} (tx {})",
-                                node_address, slot_id, &txid_hex[..16]
+                                node_address,
+                                slot_id,
+                                &txid_hex[..16]
                             );
                         }
                         Err(e) => {
                             tracing::warn!(
                                 "⚠️ Invalid MasternodeDeregistration tx {}: {}",
-                                &txid_hex[..16], e
+                                &txid_hex[..16],
+                                e
                             );
                         }
                     }
@@ -5896,13 +5907,16 @@ impl Blockchain {
                         Ok(()) => {
                             tracing::info!(
                                 "✅ MasternodePayoutUpdate applied: {} -> {} (tx {})",
-                                node_address, new_reward_address, &txid_hex[..16]
+                                node_address,
+                                new_reward_address,
+                                &txid_hex[..16]
                             );
                         }
                         Err(e) => {
                             tracing::warn!(
                                 "⚠️ Invalid MasternodePayoutUpdate tx {}: {}",
-                                &txid_hex[..16], e
+                                &txid_hex[..16],
+                                e
                             );
                         }
                     }
@@ -5921,7 +5935,10 @@ impl Blockchain {
     /// Returns all on-chain masternode registrations.
     /// The `current_height` parameter is kept for API compatibility but no longer used
     /// to gate eligibility — all confirmed registrations are immediately eligible.
-    pub fn get_onchain_registered_nodes(&self, _current_height: u64) -> Vec<crate::types::MasternodeOnchainInfo> {
+    pub fn get_onchain_registered_nodes(
+        &self,
+        _current_height: u64,
+    ) -> Vec<crate::types::MasternodeOnchainInfo> {
         let prefix = b"mnreg:";
         self.storage
             .scan_prefix(prefix)
@@ -6334,8 +6351,7 @@ impl Blockchain {
             free_tier_registered: &free_tier_registered,
         };
 
-        let expected =
-            crate::reward_calculator::compute(&calc_input, &self.utxo_manager).await;
+        let expected = crate::reward_calculator::compute(&calc_input, &self.utxo_manager).await;
 
         let expected_norm = crate::reward_calculator::normalize(&expected);
         let actual_norm = crate::reward_calculator::normalize(&block.masternode_rewards);
@@ -6542,7 +6558,10 @@ impl Blockchain {
         // Reject proposals from producers that have exceeded the misbehavior threshold.
         // Only check when the leader is authenticated — an attacker could forge any IP
         // as the leader to trigger a false "misbehaving" rejection.
-        if record_violations && !producer_addr.is_empty() && self.is_producer_misbehaving(producer_addr) {
+        if record_violations
+            && !producer_addr.is_empty()
+            && self.is_producer_misbehaving(producer_addr)
+        {
             return Err(format!(
                 "Producer {} is misbehaving ({} reward violations) — rejecting proposal",
                 producer_addr,
@@ -6565,7 +6584,11 @@ impl Blockchain {
                 .iter()
                 .map(|b| b.count_ones() as usize)
                 .sum();
-            let min_paid_recipients = if bitmap_eligible >= 3 { 3 } else { bitmap_eligible.max(1) };
+            let min_paid_recipients = if bitmap_eligible >= 3 {
+                3
+            } else {
+                bitmap_eligible.max(1)
+            };
             let paid: std::collections::HashSet<&str> = block
                 .masternode_rewards
                 .iter()
@@ -7084,20 +7107,14 @@ impl Blockchain {
             // More than one block interval (10 min) early — unconditional rejection (pre-launch chain or fraud)
             return Err(format!(
                 "Block {} timestamp {} is before its scheduled time {} (produced too early by {}s)",
-                block.header.height,
-                block.header.timestamp,
-                block_expected_time,
-                early_by
+                block.header.height, block.header.timestamp, block_expected_time, early_by
             ));
         }
         if block.header.height + 10 > chain_tip && early_by > 30 {
             // Minor timing violation — only enforce for recent blocks
             return Err(format!(
                 "Block {} timestamp {} is before its scheduled time {} (produced too early by {}s)",
-                block.header.height,
-                block.header.timestamp,
-                block_expected_time,
-                early_by
+                block.header.height, block.header.timestamp, block_expected_time, early_by
             ));
         }
 
@@ -8301,8 +8318,24 @@ impl Blockchain {
             }
         };
 
-        // Case 1: Longest chain is longer than us - sync to it
+        // Case 1: Longest chain is longer than us - sync to it.
+        // Guard: require ≥2 peers to agree before triggering fork prevention.
+        // A single peer claiming a higher height may be on a minority fork; their
+        // blocks won't connect to our chain, causing the production loop to spin
+        // endlessly in fork-prevention mode. Legitimate new blocks propagate to
+        // multiple peers within seconds, so a 1-cycle delay is acceptable.
         if consensus_height > our_height {
+            const MIN_PEERS_FOR_HEIGHT_SYNC: usize = 2;
+            if consensus_peers.len() < MIN_PEERS_FOR_HEIGHT_SYNC {
+                tracing::debug!(
+                    "🔀 Only {} peer(s) at height {} (our: {}) — need {} to trigger fork prevention (may be minority fork)",
+                    consensus_peers.len(),
+                    consensus_height,
+                    our_height,
+                    MIN_PEERS_FOR_HEIGHT_SYNC
+                );
+                return None;
+            }
             tracing::debug!(
                 "🔀 Fork resolution: longest chain height {} > our height {} ({} peers agree), syncing from {}",
                 consensus_height,
@@ -9078,6 +9111,32 @@ impl Blockchain {
                     our_height, peer_tip_height, common_ancestor, fork_depth
                 );
 
+                // Pre-compute peer support counts so resolve_fork() can apply the
+                // supermajority override before falling through to the hash tiebreaker.
+                // Only meaningful for same-height forks where tiebreaker applies.
+                let (peer_support_count, total_peers_checked) = if peer_tip_height == our_height {
+                    if let Some(registry) = self.get_peer_registry().await {
+                        let compatible_peers = registry.get_compatible_peers().await;
+                        let mut supporting = 0usize;
+                        let mut total = 0usize;
+                        for pip in &compatible_peers {
+                            if let Some((tip_height, tip_hash)) =
+                                registry.get_peer_chain_tip(pip).await
+                            {
+                                total += 1;
+                                if tip_height == peer_tip_height && tip_hash == peer_tip_hash {
+                                    supporting += 1;
+                                }
+                            }
+                        }
+                        (supporting, total)
+                    } else {
+                        (0, 0)
+                    }
+                } else {
+                    (0, 0)
+                };
+
                 let resolution = self
                     .fork_resolver
                     .resolve_fork(crate::ai::fork_resolver::ForkResolutionParams {
@@ -9090,6 +9149,8 @@ impl Blockchain {
                         common_ancestor: Some(common_ancestor),
                         our_fork_block_hash,
                         peer_fork_block_hash,
+                        peer_support_count,
+                        total_peers_checked,
                     })
                     .await;
 
@@ -9099,50 +9160,10 @@ impl Blockchain {
                     resolution.accept_peer_chain, reasoning_summary
                 );
 
-                // Decision: accept only if fork resolver says so
                 if !resolution.accept_peer_chain {
-                    // CONSENSUS OVERRIDE: The hash tiebreaker can keep us on a minority fork
-                    // when the entire network has already settled on the competing block.
-                    // If ≥3 peers independently confirm the peer's hash at the same height,
-                    // the majority-chain consensus overrides the local hash tiebreaker.
-                    let mut consensus_override = false;
-                    if peer_tip_height == our_height {
-                        if let Some(registry) = self.get_peer_registry().await {
-                            let compatible_peers = registry.get_compatible_peers().await;
-                            let mut supporting_peers = 0usize;
-                            let mut total_checked = 0usize;
-                            for pip in &compatible_peers {
-                                if let Some((tip_height, tip_hash)) =
-                                    registry.get_peer_chain_tip(pip).await
-                                {
-                                    total_checked += 1;
-                                    if tip_height == peer_tip_height && tip_hash == peer_tip_hash {
-                                        supporting_peers += 1;
-                                    }
-                                }
-                            }
-                            const MIN_CONSENSUS_OVERRIDE_PEERS: usize = 3;
-                            if total_checked > 0 && supporting_peers >= MIN_CONSENSUS_OVERRIDE_PEERS
-                            {
-                                warn!(
-                                    "🔀 Consensus override: {}/{} peers have hash {} at height {} \
-                                    — accepting majority chain over hash tiebreaker",
-                                    supporting_peers,
-                                    total_checked,
-                                    hex::encode(&peer_tip_hash[..8]),
-                                    peer_tip_height,
-                                );
-                                consensus_override = true;
-                            }
-                        }
-                    }
-
-                    if !consensus_override {
-                        info!("📊 Fork resolver rejected peer chain");
-                        *self.fork_state.write().await = ForkResolutionState::None;
-                        return Ok(());
-                    }
-                    // Fall through to reorg — majority consensus overrides hash tiebreaker
+                    info!("📊 Fork resolver rejected peer chain");
+                    *self.fork_state.write().await = ForkResolutionState::None;
+                    return Ok(());
                 }
 
                 // NETWORK CONSENSUS CROSS-CHECK: For same-height forks, verify that
@@ -9174,17 +9195,18 @@ impl Blockchain {
                         let now = chrono::Utc::now().timestamp();
                         (now - expected_ts).max(0) as u64
                     };
-                    let effective_min_peers =
-                        if seconds_past_schedule > crate::constants::blockchain::BLOCK_TIME_SECONDS as u64 * 2 {
-                            info!(
-                                "⚡ Fork liveness escape: {}s past schedule at height {}, \
+                    let effective_min_peers = if seconds_past_schedule
+                        > crate::constants::blockchain::BLOCK_TIME_SECONDS as u64 * 2
+                    {
+                        info!(
+                            "⚡ Fork liveness escape: {}s past schedule at height {}, \
                                 lowering on-demand fork peer threshold from {} to 1",
-                                seconds_past_schedule, our_height, MIN_PEERS_FOR_ONDEMAND_FORK
-                            );
-                            1usize
-                        } else {
-                            MIN_PEERS_FOR_ONDEMAND_FORK
-                        };
+                            seconds_past_schedule, our_height, MIN_PEERS_FOR_ONDEMAND_FORK
+                        );
+                        1usize
+                    } else {
+                        MIN_PEERS_FOR_ONDEMAND_FORK
+                    };
 
                     if let Some(registry) = self.get_peer_registry().await {
                         let compatible_peers = registry.get_compatible_peers().await;
@@ -9213,10 +9235,7 @@ impl Blockchain {
                             info!(
                                 "🛡️ On-demand fork REJECTED: only {}/{} peers support peer tip \
                                 (need {}). Single-peer fork attempt from {}",
-                                supporting_peers,
-                                total_checked,
-                                effective_min_peers,
-                                peer_addr
+                                supporting_peers, total_checked, effective_min_peers, peer_addr
                             );
                             *self.fork_state.write().await = ForkResolutionState::None;
                             return Ok(());
@@ -9755,8 +9774,7 @@ impl Blockchain {
                                 peer_addr, e
                             );
                             if let Some(bl_opt) = self.blacklist.read().await.as_ref() {
-                                let bare_ip =
-                                    peer_addr.split(':').next().unwrap_or(&peer_addr);
+                                let bare_ip = peer_addr.split(':').next().unwrap_or(&peer_addr);
                                 if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
                                     bl_opt.write().await.add_temp_ban(
                                         ip,
@@ -10430,7 +10448,10 @@ impl Blockchain {
             return 0;
         }
 
-        tracing::info!("🔍 [UTXO-REPAIR] Scanning blocks 0-{} for indexing gaps...", height);
+        tracing::info!(
+            "🔍 [UTXO-REPAIR] Scanning blocks 0-{} for indexing gaps...",
+            height
+        );
 
         // Pass 1: collect every outpoint consumed as a transaction input.
         // These are legitimately spent and should NOT be in the live UTXO set.
@@ -10486,8 +10507,7 @@ impl Blockchain {
 
                     // Gap confirmed: output is unspent per block history but absent from
                     // the local UTXO store.  Re-insert it.
-                    let address =
-                        String::from_utf8_lossy(&output.script_pubkey).to_string();
+                    let address = String::from_utf8_lossy(&output.script_pubkey).to_string();
                     let utxo = crate::types::UTXO {
                         outpoint: outpoint.clone(),
                         value: output.value,

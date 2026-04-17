@@ -65,6 +65,11 @@ pub struct ForkResolutionParams {
     pub our_fork_block_hash: Option<[u8; 32]>,
     /// Peer's block hash at common_ancestor+1 — their first diverging block.
     pub peer_fork_block_hash: Option<[u8; 32]>,
+    /// Number of compatible peers that report the peer's tip hash at this height.
+    /// Used to override the hash tiebreaker when a supermajority supports the peer chain.
+    pub peer_support_count: usize,
+    /// Total number of compatible peers with known chain tips (denominator for peer_support_count).
+    pub total_peers_checked: usize,
 }
 
 /// Fork resolution result
@@ -141,7 +146,42 @@ impl ForkResolver {
             };
         }
 
-        // Rule 3: Same height — deterministic hash tiebreaker.
+        // Rule 3: Same height — supermajority peer support overrides hash tiebreaker.
+        // If ≥67% of checked peers (minimum 3) report the peer's hash at this height,
+        // the network has already settled on that chain. Accept it even if the local
+        // hash tiebreaker would prefer our chain — minority-fork isolation causes
+        // the tiebreaker to fire in our favor even when we're the minority.
+        const SUPERMAJORITY_THRESHOLD: f64 = 0.67;
+        const MIN_PEERS_FOR_MAJORITY_OVERRIDE: usize = 3;
+        if params.total_peers_checked >= MIN_PEERS_FOR_MAJORITY_OVERRIDE
+            && params.peer_support_count > 0
+        {
+            let support_ratio =
+                params.peer_support_count as f64 / params.total_peers_checked as f64;
+            if support_ratio >= SUPERMAJORITY_THRESHOLD {
+                reasoning.push(format!(
+                    "ACCEPT: Peer chain has supermajority support ({}/{} peers, {:.0}%) at height {} — overrides hash tiebreaker",
+                    params.peer_support_count,
+                    params.total_peers_checked,
+                    support_ratio * 100.0,
+                    params.peer_height,
+                ));
+                info!(
+                    "✅ Fork: ACCEPT {} — supermajority ({}/{} peers, {:.0}%) at height {}",
+                    params.peer_ip,
+                    params.peer_support_count,
+                    params.total_peers_checked,
+                    support_ratio * 100.0,
+                    params.peer_height,
+                );
+                return ForkResolution {
+                    accept_peer_chain: true,
+                    reasoning,
+                };
+            }
+        }
+
+        // Rule 4: Same height — deterministic hash tiebreaker.
         // Prefer comparing the FIRST DIVERGING BLOCK (ancestor+1) when available:
         // both chains branched from the same parent, so the block each side produced
         // right after the split is the canonical point of comparison. This is more
