@@ -8529,25 +8529,39 @@ impl Blockchain {
         }
 
         // Case 3: We're ahead of all known peers
-        // LONGEST VALID CHAIN RULE: If we have a valid longer chain than any peer, WE are canonical.
-        // Peers will sync to us when they see our blocks. Even if hashes differ at a lower
-        // height, our chain is longer and should win — peers adopt the longest valid chain.
+        // LONGEST VALID CHAIN RULE applies only when our chain is a strict extension of
+        // the consensus chain. If our hash at the consensus tip differs from what the majority
+        // reports, we diverged and are on a minority fork — yield to the majority.
         if our_height > consensus_height {
-            // Log divergence for diagnostics but do NOT roll back
-            if our_height - consensus_height <= 5 && consensus_peers.len() >= 2 {
+            // Minority-fork detection: small lead + hash divergence + enough peer support.
+            // "Small lead" (≤10) means we produced a few extra blocks on a diverged base —
+            // exactly the live-fork scenario. A large lead is almost certainly legitimate
+            // (e.g. isolated node that was partitioned and caught up).
+            const MIN_PEERS_FOR_MINORITY_ROLLBACK: usize = 3;
+            const MAX_AHEAD_FOR_MINORITY_CHECK: u64 = 10;
+            if our_height - consensus_height <= MAX_AHEAD_FOR_MINORITY_CHECK
+                && consensus_peers.len() >= MIN_PEERS_FOR_MINORITY_ROLLBACK
+            {
                 if let Ok(our_hash_at_consensus) = self.get_block_hash(consensus_height) {
                     if our_hash_at_consensus != consensus_hash {
-                        tracing::info!(
-                            "📈 Longest chain rule: we're at {} (peers at {}). Hash differs at {} — peers should sync to us.",
+                        // We're N blocks ahead but our chain forked at consensus_height.
+                        // The majority chose a different block there — we're the minority.
+                        tracing::warn!(
+                            "🔀 Minority fork detected: we're at {} but our hash at {} ({}) \
+                             differs from {} peers' consensus hash ({}). Yielding to majority.",
                             our_height,
                             consensus_height,
-                            consensus_height
+                            hex::encode(&our_hash_at_consensus[..8]),
+                            consensus_peers.len(),
+                            hex::encode(&consensus_hash[..8]),
                         );
+                        return Some((consensus_height, consensus_peers[peer_pick_idx].clone()));
                     }
                 }
             }
 
-            // Verify our top block is still retrievable
+            // Our chain is either a clean extension of consensus or we're too far ahead to
+            // second-guess ourselves. Verify our top block is still retrievable.
             match self.get_block(our_height) {
                 Ok(_) => {
                     tracing::debug!(
