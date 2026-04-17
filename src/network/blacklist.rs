@@ -64,7 +64,6 @@ impl IPBlacklist {
 
         // ── Load permanent bans ───────────────────────────────────────────
         if let Some(tree) = &self.db_permanent {
-            let mut whitelisted_pruned = 0usize;
             for item in tree.iter().flatten() {
                 let (k, v) = item;
                 if let Ok(ip) = std::str::from_utf8(&k)
@@ -72,24 +71,17 @@ impl IPBlacklist {
                     .and_then(|s| s.parse::<IpAddr>().ok())
                     .ok_or(())
                 {
-                    if self.whitelist.contains_key(&ip) {
-                        // Whitelisted peer — discard the stored ban and remove from sled
-                        let _ = tree.remove(k);
-                        whitelisted_pruned += 1;
-                        tracing::info!(
-                            "🔓 Cleared persisted ban for whitelisted peer {} on startup",
-                            ip
-                        );
-                    } else {
-                        let reason = String::from_utf8_lossy(&v).into_owned();
-                        self.permanent_blacklist.insert(ip, reason);
-                    }
+                    let reason = String::from_utf8_lossy(&v).into_owned();
+                    // Operator-issued permanent bans override the whitelist.
+                    // is_blacklisted() already checks permanent bans before whitelist,
+                    // so loading unconditionally here is safe and correct.
+                    self.whitelist.remove(&ip);
+                    self.permanent_blacklist.insert(ip, reason);
                 }
             }
             tracing::info!(
-                "🔒 Loaded {} permanent IP ban(s) from sled ({} cleared for whitelisted peers)",
-                self.permanent_blacklist.len(),
-                whitelisted_pruned
+                "🔒 Loaded {} permanent IP ban(s) from sled",
+                self.permanent_blacklist.len()
             );
         }
 
@@ -97,25 +89,14 @@ impl IPBlacklist {
         if let Some(tree) = &self.db_temp {
             let mut loaded = 0usize;
             let mut expired = 0usize;
-            let mut whitelisted_pruned = 0usize;
             for item in tree.iter().flatten() {
                 let (k, v) = item;
                 if let Some(ip) = std::str::from_utf8(&k)
                     .ok()
                     .and_then(|s| s.parse::<IpAddr>().ok())
                 {
-                    if self.whitelist.contains_key(&ip) {
-                        let _ = tree.remove(k);
-                        whitelisted_pruned += 1;
-                        tracing::info!(
-                            "🔓 Cleared persisted temp ban for whitelisted peer {} on startup",
-                            ip
-                        );
-                        continue;
-                    }
                     if let Ok((expiry_unix, reason)) = bincode::deserialize::<(u64, String)>(&v) {
                         if expiry_unix <= now_unix {
-                            // Expired — prune from sled too
                             let _ = tree.remove(k);
                             expired += 1;
                         } else {
@@ -127,12 +108,11 @@ impl IPBlacklist {
                     }
                 }
             }
-            if loaded > 0 || expired > 0 || whitelisted_pruned > 0 {
+            if loaded > 0 || expired > 0 {
                 tracing::info!(
-                    "🔒 Loaded {} active temp ban(s) from sled ({} expired and pruned, {} cleared for whitelisted peers)",
+                    "🔒 Loaded {} active temp ban(s) from sled ({} expired and pruned)",
                     loaded,
-                    expired,
-                    whitelisted_pruned
+                    expired
                 );
             }
         }
@@ -173,23 +153,16 @@ impl IPBlacklist {
         if let Some(tree) = &self.db_violations {
             let cutoff = now_unix.saturating_sub(3600);
             let mut loaded = 0usize;
-            let mut whitelisted_pruned = 0usize;
             for item in tree.iter().flatten() {
                 let (k, v) = item;
                 if let Some(ip) = std::str::from_utf8(&k)
                     .ok()
                     .and_then(|s| s.parse::<IpAddr>().ok())
                 {
-                    if self.whitelist.contains_key(&ip) {
-                        let _ = tree.remove(k);
-                        whitelisted_pruned += 1;
-                        continue;
-                    }
                     if let Ok((count, last_unix)) = bincode::deserialize::<(u32, u64)>(&v) {
                         if last_unix < cutoff {
                             let _ = tree.remove(k);
                         } else {
-                            // Reconstruct Instant from delta
                             let elapsed_secs = now_unix.saturating_sub(last_unix);
                             let last_instant =
                                 Instant::now() - Duration::from_secs(elapsed_secs.min(3600));
@@ -199,12 +172,8 @@ impl IPBlacklist {
                     }
                 }
             }
-            if loaded > 0 || whitelisted_pruned > 0 {
-                tracing::info!(
-                    "🔒 Loaded {} violation counter(s) from sled ({} cleared for whitelisted peers)",
-                    loaded,
-                    whitelisted_pruned
-                );
+            if loaded > 0 {
+                tracing::info!("🔒 Loaded {} violation counter(s) from sled", loaded);
             }
         }
     }
@@ -407,13 +376,21 @@ impl IPBlacklist {
             3 => {
                 // 3rd violation: 1 minute ban
                 self.add_temp_ban(ip, Duration::from_secs(60), reason);
-                tracing::warn!("🚫 Auto-banned {} for 1 minute (3 violations: {})", ip, reason);
+                tracing::warn!(
+                    "🚫 Auto-banned {} for 1 minute (3 violations: {})",
+                    ip,
+                    reason
+                );
                 true
             }
             5 => {
                 // 5th violation: 5 minute ban
                 self.add_temp_ban(ip, Duration::from_secs(300), reason);
-                tracing::warn!("🚫 Auto-banned {} for 5 minutes (5 violations: {})", ip, reason);
+                tracing::warn!(
+                    "🚫 Auto-banned {} for 5 minutes (5 violations: {})",
+                    ip,
+                    reason
+                );
                 true
             }
             10 => {
@@ -468,7 +445,8 @@ impl IPBlacklist {
                 self.add_temp_ban(ip, Duration::from_secs(300), reason);
                 tracing::warn!(
                     "🚫 TLS: temp-banned {} for 5 minutes (10 TLS failures: {})",
-                    ip, reason
+                    ip,
+                    reason
                 );
                 true
             }
@@ -476,7 +454,8 @@ impl IPBlacklist {
                 self.add_temp_ban(ip, Duration::from_secs(3600), reason);
                 tracing::warn!(
                     "🚫 TLS: temp-banned {} for 1 hour (30 TLS failures: {})",
-                    ip, reason
+                    ip,
+                    reason
                 );
                 true
             }
@@ -490,7 +469,8 @@ impl IPBlacklist {
                     self.add_temp_ban(ip, Duration::from_secs(3600), reason);
                     tracing::warn!(
                         "🚫 TLS: renewed 1-hour ban for {} ({} total TLS failures)",
-                        ip, count_snap
+                        ip,
+                        count_snap
                     );
                     true
                 } else {
