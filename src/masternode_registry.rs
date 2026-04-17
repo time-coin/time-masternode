@@ -4039,6 +4039,21 @@ impl MasternodeRegistry {
         Ok(())
     }
 
+    /// Undo a `MasternodeRegistration` that was applied on a fork that is now being
+    /// rolled back. Deletes the `mnreg:` key from the registry db so the node is no
+    /// longer considered on-chain registered on the canonical chain.
+    ///
+    /// The in-memory `masternodes` entry is preserved if the node is still actively
+    /// participating via gossip — only the on-chain registration record is removed.
+    pub async fn undo_registration(&self, node_address: &str) {
+        let key = format!("mnreg:{}", node_address);
+        let _ = self.db.remove(key.as_bytes());
+        tracing::debug!(
+            "↩ Rolled back MasternodeRegistration for {} (fork reorg)",
+            node_address
+        );
+    }
+
     /// Apply a `MasternodePayoutUpdate` special transaction confirmed in a block.
     pub async fn apply_masternode_payout_update(
         &self,

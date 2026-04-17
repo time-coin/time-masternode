@@ -85,6 +85,21 @@ pub struct UndoLog {
     pub created_at: i64,
 }
 
+/// Special-transaction undo record — stored separately from `UndoLog` so it doesn't
+/// break bincode deserialization of existing undo log entries.
+///
+/// Key: `special_undo_{height}` in `blockchain.storage`.
+/// Applied by `rollback_to_height` in reverse block order to undo masternode
+/// registration effects left in the registry db by discarded fork blocks.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SpecialTxUndoRecord {
+    /// Addresses newly registered (mnreg: key written) by this block's special TXs.
+    /// On rollback: delete their mnreg: keys from the registry db so they no longer
+    /// appear as on-chain registered, preventing stale Free-tier reward eligibility
+    /// on the canonical chain.
+    pub registered: Vec<String>,
+}
+
 impl UndoLog {
     /// Create new undo log for a block
     pub fn new(height: u64, block_hash: [u8; 32]) -> Self {
@@ -4848,9 +4863,13 @@ impl Blockchain {
         // Process UTXOs and create undo log
         let undo_log = self.process_block_utxos(&block).await?;
 
-        // Process special transactions (on-chain masternode registration/updates)
+        // Process special transactions (on-chain masternode registration/updates).
+        // Capture the undo record so we can reverse these changes if this block is later
+        // rolled back during fork resolution (prevents stale mnreg: entries from discarded
+        // fork blocks contaminating reward calculations on the canonical chain).
         if !is_genesis {
-            self.process_special_transactions(&block).await;
+            let special_undo = self.process_special_transactions(&block).await;
+            self.save_special_undo_record(block.header.height, &special_undo);
         }
 
         // Sync the local treasury balance from the block's committed header value.
@@ -5814,8 +5833,10 @@ impl Blockchain {
 
     /// Scan a block for special transactions (masternode registration/updates)
     /// and apply them to the masternode registry.
-    async fn process_special_transactions(&self, block: &Block) {
+    async fn process_special_transactions(&self, block: &Block) -> SpecialTxUndoRecord {
         use crate::types::SpecialTransactionData;
+
+        let mut undo = SpecialTxUndoRecord::default();
 
         for tx in &block.transactions {
             let special = match &tx.special_data {
@@ -5857,6 +5878,7 @@ impl Blockchain {
                                 slot_id,
                                 &txid_hex[..16]
                             );
+                            undo.registered.push(node_address.clone());
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -5938,6 +5960,7 @@ impl Blockchain {
                 }
             }
         }
+        undo
     }
 
     /// Returns true if `node_address` has an on-chain `MasternodeRegistration` record.
@@ -6324,6 +6347,24 @@ impl Blockchain {
             .iter()
             .map(|b| b.count_ones() as usize)
             .sum();
+
+        // Warn when the bitmap's byte-length implies a larger registry than we have.
+        // This is a strong signal of registry state divergence between producer and
+        // validator — the root cause of multi-fork reward calculation divergence.
+        // (bitmap_bytes × 8) >= our registry size means the producer knew more nodes.
+        {
+            let our_registry_size = self.masternode_registry.all_masternodes_cached().len();
+            let bitmap_capacity = block.header.active_masternodes_bitmap.len() * 8;
+            if bitmap_capacity > our_registry_size && our_registry_size > 0 {
+                tracing::warn!(
+                    "⚠️ Block {} bitmap capacity {} > local registry size {} — \
+                     producer had more masternodes; reward decode may differ (registry divergence)",
+                    block.header.height,
+                    bitmap_capacity,
+                    our_registry_size
+                );
+            }
+        }
 
         // Fairness tracking for reward_calculator (O(n) in-memory, no sled I/O).
         let fairness_map: std::collections::HashMap<String, u64> =
@@ -6732,6 +6773,36 @@ impl Blockchain {
         Ok(())
     }
 
+    fn save_special_undo_record(&self, height: u64, record: &SpecialTxUndoRecord) {
+        if record.registered.is_empty() {
+            return; // nothing to save
+        }
+        let key = format!("special_undo_{}", height);
+        match bincode::serialize(record) {
+            Ok(bytes) => {
+                let _ = self.storage.insert(key.as_bytes(), bytes);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to serialize SpecialTxUndoRecord for height {}: {}",
+                    height,
+                    e
+                );
+            }
+        }
+    }
+
+    fn load_special_undo_record(&self, height: u64) -> Option<SpecialTxUndoRecord> {
+        let key = format!("special_undo_{}", height);
+        let bytes = self.storage.get(key.as_bytes()).ok()??;
+        bincode::deserialize::<SpecialTxUndoRecord>(&bytes).ok()
+    }
+
+    fn delete_special_undo_record(&self, height: u64) {
+        let key = format!("special_undo_{}", height);
+        let _ = self.storage.remove(key.as_bytes());
+    }
+
     /// Get checkpoints for the current network
     fn get_checkpoints(&self) -> &'static [(u64, &'static str)] {
         match self.network_type {
@@ -6961,6 +7032,27 @@ impl Blockchain {
             tracing::info!(
                 "💡 {} non-finalized transactions need to be returned to mempool (requires transaction pool integration)",
                 transactions_to_repool.len()
+            );
+        }
+
+        // Step 1b: Reverse special-transaction effects (masternode registrations) from
+        // discarded fork blocks. Without this, mnreg: entries written by rolled-back
+        // blocks persist in the registry db and cause phantom Free-tier nodes to appear
+        // registered on the canonical chain, producing reward calculation divergence.
+        let mut special_undo_count = 0usize;
+        for height in (target_height + 1..=current).rev() {
+            if let Some(special_undo) = self.load_special_undo_record(height) {
+                for addr in &special_undo.registered {
+                    self.masternode_registry.undo_registration(addr).await;
+                    special_undo_count += 1;
+                }
+                self.delete_special_undo_record(height);
+            }
+        }
+        if special_undo_count > 0 {
+            tracing::info!(
+                "↩ Special TX rollback: reversed {} masternode registration(s) from discarded fork blocks",
+                special_undo_count
             );
         }
 
