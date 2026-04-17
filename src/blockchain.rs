@@ -8039,7 +8039,7 @@ impl Blockchain {
         let min_response_rate = if our_height == 0 { 0.25 } else { 0.5 };
         let response_rate = peer_tips.len() as f64 / connected_peers.len() as f64;
         if response_rate < min_response_rate {
-            tracing::warn!(
+            tracing::debug!(
                 "⚠️  Low peer response rate: {}/{} responded ({:.1}%) - waiting for more responses before consensus decision",
                 peer_tips.len(),
                 connected_peers.len(),
@@ -9720,10 +9720,15 @@ impl Blockchain {
                     //     their tips (e.g. only 7/24 responding) yet the peer chain
                     //     is clearly longer and fully validated.
                     {
-                        const MIN_PEERS_FINALITY_OVERRIDE: usize = 2;
+                        // Lowered from 2 → 1: the 50%-supermajority check
+                        // (supporting * 2 > total_ahead) already enforces a relative
+                        // majority among responding peers. Requiring an absolute minimum of
+                        // 2 trapped nodes whose watchdog restarts every ~2 min (resetting
+                        // the escape timer) whenever only 1 peer had chain-tip cache data.
+                        const MIN_PEERS_FINALITY_OVERRIDE: usize = 1;
                         const FINALITY_LOCK_ESCAPE_SECS: u64 = 300; // 5 minutes
                         const FINALITY_LOCK_LONGER_CHAIN_ESCAPE_SECS: u64 = 60; // 1 min for longer-chain
-                        const MIN_PEERS_FINALITY_ESCAPE: usize = 2;
+                        const MIN_PEERS_FINALITY_ESCAPE: usize = 1;
                         let last_confirmed =
                             self.last_locally_confirmed_height.load(Ordering::Acquire);
 
@@ -9781,7 +9786,10 @@ impl Blockchain {
                                 // never will — both chains are equal length). If enough peers
                                 // independently confirm the consensus hash, the network has
                                 // already settled and we must follow it immediately.
-                                const MIN_SAME_HEIGHT_CONSENSUS_PEERS: usize = 3;
+                                // Lowered from 3 → 2: same-height forks require at least
+                                // 2 peers confirming the consensus hash before overriding
+                                // (no supermajority check applies here, so keep > 1).
+                                const MIN_SAME_HEIGHT_CONSENSUS_PEERS: usize = 2;
                                 let same_height_consensus_override = peer_tip_height == our_height
                                     && supporting >= MIN_SAME_HEIGHT_CONSENSUS_PEERS;
 
