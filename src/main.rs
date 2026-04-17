@@ -1557,10 +1557,9 @@ async fn main() {
                         if health.active_masternodes < 5 {
                             let inactive_addresses = health_registry.get_inactive_masternode_addresses().await;
                             if !inactive_addresses.is_empty() {
-                                tracing::info!(
-                                    "🔄 {} inactive masternodes pending reconnection (Phase 3-MN handles every 30s): {:?}",
+                                tracing::debug!(
+                                    "🔄 {} inactive masternodes pending reconnection (Phase 3-MN handles every 30s)",
                                     inactive_addresses.len(),
-                                    &inactive_addresses
                                 );
 
                                 for address in &inactive_addresses {
@@ -5365,8 +5364,7 @@ fn setup_logging(
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
     let level = if verbose { "trace" } else { &config.level };
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
     // Detect if running under systemd/journald
     let is_systemd =
