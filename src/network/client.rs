@@ -223,15 +223,31 @@ impl NetworkClient {
                 }
             };
 
-            // Fetch masternodes by tier once
-            let gold_nodes = masternode_registry.list_by_tier(MasternodeTier::Gold).await;
-            let mut silver_nodes = masternode_registry
-                .list_by_tier(MasternodeTier::Silver)
-                .await;
-            let mut bronze_nodes = masternode_registry
-                .list_by_tier(MasternodeTier::Bronze)
-                .await;
-            let mut free_nodes = masternode_registry.list_by_tier(MasternodeTier::Free).await;
+            // Fetch masternodes by tier once.
+            // Use list_all() (not list_by_tier which filters is_active) because at startup
+            // all nodes load from sled as inactive — they have no peer reports yet.
+            // PHASE1's job is to establish the connections that will activate them.
+            let all_nodes_for_phase1 = masternode_registry.list_all().await;
+            let gold_nodes: Vec<_> = all_nodes_for_phase1
+                .iter()
+                .filter(|m| m.masternode.tier == MasternodeTier::Gold)
+                .cloned()
+                .collect();
+            let mut silver_nodes: Vec<_> = all_nodes_for_phase1
+                .iter()
+                .filter(|m| m.masternode.tier == MasternodeTier::Silver)
+                .cloned()
+                .collect();
+            let mut bronze_nodes: Vec<_> = all_nodes_for_phase1
+                .iter()
+                .filter(|m| m.masternode.tier == MasternodeTier::Bronze)
+                .cloned()
+                .collect();
+            let mut free_nodes: Vec<_> = all_nodes_for_phase1
+                .iter()
+                .filter(|m| m.masternode.tier == MasternodeTier::Free)
+                .cloned()
+                .collect();
 
             silver_nodes.shuffle(&mut rand::thread_rng());
             bronze_nodes.shuffle(&mut rand::thread_rng());

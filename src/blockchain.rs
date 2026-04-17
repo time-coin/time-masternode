@@ -4337,9 +4337,31 @@ impl Blockchain {
                     "⚠️ Block production blocked: {} peers with corrupted blocks (zero hash) ignored, no healthy peers available",
                     peers_ignored
                 );
-            } else {
-                tracing::warn!("⚠️ Block production blocked: no responding peers with weight");
+                return false;
             }
+            // Peers are connected but haven't sent chain tips yet (no data, not disagreement).
+            // After 2x block time stall, allow production — peers will sync when we broadcast.
+            // This prevents permanent deadlock when connected peers haven't gossiped tips post-reconnect.
+            let expected_ts = self.genesis_timestamp()
+                + (our_height as i64 + 1) * crate::constants::blockchain::BLOCK_TIME_SECONDS;
+            let secs_past = (chrono::Utc::now().timestamp() - expected_ts).max(0) as u64;
+            if secs_past > crate::constants::blockchain::BLOCK_TIME_SECONDS as u64 * 2 {
+                if should_warn_blocked {
+                    LAST_BLOCKED_WARN.store(now_secs, std::sync::atomic::Ordering::Relaxed);
+                    tracing::warn!(
+                        "⚠️ {} connected peer(s) haven't shared chain tips yet ({}s overdue). \
+                         Allowing production — peers will sync on broadcast.",
+                        connected_peers.len(),
+                        secs_past
+                    );
+                }
+                return true;
+            }
+            tracing::warn!(
+                "⚠️ Block production blocked: {} connected peer(s) haven't shared chain tips yet ({}s past schedule, waiting for 2x block time)",
+                connected_peers.len(),
+                secs_past
+            );
             return false;
         }
 
