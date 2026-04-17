@@ -9420,15 +9420,11 @@ impl Blockchain {
                     return Ok(());
                 }
 
-                // Reject reorgs to strictly shorter chains (safety net)
-                if peer_tip_height < our_height {
-                    warn!(
-                        "🚫 REJECTED REORG: Peer chain is SHORTER ({} < {}).",
-                        peer_tip_height, our_height
-                    );
-                    *self.fork_state.write().await = ForkResolutionState::None;
-                    return Ok(());
-                }
+                // NOTE: we intentionally do NOT hard-reject peer_tip_height < our_height here.
+                // The fork resolver already evaluated the tiebreaker and said "accept" — a
+                // minority-fork rollback where we produced blocks on top of the wrong base.
+                // check_reorg_depth above bounds how far back we can roll; the fork resolver
+                // + peer-support checks are the canonical decision engine.
 
                 {
                     let reason = "longest valid chain";

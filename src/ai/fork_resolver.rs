@@ -132,6 +132,37 @@ impl ForkResolver {
 
         if params.peer_height < params.our_height {
             let gap = params.our_height - params.peer_height;
+
+            // When the gap is small, apply the hash tiebreaker at the fork point before
+            // rejecting. A small gap (≤10) means we may have produced a few blocks on a
+            // minority fork — the peer's chain wins if it holds the lower fork-point hash.
+            const MAX_MINORITY_FORK_GAP: u64 = 10;
+            if gap <= MAX_MINORITY_FORK_GAP {
+                if let (Some(our_fork), Some(peer_fork)) =
+                    (params.our_fork_block_hash, params.peer_fork_block_hash)
+                {
+                    if peer_fork < our_fork {
+                        reasoning.push(format!(
+                            "ACCEPT: Peer is {} block(s) shorter but holds canonical fork-point \
+                             hash (peer {} < ours {} at ancestor+1={})",
+                            gap,
+                            hex::encode(&peer_fork[..8]),
+                            hex::encode(&our_fork[..8]),
+                            params.common_ancestor.unwrap_or(0) + 1,
+                        ));
+                        info!(
+                            "✅ Fork: ACCEPT {} — minority-fork rollback, peer fork-point hash \
+                             wins tiebreaker (gap: {})",
+                            params.peer_ip, gap
+                        );
+                        return ForkResolution {
+                            accept_peer_chain: true,
+                            reasoning,
+                        };
+                    }
+                }
+            }
+
             reasoning.push(format!(
                 "REJECT: Our chain is longer ({} > {}, +{} blocks)",
                 params.our_height, params.peer_height, gap
