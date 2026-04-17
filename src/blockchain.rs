@@ -8544,18 +8544,36 @@ impl Blockchain {
             {
                 if let Ok(our_hash_at_consensus) = self.get_block_hash(consensus_height) {
                     if our_hash_at_consensus != consensus_hash {
-                        // We're N blocks ahead but our chain forked at consensus_height.
-                        // The majority chose a different block there — we're the minority.
-                        tracing::warn!(
-                            "🔀 Minority fork detected: we're at {} but our hash at {} ({}) \
-                             differs from {} peers' consensus hash ({}). Yielding to majority.",
-                            our_height,
-                            consensus_height,
-                            hex::encode(&our_hash_at_consensus[..8]),
-                            consensus_peers.len(),
-                            hex::encode(&consensus_hash[..8]),
-                        );
-                        return Some((consensus_height, consensus_peers[peer_pick_idx].clone()));
+                        // We're ahead but our chain forked at consensus_height.
+                        // Apply the same lower-hash-wins tiebreaker used for same-height forks
+                        // (see consensus_chain selection above: hash2.cmp(hash1)).
+                        // If peers hold the lower hash at that height, their chain is canonical
+                        // and we should roll back. If WE hold the lower hash, we stay.
+                        if consensus_hash < our_hash_at_consensus {
+                            tracing::warn!(
+                                "🔀 Fork detected: we're at {} but peers' hash at {} ({}) is lower \
+                                 than ours ({}). {} peers agree — rolling back to canonical chain.",
+                                our_height,
+                                consensus_height,
+                                hex::encode(&consensus_hash[..8]),
+                                hex::encode(&our_hash_at_consensus[..8]),
+                                consensus_peers.len(),
+                            );
+                            return Some((
+                                consensus_height,
+                                consensus_peers[peer_pick_idx].clone(),
+                            ));
+                        } else {
+                            tracing::info!(
+                                "📈 Fork detected: we're at {} with lower hash at {} ({} < {}). \
+                                 We hold the canonical chain — {} peers should sync to us.",
+                                our_height,
+                                consensus_height,
+                                hex::encode(&our_hash_at_consensus[..8]),
+                                hex::encode(&consensus_hash[..8]),
+                                consensus_peers.len(),
+                            );
+                        }
                     }
                 }
             }
