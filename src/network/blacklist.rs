@@ -95,6 +95,11 @@ impl IPBlacklist {
                     .ok()
                     .and_then(|s| s.parse::<IpAddr>().ok())
                 {
+                    if self.is_whitelisted(ip) {
+                        let _ = tree.remove(k);
+                        tracing::debug!("🔓 Cleared persisted temp ban for whitelisted IP {}", ip);
+                        continue;
+                    }
                     if let Ok((expiry_unix, reason)) = bincode::deserialize::<(u64, String)>(&v) {
                         if expiry_unix <= now_unix {
                             let _ = tree.remove(k);
@@ -159,6 +164,10 @@ impl IPBlacklist {
                     .ok()
                     .and_then(|s| s.parse::<IpAddr>().ok())
                 {
+                    if self.is_whitelisted(ip) {
+                        let _ = tree.remove(k);
+                        continue;
+                    }
                     if let Ok((count, last_unix)) = bincode::deserialize::<(u32, u64)>(&v) {
                         if last_unix < cutoff {
                             let _ = tree.remove(k);
