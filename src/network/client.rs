@@ -345,7 +345,7 @@ impl NetworkClient {
                     continue;
                 }
                 masternode_connections += 1;
-                tracing::info!("🔗 [PHASE1] Connecting to: {} (tier: {:?})", ip, our_tier);
+                tracing::debug!("🔗 [PHASE1] Connecting to: {} (tier: {:?})", ip, our_tier);
                 res.spawn(ip.clone(), true);
             }
 
@@ -389,7 +389,7 @@ impl NetworkClient {
                         .await
                         .iter()
                         .any(|mn| mn.masternode.address == *ip);
-                    tracing::info!("🔗 [PHASE2] Connecting to: {}", ip);
+                    tracing::debug!("🔗 [PHASE2] Connecting to: {}", ip);
                     res.spawn(ip.clone(), is_registered_mn);
                 }
             }
@@ -616,7 +616,7 @@ impl NetworkClient {
                         if !connection_manager.mark_connecting(ip) {
                             continue;
                         }
-                        tracing::info!("🔗 [PHASE3-PEER] Connecting to: {}", ip);
+                        tracing::debug!("🔗 [PHASE3-PEER] Connecting to: {}", ip);
                         res.spawn(ip.clone(), false);
                         sleep(Duration::from_millis(100)).await;
                     }
@@ -715,7 +715,7 @@ impl ConnectionResources {
                 Err(e) => {
                     res.reconnection_ai
                         .record_connection_failure(&ip, is_masternode, &e);
-                    tracing::warn!("{} Connection to {} failed: {}", tag, ip, e);
+                    tracing::debug!("{} Connection to {} failed: {}", tag, ip, e);
                 }
             }
 
