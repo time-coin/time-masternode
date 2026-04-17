@@ -195,7 +195,9 @@ impl SpecialTransactionData {
                     return Err("MasternodeRegistration: node_address is empty");
                 }
                 if !node_address.contains(':') {
-                    return Err("MasternodeRegistration: node_address missing port (expected IP:port)");
+                    return Err(
+                        "MasternodeRegistration: node_address missing port (expected IP:port)",
+                    );
                 }
                 if wallet_address.is_empty() {
                     return Err("MasternodeRegistration: wallet_address is empty");

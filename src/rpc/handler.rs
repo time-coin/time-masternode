@@ -4450,7 +4450,8 @@ impl RpcHandler {
 
         tracing::warn!(
             "⚠️  RPC rollbacktoheight: reverting chain from height {} to {}",
-            height_before, target_height
+            height_before,
+            target_height
         );
 
         match self.blockchain.rollback_to_height(target_height).await {

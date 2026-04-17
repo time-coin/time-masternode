@@ -457,7 +457,9 @@ impl NetworkServer {
                     }
                 }
             });
-            tracing::info!("🛡️ Attack mitigation enforcement task started (event-driven + 30s fallback)");
+            tracing::info!(
+                "🛡️ Attack mitigation enforcement task started (event-driven + 30s fallback)"
+            );
         }
 
         // Collateral audit sweep: every 5 minutes, scan all paid-tier registrations and
@@ -479,7 +481,8 @@ impl NetworkServer {
                         &audit_registry,
                         &audit_utxo,
                         &audit_blacklist,
-                    ).await;
+                    )
+                    .await;
                     for ip_str in &squatters {
                         audit_peer_registry.kick_peer(ip_str).await;
                     }
@@ -609,25 +612,13 @@ impl NetworkServer {
                 continue;
             }
 
-            let connection_type = if is_whitelisted { "[WHITELIST]" } else { "" };
-            if is_whitelisted {
-                tracing::info!(
-                    "✅ {} Accepting inbound connection from {} (total: {}, inbound: {}, whitelisted: {})",
-                    connection_type,
-                    ip,
-                    self.connection_manager.connected_count(),
-                    self.connection_manager.inbound_count(),
-                    self.connection_manager.count_whitelisted_connections()
-                );
-            } else {
-                tracing::debug!(
-                    "✅ Accepting inbound connection from {} (total: {}, inbound: {}, whitelisted: {})",
-                    ip,
-                    self.connection_manager.connected_count(),
-                    self.connection_manager.inbound_count(),
-                    self.connection_manager.count_whitelisted_connections()
-                );
-            }
+            tracing::debug!(
+                "✅ Accepting inbound connection from {} (total: {}, inbound: {}, whitelisted: {})",
+                ip,
+                self.connection_manager.connected_count(),
+                self.connection_manager.inbound_count(),
+                self.connection_manager.count_whitelisted_connections()
+            );
 
             let peer = PeerInfo {
                 addr: addr_str.clone(),
@@ -855,7 +846,10 @@ async fn audit_collateral_registrations(
             continue;
         }
         // Resolve: fetch the UTXO address and pick the owner.
-        let outpoint = match claimants.first().and_then(|c| c.masternode.collateral_outpoint.clone()) {
+        let outpoint = match claimants
+            .first()
+            .and_then(|c| c.masternode.collateral_outpoint.clone())
+        {
             Some(op) => op,
             None => continue,
         };
@@ -1018,9 +1012,9 @@ async fn handle_peer(
                     // Refills at GATE_RATE tokens/s; burst up to GATE_BURST.
                     // Soft-drops messages while tokens are exhausted; after
                     // GATE_HARD_DROPS consecutive soft-drops the peer is disconnected.
-                    const GATE_RATE: f64 = 200.0;      // sustained msgs/s allowed
-                    const GATE_BURST: f64 = 300.0;     // burst allowance
-                    const GATE_HARD_DROPS: u32 = 300;  // consecutive drops → hard kick
+                    const GATE_RATE: f64 = 200.0; // sustained msgs/s allowed
+                    const GATE_BURST: f64 = 300.0; // burst allowance
+                    const GATE_HARD_DROPS: u32 = 300; // consecutive drops → hard kick
                     let mut gate_tokens: f64 = GATE_BURST;
                     let mut gate_last = std::time::Instant::now();
                     let mut gate_drop_streak: u32 = 0;
@@ -1073,7 +1067,14 @@ async fn handle_peer(
                 });
             }
             Err(e) => {
-                tracing::warn!("🚫 TLS handshake failed for {}: {}", peer.addr, e);
+                // "handshake eof" is sent by old plain-TCP peers that don't speak TLS —
+                // demote to DEBUG since it's expected noise from pre-TLS nodes and port scanners.
+                let e_str = e.to_string();
+                if e_str.contains("eof") || e_str.contains("early eof") {
+                    tracing::debug!("🔓 TLS handshake eof from {} (plain-TCP client?)", peer.addr);
+                } else {
+                    tracing::warn!("🚫 TLS handshake failed for {}: {}", peer.addr, e);
+                }
                 // Charge a violation so repeat offenders accumulate bans.
                 // Without this, an attacker can flood TLS connections at zero cost —
                 // each attempt consumes a tokio task + TLS negotiation with no penalty.
@@ -1091,7 +1092,10 @@ async fn handle_peer(
                         .await
                         .record_tls_violation(ip, &format!("TLS handshake failed: {}", e));
                 } else {
-                    tracing::debug!("🔄 Ignoring TLS failure from own IP {} (self-connection)", ip_str);
+                    tracing::debug!(
+                        "🔄 Ignoring TLS failure from own IP {} (self-connection)",
+                        ip_str
+                    );
                 }
                 return Ok(());
             }
@@ -1107,9 +1111,9 @@ async fn handle_peer(
             // Refills at GATE_RATE tokens/s; burst up to GATE_BURST.
             // Soft-drops messages while tokens are exhausted; after
             // GATE_HARD_DROPS consecutive soft-drops the peer is disconnected.
-            const GATE_RATE: f64 = 200.0;      // sustained msgs/s allowed
-            const GATE_BURST: f64 = 300.0;     // burst allowance
-            const GATE_HARD_DROPS: u32 = 300;  // consecutive drops → hard kick
+            const GATE_RATE: f64 = 200.0; // sustained msgs/s allowed
+            const GATE_BURST: f64 = 300.0; // burst allowance
+            const GATE_HARD_DROPS: u32 = 300; // consecutive drops → hard kick
             let mut gate_tokens: f64 = GATE_BURST;
             let mut gate_last = std::time::Instant::now();
             let mut gate_drop_streak: u32 = 0;
@@ -1128,9 +1132,11 @@ async fn handle_peer(
                 } else {
                     gate_drop_streak += 1;
                     if gate_drop_streak > GATE_HARD_DROPS {
-                        let _ = msg_read_tx.send(Err(
-                            "Message flood detected: pre-channel gate triggered".to_string(),
-                        )).await;
+                        let _ = msg_read_tx
+                            .send(Err(
+                                "Message flood detected: pre-channel gate triggered".to_string()
+                            ))
+                            .await;
                         break;
                     }
                     continue; // soft drop

@@ -592,9 +592,7 @@ impl GovernanceState {
             .read()
             .await
             .iter()
-            .filter(|(_, p)| {
-                p.status == ProposalStatus::Active && p.vote_end_height == height
-            })
+            .filter(|(_, p)| p.status == ProposalStatus::Active && p.vote_end_height == height)
             .map(|(id, _)| id.clone())
             .collect();
 

@@ -690,7 +690,7 @@ impl ConnectionResources {
             }
 
             let connect_start = std::time::Instant::now();
-            match maintain_peer_connection(
+            let connection_was_live = match maintain_peer_connection(
                 &ip,
                 res.port,
                 res.connection_manager.clone(),
@@ -711,20 +711,24 @@ impl ConnectionResources {
                     res.reconnection_ai
                         .record_connection_success(&ip, is_masternode, connect_time);
                     tracing::info!("{} Connection to {} ended gracefully", tag, ip);
+                    true
                 }
                 Err(e) => {
                     res.reconnection_ai
                         .record_connection_failure(&ip, is_masternode, &e);
                     tracing::debug!("{} Connection to {} failed: {}", tag, ip, e);
+                    false
                 }
-            }
+            };
 
             res.connection_manager.mark_disconnected(&ip);
 
-            // AV3/Coordinated disconnect: record this outbound disconnect so the
-            // synchronized-cycling detector fires for PHASE3-MN connections too.
-            // The inbound side is wired in server.rs::handle_peer.
-            if is_masternode {
+            // AV3/Coordinated disconnect: only count connections that were actually live
+            // (Ok path), not failed attempts (Err path). During partition recovery a node
+            // tries hundreds of masternodes in rapid succession; counting those failures
+            // would flood the /16 detector and falsely block legitimate cloud-provider peers.
+            // The inbound side is wired in server.rs::handle_peer (already gated on handshake_done).
+            if is_masternode && connection_was_live {
                 if let Some(ref ad) = res.attack_detector {
                     let ip_str = ip.split(':').next().unwrap_or(&ip);
                     ad.record_synchronized_disconnect(ip_str);

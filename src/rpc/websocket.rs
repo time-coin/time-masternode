@@ -131,7 +131,7 @@ impl SubscriptionManager {
             .entry(address.to_string())
             .or_default()
             .push(sender);
-        tracing::info!(
+        tracing::debug!(
             "📡 WebSocket: client subscribed to {} (total subs: {})",
             address,
             self.total_subscriptions()

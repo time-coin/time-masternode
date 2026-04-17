@@ -1751,7 +1751,7 @@ impl Blockchain {
         }
 
         if found.is_empty() {
-            tracing::info!("✅ [purge_pre_genesis] No pre-genesis blocks found in sled.");
+            tracing::debug!("✅ [purge_pre_genesis] No pre-genesis blocks found in sled.");
             return 0;
         }
 

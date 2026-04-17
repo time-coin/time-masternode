@@ -686,7 +686,10 @@ impl AttackDetector {
         let sixteen_prefix: String = addr.split('.').take(2).collect::<Vec<_>>().join(".");
         if sixteen_prefix.len() >= 3 && !sixteen_prefix.contains(':') {
             const SYNC16_WINDOW_SECS: u64 = 30;
-            const SYNC16_THRESHOLD: usize = 5;
+            // Raised from 5 → 15: large cloud providers (Alibaba, AWS, Hetzner) legitimately
+            // host many masternodes on the same /16. The original threshold of 5 fired during
+            // normal partition-recovery reconnect storms and cascaded into self-inflicted bans.
+            const SYNC16_THRESHOLD: usize = 15;
 
             let ips_to_block: Vec<String> = {
                 let mut map = self.subnet16_disconnects.write();
@@ -702,6 +705,10 @@ impl AttackDetector {
                 let unique_ips: std::collections::HashSet<String> =
                     events.iter().map(|(_, ip)| ip.clone()).collect();
                 if unique_ips.len() >= SYNC16_THRESHOLD {
+                    // Drain the window after firing so subsequent disconnects from the same
+                    // /16 must accumulate a fresh batch before triggering again. Without this,
+                    // every new disconnect after threshold kept re-blocking all prior IPs.
+                    events.clear();
                     unique_ips.into_iter().collect()
                 } else {
                     vec![]

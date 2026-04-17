@@ -1068,7 +1068,8 @@ impl UTXOStateManager {
                 // reflect real on-chain state that should not be reversed.
                 let current_state = self.utxo_states.get(outpoint).map(|s| s.clone());
                 if matches!(current_state, Some(UTXOState::Locked { .. })) {
-                    self.utxo_states.insert(outpoint.clone(), UTXOState::Unspent);
+                    self.utxo_states
+                        .insert(outpoint.clone(), UTXOState::Unspent);
                     tracing::warn!(
                         "🔓 [LOCK-SWEEP] Released gossip-applied TX lock on collateral {}:{} \
                          (masternode: {}) — UTXO restored to Unspent",

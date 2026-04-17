@@ -138,11 +138,7 @@ async fn check_sliding_window(
 
 /// Rate-limit a log/action to once per `cooldown_secs` per key.
 /// Returns true and records the current time when the cooldown has elapsed.
-fn should_warn_now(
-    map: &dashmap::DashMap<String, Instant>,
-    key: &str,
-    cooldown_secs: u64,
-) -> bool {
+fn should_warn_now(map: &dashmap::DashMap<String, Instant>, key: &str, cooldown_secs: u64) -> bool {
     let fire = map
         .get(key)
         .map(|t| t.elapsed().as_secs() >= cooldown_secs)
@@ -2463,7 +2459,6 @@ impl MessageHandler {
 
         Ok(None)
     }
-
 
     /// Handle GetGenesisHash - respond with our genesis block hash
     async fn handle_get_genesis_hash(

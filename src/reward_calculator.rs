@@ -69,7 +69,10 @@ pub struct RewardInput<'a> {
 /// This function is intentionally async because paid-tier rewards are always
 /// redirected to the collateral UTXO owner's address, which requires a UTXO
 /// lookup to resolve (eliminates the economic incentive for collateral squatting).
-pub async fn compute(input: &RewardInput<'_>, utxo_manager: &UTXOStateManager) -> Vec<(String, u64)> {
+pub async fn compute(
+    input: &RewardInput<'_>,
+    utxo_manager: &UTXOStateManager,
+) -> Vec<(String, u64)> {
     let _ = input.height; // kept in RewardInput for logging/debugging only
     let producer_wallet = input.producer_wallet;
     let active_nodes = input.active_nodes;
@@ -85,9 +88,9 @@ pub async fn compute(input: &RewardInput<'_>, utxo_manager: &UTXOStateManager) -
     let bonus_for = |blocks_without: u64| -> u64 { blocks_without };
 
     // Whether any non-producer paid-tier node is active (determines distribution mode).
-    let has_paid_tier_nodes = active_nodes.iter().any(|mn| {
-        mn.masternode.tier != MasternodeTier::Free && payout_addr(mn) != producer_wallet
-    });
+    let has_paid_tier_nodes = active_nodes
+        .iter()
+        .any(|mn| mn.masternode.tier != MasternodeTier::Free && payout_addr(mn) != producer_wallet);
 
     // All Free-tier nodes must be on-chain registered — always apply the filter.
     let apply_onchain_filter = !input.free_tier_registered.is_empty();

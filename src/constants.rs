@@ -79,7 +79,6 @@ pub mod blockchain {
 
     /// Number of recent blocks to cache in memory
     pub const BLOCK_CACHE_SIZE: usize = 100;
-
 }
 
 /// Network protocol constants

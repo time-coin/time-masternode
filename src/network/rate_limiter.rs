@@ -36,10 +36,10 @@ impl RateLimiter {
                 // Phase 2.2: Per-peer message limits (more restrictive for DoS protection)
                 ("tx".to_string(), (Duration::from_secs(1), 50)), // 50 tx/second
                 ("tx_finalized".to_string(), (Duration::from_secs(10), 20)), // 20 finalized-tx announcements per 10s (AV38)
-                ("utxo_query".to_string(), (Duration::from_secs(1), 100)), // 100 queries/sec
-                ("subscribe".to_string(), (Duration::from_secs(60), 10)), // 10 subs/min
-                ("vote".to_string(), (Duration::from_secs(1), 100)), // 100 votes/sec
-                ("block".to_string(), (Duration::from_secs(1), 10)), // 10 blocks/sec
+                ("utxo_query".to_string(), (Duration::from_secs(1), 100)),   // 100 queries/sec
+                ("subscribe".to_string(), (Duration::from_secs(60), 10)),    // 10 subs/min
+                ("vote".to_string(), (Duration::from_secs(1), 100)),         // 100 votes/sec
+                ("block".to_string(), (Duration::from_secs(1), 10)),         // 10 blocks/sec
                 ("get_blocks".to_string(), (Duration::from_secs(10), 100)), // 100 GetBlocks/10sec - generous for fork resolution
                 ("get_peers".to_string(), (Duration::from_secs(60), 5)),    // 5 GetPeers/min
                 (
