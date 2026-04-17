@@ -439,7 +439,8 @@ impl MasternodeRegistry {
             nodes.remove(addr);
             tracing::debug!(
                 "🧹 Removed stale inactive Free-tier node {} (offline >{}s)",
-                addr, max_inactive_secs
+                addr,
+                max_inactive_secs
             );
         }
         self.rebuild_node_caches(&nodes);
@@ -475,8 +476,7 @@ impl MasternodeRegistry {
     /// Call this **while holding the `masternodes` write guard** so the cache is
     /// atomically consistent with the mutation that just completed.
     fn rebuild_node_caches(&self, nodes: &HashMap<String, MasternodeInfo>) {
-        let active: Vec<MasternodeInfo> =
-            nodes.values().filter(|i| i.is_active).cloned().collect();
+        let active: Vec<MasternodeInfo> = nodes.values().filter(|i| i.is_active).cloned().collect();
         let all: Vec<MasternodeInfo> = nodes.values().cloned().collect();
         *self.cached_active.write() = active;
         *self.cached_all.write() = all;
@@ -586,9 +586,7 @@ impl MasternodeRegistry {
     /// Queue a sled key/value insertion via the background writer.
     /// Never blocks; errors are logged by the background task.
     fn sled_insert_bg(&self, key: Vec<u8>, value: Vec<u8>) {
-        let _ = self
-            .sled_write_tx
-            .send(SledWriteOp::Upsert { key, value });
+        let _ = self.sled_write_tx.send(SledWriteOp::Upsert { key, value });
     }
 
     /// Queue a sled key removal via the background writer.
@@ -653,10 +651,7 @@ impl MasternodeRegistry {
         if masternode.tier == crate::types::MasternodeTier::Free {
             const FREE_TIER_RECONNECT_COOLDOWN_SECS: u64 = 30;
             let pre_now = Self::now();
-            if let Some(removed_at) = self
-                .free_tier_reconnect_cooldown
-                .get(&masternode.address)
-            {
+            if let Some(removed_at) = self.free_tier_reconnect_cooldown.get(&masternode.address) {
                 let elapsed = pre_now.saturating_sub(*removed_at);
                 if elapsed < FREE_TIER_RECONNECT_COOLDOWN_SECS {
                     tracing::debug!(
@@ -677,7 +672,11 @@ impl MasternodeRegistry {
             if let Some(ref outpoint) = masternode.collateral_outpoint {
                 let utxo_mgr_guard = self.utxo_manager.read().await;
                 if let Some(ref utxo_manager) = *utxo_mgr_guard {
-                    utxo_manager.get_utxo(outpoint).await.ok().map(|u| u.address)
+                    utxo_manager
+                        .get_utxo(outpoint)
+                        .await
+                        .ok()
+                        .map(|u| u.address)
                 } else {
                     None
                 }
@@ -943,7 +942,8 @@ impl MasternodeRegistry {
                             .get(old_ip)
                             .map(|n| n.masternode.wallet_address.clone())
                             .unwrap_or_default();
-                        if old_wallet != *utxo_address && masternode.wallet_address == *utxo_address {
+                        if old_wallet != *utxo_address && masternode.wallet_address == *utxo_address
+                        {
                             // Existing holder's wallet doesn't match UTXO, incoming's does.
                             // Existing holder is the squatter — evict and fall through.
                             tracing::info!(
@@ -951,7 +951,9 @@ impl MasternodeRegistry {
                                 old_addr, old_wallet, utxo_address, masternode.address
                             );
                             nodes.remove(old_ip);
-                        } else if masternode.wallet_address != *utxo_address && !old_wallet.is_empty() {
+                        } else if masternode.wallet_address != *utxo_address
+                            && !old_wallet.is_empty()
+                        {
                             // Incoming node's wallet doesn't match UTXO — they're the squatter
                             tracing::warn!(
                                 "🛡️ Collateral squatter rejected: {} wallet {} doesn't match UTXO {} (registered to {})",
@@ -964,7 +966,6 @@ impl MasternodeRegistry {
                 }
             }
             if let Some(old_addr) = old_addr_to_remove {
-
                 // Even a Free-tier incoming claim must not displace a paid-tier holder.
                 // Attackers exploit the Free-tier migration path to re-steal collateral
                 // that was just reclaimed by a legitimate Bronze/Silver/Gold node via
@@ -3270,9 +3271,7 @@ impl MasternodeRegistry {
     /// O(n) read with no sled I/O. Use this instead of get_pool_reward_tracking /
     /// get_verifiable_reward_tracking to avoid blocking the async runtime.
     /// Returns a map of masternode_address → blocks_without_reward.
-    pub async fn get_reward_tracking_from_memory(
-        &self,
-    ) -> std::collections::HashMap<String, u64> {
+    pub async fn get_reward_tracking_from_memory(&self) -> std::collections::HashMap<String, u64> {
         let masternodes = self.masternodes.read().await;
         masternodes
             .iter()
@@ -3290,8 +3289,7 @@ impl MasternodeRegistry {
                 // Never rewarded within our history — treat as maximum wait
                 info.blocks_without_reward = current_height.min(1000);
             } else {
-                info.blocks_without_reward =
-                    current_height.saturating_sub(info.last_reward_height);
+                info.blocks_without_reward = current_height.saturating_sub(info.last_reward_height);
             }
         }
     }
@@ -3330,10 +3328,7 @@ impl MasternodeRegistry {
         if current_height % 10 == 0 {
             for (address, info) in masternodes.iter() {
                 if let Ok(data) = bincode::serialize(info) {
-                    self.sled_insert_bg(
-                        format!("masternode:{}", address).into_bytes(),
-                        data,
-                    );
+                    self.sled_insert_bg(format!("masternode:{}", address).into_bytes(), data);
                 }
             }
             tracing::debug!(
@@ -3787,8 +3782,12 @@ impl MasternodeRegistry {
         //                                nodes already have in their sled state (consensus
         //                                compatibility for pre-fork history).
         let key = format!("mnreg:{}", node_address);
-        let existing_slot: Option<u32> = if let Ok(Some(existing_bytes)) = self.db.get(key.as_bytes()) {
-            if let Ok(mut existing) = bincode::deserialize::<crate::types::MasternodeOnchainInfo>(&existing_bytes) {
+        let existing_slot: Option<u32> = if let Ok(Some(existing_bytes)) =
+            self.db.get(key.as_bytes())
+        {
+            if let Ok(mut existing) =
+                bincode::deserialize::<crate::types::MasternodeOnchainInfo>(&existing_bytes)
+            {
                 if existing.registration_txid == registration_txid {
                     // Case 2: exact same txid — fully idempotent.
                     if registration_height > 0 && existing.registration_height == 0 {
@@ -3799,12 +3798,14 @@ impl MasternodeRegistry {
                         if let Some(info) = self.masternodes.write().await.get_mut(node_address) {
                             info.registration_height = registration_height;
                             if let RegistrationSource::OnChain(_) = info.registration_source {
-                                info.registration_source = RegistrationSource::OnChain(registration_height);
+                                info.registration_source =
+                                    RegistrationSource::OnChain(registration_height);
                             }
                         }
                         tracing::debug!(
                             "↪ MasternodeRegistration height updated: {} height={}",
-                            node_address, registration_height
+                            node_address,
+                            registration_height
                         );
                     }
                     return Ok(existing.slot_id);
@@ -3813,7 +3814,9 @@ impl MasternodeRegistry {
                 // Case 3: at/after fork height → reuse slot (spam protection).
                 // Case 4: before fork height  → return None so a new slot is assigned,
                 //         preserving pre-fork consensus with existing nodes.
-                if registration_height >= crate::constants::fork_heights::SLOT_UNIQUENESS_FORK_HEIGHT {
+                if registration_height
+                    >= crate::constants::fork_heights::SLOT_UNIQUENESS_FORK_HEIGHT
+                {
                     Some(existing.slot_id)
                 } else {
                     None
@@ -3827,15 +3830,27 @@ impl MasternodeRegistry {
 
         // Verify signature (required for both new registrations and re-registrations).
         let pubkey_bytes = hex::decode(pubkey).map_err(|e| format!("invalid pubkey hex: {}", e))?;
-        let pubkey_arr: [u8; 32] = pubkey_bytes.try_into().map_err(|_| "pubkey must be 32 bytes")?;
+        let pubkey_arr: [u8; 32] = pubkey_bytes
+            .try_into()
+            .map_err(|_| "pubkey must be 32 bytes")?;
         let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_arr)
             .map_err(|e| format!("invalid Ed25519 pubkey: {}", e))?;
         let sig_bytes = hex::decode(signature).map_err(|e| format!("invalid sig hex: {}", e))?;
-        let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| "signature must be 64 bytes")?;
+        let sig_arr: [u8; 64] = sig_bytes
+            .try_into()
+            .map_err(|_| "signature must be 64 bytes")?;
         let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
-        let collateral_field = if collateral_outpoint.is_empty() { "none" } else { collateral_outpoint };
-        let msg = format!("MNREG:{}:{}:{}:{}", node_address, wallet_address, pubkey, collateral_field);
-        verifying_key.verify(msg.as_bytes(), &sig)
+        let collateral_field = if collateral_outpoint.is_empty() {
+            "none"
+        } else {
+            collateral_outpoint
+        };
+        let msg = format!(
+            "MNREG:{}:{}:{}:{}",
+            node_address, wallet_address, pubkey, collateral_field
+        );
+        verifying_key
+            .verify(msg.as_bytes(), &sig)
             .map_err(|_| "MasternodeRegistration signature verification failed")?;
 
         // Use existing slot for re-registrations; assign a fresh one for new IPs.
@@ -3843,7 +3858,9 @@ impl MasternodeRegistry {
             Some(s) => {
                 tracing::debug!(
                     "↪ MasternodeRegistration re-registration: {} reusing slot={} new_txid={}",
-                    node_address, s, registration_txid
+                    node_address,
+                    s,
+                    registration_txid
                 );
                 s
             }
@@ -3856,13 +3873,21 @@ impl MasternodeRegistry {
         } else {
             let parts: Vec<&str> = collateral_outpoint.split(':').collect();
             if parts.len() != 2 {
-                return Err(format!("invalid collateral_outpoint format: {}", collateral_outpoint));
+                return Err(format!(
+                    "invalid collateral_outpoint format: {}",
+                    collateral_outpoint
+                ));
             }
             let txid_bytes = hex::decode(parts[0]).map_err(|e| format!("txid hex: {}", e))?;
             let txid_arr: [u8; 32] = txid_bytes.try_into().map_err(|_| "txid must be 32 bytes")?;
             let vout: u32 = parts[1].parse().map_err(|e| format!("vout: {}", e))?;
-            let outpoint = crate::types::OutPoint { txid: txid_arr, vout };
-            let utxo = utxo_manager.get_utxo(&outpoint).await
+            let outpoint = crate::types::OutPoint {
+                txid: txid_arr,
+                vout,
+            };
+            let utxo = utxo_manager
+                .get_utxo(&outpoint)
+                .await
                 .map_err(|e| format!("UTXO lookup failed: {}", e))?;
             let tier = MasternodeTier::from_collateral_value(utxo.value)
                 .unwrap_or(crate::types::MasternodeTier::Free);
@@ -3897,7 +3922,9 @@ impl MasternodeRegistry {
         };
         let key = format!("mnreg:{}", node_address);
         let bytes = bincode::serialize(&record).map_err(|e| format!("serialize: {}", e))?;
-        self.db.insert(key.as_bytes(), bytes).map_err(|e| format!("db insert: {}", e))?;
+        self.db
+            .insert(key.as_bytes(), bytes)
+            .map_err(|e| format!("db insert: {}", e))?;
 
         // Register in the in-memory registry
         let mn_info = MasternodeInfo {
@@ -3918,11 +3945,17 @@ impl MasternodeRegistry {
             first_seen_at: now,
             last_seen_at: 0,
         };
-        self.masternodes.write().await.insert(node_address.to_string(), mn_info);
+        self.masternodes
+            .write()
+            .await
+            .insert(node_address.to_string(), mn_info);
 
         tracing::info!(
             "✅ Masternode registered on-chain: {} tier={:?} slot={} height={}",
-            node_address, tier, slot_id, registration_height
+            node_address,
+            tier,
+            slot_id,
+            registration_height
         );
 
         Ok(slot_id)
@@ -3941,14 +3974,19 @@ impl MasternodeRegistry {
 
         // Verify signature
         let pubkey_bytes = hex::decode(pubkey).map_err(|e| format!("invalid pubkey hex: {}", e))?;
-        let pubkey_arr: [u8; 32] = pubkey_bytes.try_into().map_err(|_| "pubkey must be 32 bytes")?;
+        let pubkey_arr: [u8; 32] = pubkey_bytes
+            .try_into()
+            .map_err(|_| "pubkey must be 32 bytes")?;
         let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_arr)
             .map_err(|e| format!("invalid Ed25519 pubkey: {}", e))?;
         let sig_bytes = hex::decode(signature).map_err(|e| format!("invalid sig hex: {}", e))?;
-        let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| "signature must be 64 bytes")?;
+        let sig_arr: [u8; 64] = sig_bytes
+            .try_into()
+            .map_err(|_| "signature must be 64 bytes")?;
         let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
         let msg = format!("MNDEREG:{}:{}", node_address, slot_id);
-        verifying_key.verify(msg.as_bytes(), &sig)
+        verifying_key
+            .verify(msg.as_bytes(), &sig)
             .map_err(|_| "MasternodeDeregistration signature verification failed")?;
 
         // Idempotency guard: if already deregistered (applied at SpentFinalized), return Ok.
@@ -3956,6 +3994,18 @@ impl MasternodeRegistry {
             let nodes = self.masternodes.read().await;
             if let Some(info) = nodes.get(node_address) {
                 if info.masternode.slot_id != slot_id {
+                    if info.masternode.slot_id == u32::MAX {
+                        // Config-registered masternodes have slot_id=u32::MAX (no on-chain TX).
+                        // A deregistration TX targeting a real slot_id cannot apply here — this
+                        // is expected and not an error. Skip silently.
+                        tracing::debug!(
+                            "↪ MasternodeDeregistration skipped for config-registered node {} \
+                             (local slot=sentinel, tx slot={})",
+                            node_address,
+                            slot_id
+                        );
+                        return Ok(());
+                    }
                     return Err(format!(
                         "slot_id mismatch: registered {}, got {}",
                         info.masternode.slot_id, slot_id
@@ -3969,7 +4019,8 @@ impl MasternodeRegistry {
                 // Already removed (applied at SpentFinalized) — idempotent, nothing to do.
                 tracing::debug!(
                     "↪ MasternodeDeregistration already applied (idempotent): {} slot={}",
-                    node_address, slot_id
+                    node_address,
+                    slot_id
                 );
                 return Ok(());
             }
@@ -3980,7 +4031,11 @@ impl MasternodeRegistry {
         let key = format!("mnreg:{}", node_address);
         let _ = self.db.remove(key.as_bytes());
 
-        tracing::info!("✅ Masternode deregistered: {} slot={}", node_address, slot_id);
+        tracing::info!(
+            "✅ Masternode deregistered: {} slot={}",
+            node_address,
+            slot_id
+        );
         Ok(())
     }
 
@@ -3995,21 +4050,27 @@ impl MasternodeRegistry {
         use ed25519_dalek::Verifier;
 
         let pubkey_bytes = hex::decode(pubkey).map_err(|e| format!("invalid pubkey hex: {}", e))?;
-        let pubkey_arr: [u8; 32] = pubkey_bytes.try_into().map_err(|_| "pubkey must be 32 bytes")?;
+        let pubkey_arr: [u8; 32] = pubkey_bytes
+            .try_into()
+            .map_err(|_| "pubkey must be 32 bytes")?;
         let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_arr)
             .map_err(|e| format!("invalid Ed25519 pubkey: {}", e))?;
         let sig_bytes = hex::decode(signature).map_err(|e| format!("invalid sig hex: {}", e))?;
-        let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| "signature must be 64 bytes")?;
+        let sig_arr: [u8; 64] = sig_bytes
+            .try_into()
+            .map_err(|_| "signature must be 64 bytes")?;
         let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
         let msg = format!("MNPAYOUT:{}:{}", node_address, new_reward_address);
-        verifying_key.verify(msg.as_bytes(), &sig)
+        verifying_key
+            .verify(msg.as_bytes(), &sig)
             .map_err(|_| "MasternodePayoutUpdate signature verification failed")?;
 
         let mut nodes = self.masternodes.write().await;
         if let Some(info) = nodes.get_mut(node_address) {
             info.masternode.reward_address = new_reward_address.to_string();
             info.reward_address = new_reward_address.to_string();
-            self.store_masternode(node_address, info).map_err(|e| format!("store: {}", e))?;
+            self.store_masternode(node_address, info)
+                .map_err(|e| format!("store: {}", e))?;
         } else {
             // Node may have been deregistered between SpentFinalized and block archival
             // — treat as already-applied, not an error.
@@ -4024,15 +4085,21 @@ impl MasternodeRegistry {
     /// Assign the next available slot ID from the persistent counter in sled.
     fn assign_next_slot_id(&self) -> Result<u32, String> {
         let key = b"next_slot_id";
-        let current = self.db.get(key)
+        let current = self
+            .db
+            .get(key)
             .map_err(|e| format!("sled get: {}", e))?
             .and_then(|v| {
                 let arr: Option<[u8; 4]> = v.as_ref().try_into().ok();
                 arr.map(u32::from_le_bytes)
             })
             .unwrap_or(0u32);
-        let next = current.checked_add(1).ok_or_else(|| "slot ID overflow".to_string())?;
-        self.db.insert(key, next.to_le_bytes().as_ref()).map_err(|e| format!("sled insert: {}", e))?;
+        let next = current
+            .checked_add(1)
+            .ok_or_else(|| "slot ID overflow".to_string())?;
+        self.db
+            .insert(key, next.to_le_bytes().as_ref())
+            .map_err(|e| format!("sled insert: {}", e))?;
         Ok(current)
     }
 

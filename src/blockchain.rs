@@ -4194,9 +4194,15 @@ impl Blockchain {
         // Rate limit detailed logging to once per 60 seconds
         static LAST_DETAILED_LOG: std::sync::atomic::AtomicI64 =
             std::sync::atomic::AtomicI64::new(0);
+        // Rate limit "blocked" warnings to once per 30 seconds — this function is called in a
+        // tight VRF timer loop during network partitions, producing hundreds of identical lines.
+        static LAST_BLOCKED_WARN: std::sync::atomic::AtomicI64 =
+            std::sync::atomic::AtomicI64::new(0);
         let now_secs = chrono::Utc::now().timestamp();
         let should_log_details =
             now_secs - LAST_DETAILED_LOG.load(std::sync::atomic::Ordering::Relaxed) >= 60;
+        let should_warn_blocked =
+            now_secs - LAST_BLOCKED_WARN.load(std::sync::atomic::Ordering::Relaxed) >= 30;
 
         let peer_registry_guard = self.peer_registry.read().await;
         let peer_registry = match peer_registry_guard.as_ref() {
@@ -4370,12 +4376,15 @@ impl Blockchain {
                 );
                 return true;
             } else {
-                tracing::warn!(
-                    "⚠️ Block production blocked: only {} peers agree (need {} minimum). \
-                     Cannot produce blocks without peer confirmation.",
-                    peers_agreeing,
-                    min_agreeing
-                );
+                if should_warn_blocked {
+                    LAST_BLOCKED_WARN.store(now_secs, std::sync::atomic::Ordering::Relaxed);
+                    tracing::warn!(
+                        "⚠️ Block production blocked: only {} peers agree (need {} minimum). \
+                         Cannot produce blocks without peer confirmation.",
+                        peers_agreeing,
+                        min_agreeing
+                    );
+                }
                 return false;
             }
         }
@@ -4399,13 +4408,16 @@ impl Blockchain {
             let multiple_peers_ahead = peers_ahead.len() >= 2;
 
             if height_is_plausible && multiple_peers_ahead {
-                tracing::warn!(
-                    "⚠️ Block production blocked: {} peers ahead at height {} (we are at {}, expected ~{}). Must sync first.",
-                    peers_ahead.len(),
-                    max_peer_height,
-                    our_height,
-                    time_expected
-                );
+                if should_warn_blocked {
+                    LAST_BLOCKED_WARN.store(now_secs, std::sync::atomic::Ordering::Relaxed);
+                    tracing::warn!(
+                        "⚠️ Block production blocked: {} peers ahead at height {} (we are at {}, expected ~{}). Must sync first.",
+                        peers_ahead.len(),
+                        max_peer_height,
+                        our_height,
+                        time_expected
+                    );
+                }
                 return false;
             } else if height_is_plausible {
                 // Single peer ahead — could be legitimate OR an attack.
@@ -4463,7 +4475,10 @@ impl Blockchain {
                 tracing::debug!("   ({} peers with corrupted blocks ignored)", peers_ignored);
             }
         } else {
-            if !has_consensus {
+            if should_warn_blocked {
+                LAST_BLOCKED_WARN.store(now_secs, std::sync::atomic::Ordering::Relaxed);
+            }
+            if !has_consensus && should_warn_blocked {
                 tracing::warn!(
                     "⚠️ Block production blocked: {} weight on our chain (need {} for majority of {} total incl. self). Peer responses: {}/{}{}",
                     our_chain_weight,
@@ -4474,7 +4489,7 @@ impl Blockchain {
                     if peers_ignored > 0 { format!(", {} corrupted peers ignored", peers_ignored) } else { String::new() }
                 );
             }
-            if !enough_peers_in_sync {
+            if !enough_peers_in_sync && should_warn_blocked {
                 tracing::warn!(
                     "⚠️ Block production blocked: only {} peers in sync at height {} (need at least {} for 3-node minimum)",
                     peers_agreeing,
@@ -9195,7 +9210,23 @@ impl Blockchain {
                         let now = chrono::Utc::now().timestamp();
                         (now - expected_ts).max(0) as u64
                     };
-                    let effective_min_peers = if seconds_past_schedule
+                    // When the hash tiebreaker clearly favors the peer chain, peer count
+                    // confirmation is redundant — the block already passed full validation
+                    // (signatures, rewards, chain integrity). Requiring 3 peers would
+                    // deadlock fresh 1-block forks where only 1 peer has the winning block.
+                    let tiebreaker_favors_peer = match (peer_fork_block_hash, our_fork_block_hash) {
+                        (Some(peer_fork), Some(our_fork)) => peer_fork < our_fork,
+                        _ => peer_tip_hash < our_tip_hash,
+                    };
+
+                    let effective_min_peers = if tiebreaker_favors_peer {
+                        info!(
+                            "⚡ Hash tiebreaker favors peer at height {} — lowering on-demand fork \
+                                peer threshold from {} to 1",
+                            our_height, MIN_PEERS_FOR_ONDEMAND_FORK
+                        );
+                        1usize
+                    } else if seconds_past_schedule
                         > crate::constants::blockchain::BLOCK_TIME_SECONDS as u64 * 2
                     {
                         info!(

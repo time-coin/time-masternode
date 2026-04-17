@@ -21,24 +21,24 @@ const DB_KEY_ATTACKS: &[u8] = b"ai:attack_detector:attacks";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AttackType {
-    EclipseAttack,       // Peer isolation attempt
-    SybilAttack,         // Fake peer flooding
-    TimingAttack,        // Clock manipulation
-    DoublespendAttack,   // Multiple conflicting transactions
-    ForkBombing,         // Intentional fork creation
-    ResourceExhaustion,  // Memory/bandwidth exhaustion
-    GossipEvictionStorm, // Repeated V4 eviction attempts for the same outpoint
-    CollateralSpoofing,  // Attempting to claim another node's registered collateral
-    SyncLoopFlooding,    // Excessive GetBlocks for same range (sync loop DoS)
-    UtxoLockFlood,       // Peer sends excessive UTXOStateUpdate messages for one TX (DoS)
-    SynchronizedCycling,    // Coordinated synchronized disconnect/reconnect storm from a subnet
-    TlsFlood,               // High-rate TLS handshake flood from distributed IPs
-    PingFlood,              // Sustained ping-rate-limit excess from one peer — tokio RPC starvation
-    MessageFlood,           // Raw pre-channel message flood (>500 msgs/s before deserialization)
+    EclipseAttack,            // Peer isolation attempt
+    SybilAttack,              // Fake peer flooding
+    TimingAttack,             // Clock manipulation
+    DoublespendAttack,        // Multiple conflicting transactions
+    ForkBombing,              // Intentional fork creation
+    ResourceExhaustion,       // Memory/bandwidth exhaustion
+    GossipEvictionStorm,      // Repeated V4 eviction attempts for the same outpoint
+    CollateralSpoofing,       // Attempting to claim another node's registered collateral
+    SyncLoopFlooding,         // Excessive GetBlocks for same range (sync loop DoS)
+    UtxoLockFlood,            // Peer sends excessive UTXOStateUpdate messages for one TX (DoS)
+    SynchronizedCycling,      // Coordinated synchronized disconnect/reconnect storm from a subnet
+    TlsFlood,                 // High-rate TLS handshake flood from distributed IPs
+    PingFlood,    // Sustained ping-rate-limit excess from one peer — tokio RPC starvation
+    MessageFlood, // Raw pre-channel message flood (>500 msgs/s before deserialization)
     InvalidVoteSignatureSpam, // Forged Ed25519 vote signatures at ≥5/30s (AV27)
-    UnregisteredVoterSpam,  // Votes from unregistered IDs at ≥10/60s (AV28)
-    FinalityInjectionSpam,  // TransactionFinalized for unknown TXs to force 49-validator broadcast amplification (AV38)
-    NullTransactionFlood,   // Transactions with 0 inputs + 0 outputs to exhaust mempool at zero cost (AV39)
+    UnregisteredVoterSpam, // Votes from unregistered IDs at ≥10/60s (AV28)
+    FinalityInjectionSpam, // TransactionFinalized for unknown TXs to force 49-validator broadcast amplification (AV38)
+    NullTransactionFlood, // Transactions with 0 inputs + 0 outputs to exhaust mempool at zero cost (AV39)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,9 +206,13 @@ impl AttackDetector {
                 // stronger mitigation is applied immediately.
                 let is_escalation = matches!(
                     (&existing.recommended_action, &attack.recommended_action),
-                    (MitigationAction::RateLimitPeer(_), MitigationAction::BlockPeer(_))
-                        | (MitigationAction::Monitor, MitigationAction::RateLimitPeer(_))
-                        | (MitigationAction::Monitor, MitigationAction::BlockPeer(_))
+                    (
+                        MitigationAction::RateLimitPeer(_),
+                        MitigationAction::BlockPeer(_)
+                    ) | (
+                        MitigationAction::Monitor,
+                        MitigationAction::RateLimitPeer(_)
+                    ) | (MitigationAction::Monitor, MitigationAction::BlockPeer(_))
                 );
                 existing.last_seen = now;
                 if is_escalation {
@@ -227,6 +231,22 @@ impl AttackDetector {
                     self.ban_notify.notify_one();
                     self.persist_attacks();
                     return true;
+                }
+                // Re-arm an already-actioned BlockPeer attack after a cooldown so persistent
+                // attackers accumulate additional violations and eventually reach the ban
+                // threshold. Without this, the dedup window prevents re-enforcement and a
+                // sustained flooder never gets more than 2 violations (< 3 needed for a ban).
+                const REARM_COOLDOWN_SECS: u64 = 60;
+                if matches!(&attack.recommended_action, MitigationAction::BlockPeer(_)) {
+                    if let Some(applied_at) = existing.mitigation_applied_at {
+                        if now.saturating_sub(applied_at) >= REARM_COOLDOWN_SECS {
+                            existing.mitigation_applied_at = None;
+                            drop(attacks);
+                            self.ban_notify.notify_one();
+                            self.persist_attacks();
+                            return true;
+                        }
+                    }
                 }
                 drop(attacks);
                 self.persist_attacks();
@@ -955,7 +975,9 @@ impl AttackDetector {
         if should_block {
             tracing::warn!(
                 "🚫 NullTransactionFlood detected from {} — ≥{} null TXs within {}s (AV39)",
-                addr, NULL_TX_THRESHOLD, NULL_TX_WINDOW_SECS
+                addr,
+                NULL_TX_THRESHOLD,
+                NULL_TX_WINDOW_SECS
             );
             self.maybe_add_attack(AttackPattern {
                 attack_type: AttackType::NullTransactionFlood,
