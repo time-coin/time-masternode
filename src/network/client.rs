@@ -475,10 +475,7 @@ impl NetworkClient {
                         // disconnect signal (priority_wake), bypass AI cooldown for
                         // Bronze/Silver/Gold nodes so they reconnect in milliseconds
                         // rather than being held back by backoff from a prior blip.
-                        let is_paid_tier = !matches!(
-                            mn_info.masternode.tier,
-                            MasternodeTier::Free
-                        );
+                        let is_paid_tier = !matches!(mn_info.masternode.tier, MasternodeTier::Free);
                         if !(priority_wake && is_paid_tier) {
                             let advice = res.reconnection_ai.get_reconnection_advice(mn_ip, true);
                             if !advice.should_attempt {
@@ -683,7 +680,7 @@ impl ConnectionResources {
                 .reconnection_ai
                 .get_reconnection_advice(&ip, is_masternode);
             if !advice.should_attempt {
-                tracing::info!(
+                tracing::debug!(
                     "🧠 [AI] Skipping connection to {}: {}",
                     ip,
                     advice.reasoning
