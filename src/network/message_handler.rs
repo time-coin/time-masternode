@@ -5860,16 +5860,33 @@ impl MessageHandler {
                     // Only engage fork resolution with genesis-confirmed peers.
                     // Old-code nodes that do not respond to GetBlockHash(0) are never
                     // genesis-confirmed, so they cannot trigger endless reorg loops.
+                    // Exception: whitelisted (operator-trusted) peers bypass the gate to
+                    // avoid a race where fork detection fires before the background
+                    // genesis-verification task completes (~10s window).
                     if !context
                         .peer_registry
                         .is_genesis_confirmed(&self.peer_ip)
                         .await
                     {
-                        warn!(
-                            "🚫 [{}] Skipping fork resolution with {} — peer not genesis-confirmed (likely old code)",
-                            self.direction, self.peer_ip
-                        );
-                        break;
+                        let is_whitelisted =
+                            context.peer_registry.is_whitelisted(&self.peer_ip).await;
+                        if is_whitelisted {
+                            // Trust operator's whitelist; mark confirmed so future checks pass.
+                            context
+                                .peer_registry
+                                .mark_genesis_confirmed(&self.peer_ip)
+                                .await;
+                            info!(
+                                "🔓 [{}] Whitelisted peer {} not yet genesis-confirmed — bypassing gate and marking confirmed",
+                                self.direction, self.peer_ip
+                            );
+                        } else {
+                            warn!(
+                                "🚫 [{}] Skipping fork resolution with {} — peer not genesis-confirmed (likely old code)",
+                                self.direction, self.peer_ip
+                            );
+                            break;
+                        }
                     }
 
                     // Trigger immediate fork resolution check

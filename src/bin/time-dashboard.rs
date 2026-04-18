@@ -206,6 +206,7 @@ struct TxDetail {
     #[serde(default)]
     txid: String,
     #[serde(default)]
+    #[allow(dead_code)]
     status: String,
     #[serde(default)]
     amount: f64,
@@ -227,6 +228,7 @@ struct TxDetail {
 struct MempoolTx {
     txid: String,
     status: String,
+    #[allow(dead_code)]
     fee: u64,
     #[serde(default)]
     fee_time: f64,
@@ -1459,7 +1461,7 @@ fn render_mempool_detail(f: &mut Frame, area: Rect, tx: &MempoolTx) {
         .split(area);
 
     // Header summary
-    let mut header_lines = vec![
+    let header_lines = vec![
         Line::from(vec![
             Span::styled("TxID:   ", Style::default().fg(Color::Yellow)),
             Span::styled(&tx.txid, Style::default().fg(Color::White)),
