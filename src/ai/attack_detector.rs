@@ -39,6 +39,7 @@ pub enum AttackType {
     UnregisteredVoterSpam, // Votes from unregistered IDs at ≥10/60s (AV28)
     FinalityInjectionSpam, // TransactionFinalized for unknown TXs to force 49-validator broadcast amplification (AV38)
     NullTransactionFlood, // Transactions with 0 inputs + 0 outputs to exhaust mempool at zero cost (AV39)
+    ZeroCollateralPollution, // Register zero-value UTXOs as Free-tier collateral under victim IPs to poison registry (AV40)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

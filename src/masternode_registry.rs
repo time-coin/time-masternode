@@ -644,6 +644,23 @@ impl MasternodeRegistry {
             return Err(RegistryError::InvalidCollateral);
         }
 
+        // AV40: Reject Free-tier registrations that supply a collateral outpoint.
+        // Free tier requires zero collateral — a supplied outpoint is either a
+        // mistake or an attempt to associate a zero-value UTXO with a paid node's
+        // IP, poisoning the registry and evading the collateral audit (which skips
+        // Free tier).  Strip or reject the outpoint to prevent pollution.
+        if masternode.tier == crate::types::MasternodeTier::Free
+            && masternode.collateral_outpoint.is_some()
+        {
+            tracing::warn!(
+                "🛡️ [AV40] Rejected Free-tier registration from {} with collateral outpoint {:?} \
+                 — Free tier must have no outpoint",
+                masternode.address,
+                masternode.collateral_outpoint,
+            );
+            return Err(RegistryError::InvalidCollateral);
+        }
+
         // AV3: Per-IP reconnect cooldown for Free-tier nodes.
         // Attackers cycle 60+ Free-tier IPs through rapid disconnect/reconnect to game
         // the registry and inflate quorum denominators.  After a Free-tier node is removed
@@ -1267,6 +1284,28 @@ impl MasternodeRegistry {
                     }
                     new_outpoint
                 };
+
+                // AV40: Block tier downgrade via gossip.
+                // A paid-tier node cannot be demoted to Free tier by a remote peer.
+                // Legitimate tier reductions happen through deregistration (collateral
+                // spent → cleanup_invalid_collaterals removes the entry) then
+                // re-registration at the lower tier.  Gossip-based downgrades are only
+                // used to undermine a node's voting weight or evade collateral audits.
+                let is_local_update = local_ip.as_deref().map(|l| {
+                    let incoming_ip = masternode.address.split(':').next().unwrap_or(&masternode.address);
+                    l == incoming_ip
+                }).unwrap_or(false);
+                if !is_local_update
+                    && existing.masternode.tier != crate::types::MasternodeTier::Free
+                    && masternode.tier == crate::types::MasternodeTier::Free
+                {
+                    tracing::warn!(
+                        "🛡️ [AV40] Gossip tier downgrade blocked for {}: {:?} → Free",
+                        masternode.address,
+                        existing.masternode.tier,
+                    );
+                    return Err(RegistryError::InvalidCollateral);
+                }
 
                 // Update tier and collateral info on re-registration
                 existing.masternode.tier = masternode.tier;

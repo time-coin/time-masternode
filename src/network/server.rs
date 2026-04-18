@@ -941,6 +941,55 @@ async fn audit_collateral_registrations(
         }
     }
 
+    // ── Pass 3: zero-value / Free-tier-with-outpoint pollution (AV40) ─────────
+    // An attacker can create 0-value UTXOs and register them as Free-tier
+    // "collateral" under any IP, associating bogus outpoints with legitimate
+    // nodes.  The registration guard (AV40 in register_internal) now blocks new
+    // entries, but existing ones need to be swept out.
+    //
+    // Also catches any non-Free node whose locked collateral UTXO has value 0 or
+    // below the Bronze minimum — the on-chain value is the ultimate authority.
+    const BRONZE_MIN: u64 = 1_000_000_000_000; // 1,000 TIME in satoshis
+    for info in &all_nodes {
+        let outpoint = match &info.masternode.collateral_outpoint {
+            Some(op) => op.clone(),
+            None => continue,
+        };
+        let ip = info.masternode.address.clone();
+        if evicted.contains(&ip) || is_exempt(&ip) {
+            continue;
+        }
+        let utxo = match utxo_manager.get_utxo(&outpoint).await {
+            Ok(u) => u,
+            Err(_) => continue, // Not yet in our UTXO set — skip
+        };
+        let utxo_value = utxo.value;
+        let is_zero_value_collateral = info.masternode.tier == crate::types::MasternodeTier::Free
+            || utxo_value < BRONZE_MIN;
+        if is_zero_value_collateral {
+            tracing::warn!(
+                "🚨 [COLLATERAL AUDIT] [AV40] Zero/sub-minimum collateral detected: \
+                 {} has outpoint {} with value {} satoshis (tier: {:?}) — evicting",
+                ip,
+                outpoint,
+                utxo_value,
+                info.masternode.tier,
+            );
+            let _ = registry.unregister(&ip).await;
+            let _ = utxo_manager.unlock_collateral(&outpoint);
+            let bare = ip.split(':').next().unwrap_or(&ip);
+            if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
+                let mut bl = blacklist.write().await;
+                bl.add_temp_ban(
+                    ban_ip,
+                    std::time::Duration::from_secs(7200),
+                    "AV40: zero/sub-minimum collateral UTXO (audit sweep)",
+                );
+            }
+            evicted.push(ip);
+        }
+    }
+
     if !evicted.is_empty() {
         tracing::warn!(
             "🔍 [COLLATERAL AUDIT] Sweep complete — evicted {} squatter(s): {:?}",
@@ -1726,7 +1775,7 @@ async fn handle_peer(
                                             if err_str.contains("already in pool") || err_str.contains("Already") {
                                                 tracing::debug!("🔁 Transaction {} already in pool (from {})", hex::encode(txid), peer.addr);
                                             } else if err_str.contains("no inputs") || err_str.contains("no outputs") {
-                                                // AV39: null transaction (0 inputs / 0 outputs).
+                                                // AV40: null transaction (0 inputs / 0 outputs).
                                                 // Do NOT record a blacklist violation here — the peer may be
                                                 // an innocent relay that forwarded the TX before our structural
                                                 // check could stop it.  The AI sliding-window detector
@@ -1804,7 +1853,7 @@ async fn handle_peer(
                                     tracing::info!("✅ Transaction {} finalized (from {})",
                                         hex::encode(*txid), peer.addr);
 
-                                    // AV38+AV39 combined guard: drop null TXs that arrive as
+                                    // AV38+AV40 combined guard: drop null TXs that arrive as
                                     // TransactionFinalized.  The attacker feeds honest relay nodes
                                     // with null TXs (0 inputs, 0 outputs, no special_data), which
                                     // those nodes then re-broadcast as TransactionFinalized.  By
@@ -1814,7 +1863,7 @@ async fn handle_peer(
                                     // eventually penalised.
                                     if tx.inputs.is_empty() && tx.outputs.is_empty() && tx.special_data.is_none() {
                                         tracing::debug!(
-                                            "🗑️ Null TX {} via TransactionFinalized from {} — dropped (AV38+AV39)",
+                                            "🗑️ Null TX {} via TransactionFinalized from {} — dropped (AV38+AV40)",
                                             hex::encode(*txid), peer.addr
                                         );
                                         if let Some(ref ai) = ai_system {
