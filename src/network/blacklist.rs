@@ -71,11 +71,12 @@ impl IPBlacklist {
                     .and_then(|s| s.parse::<IpAddr>().ok())
                     .ok_or(())
                 {
+                    if self.is_whitelisted(ip) {
+                        let _ = tree.remove(&k);
+                        tracing::info!("🔓 Cleared persisted permanent ban for whitelisted IP {} on startup", ip);
+                        continue;
+                    }
                     let reason = String::from_utf8_lossy(&v).into_owned();
-                    // Operator-issued permanent bans override the whitelist.
-                    // is_blacklisted() already checks permanent bans before whitelist,
-                    // so loading unconditionally here is safe and correct.
-                    self.whitelist.remove(&ip);
                     self.permanent_blacklist.insert(ip, reason);
                 }
             }
