@@ -9123,7 +9123,36 @@ impl Blockchain {
             .unwrap_or(fork_height);
         let search_floor = our_height.saturating_sub(MAX_REORG_DEPTH);
 
-        if lowest_peer_block > search_floor && search_floor > 0 {
+        // Short-circuit: if the lowest accumulated peer block's prev_hash already matches
+        // our chain at that level, the common ancestor is right above it. Skip requesting
+        // more blocks and fall through to find_fork_common_ancestor. Without this, fork
+        // resolution loops forever: it requests "older" blocks that are identical on both
+        // chains, those duplicates never re-trigger handle_fork(), the stall detector fires
+        // after 60s, and the whole process restarts from scratch.
+        let lowest_connects_to_our_chain = {
+            let lb = all_blocks.iter().min_by_key(|b| b.header.height);
+            if let Some(lb) = lb {
+                let ancestor_height = lb.header.height.saturating_sub(1);
+                match self.get_block_by_height(ancestor_height).await {
+                    Ok(our_block) => {
+                        let connects = our_block.hash() == lb.header.previous_hash;
+                        if connects {
+                            info!(
+                                "⚡ Fork resolution short-circuit: lowest peer block {} connects \
+                                 to our chain at {} — skipping deeper block requests",
+                                lb.header.height, ancestor_height
+                            );
+                        }
+                        connects
+                    }
+                    Err(_) => false,
+                }
+            } else {
+                false
+            }
+        };
+
+        if lowest_peer_block > search_floor && search_floor > 0 && !lowest_connects_to_our_chain {
             // Detect accumulation stall: if we already had accumulated blocks and
             // the lowest block hasn't changed, we're in an infinite loop.
             let (stalled, original_started_at) = {
