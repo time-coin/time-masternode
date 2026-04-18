@@ -2286,6 +2286,35 @@ impl Blockchain {
                 return Err("No peers with blocks above our height".to_string());
             }
 
+            // Prefer whitelisted (operator-trusted) peers for block download.
+            // When significantly behind, restrict to whitelisted peers exclusively — this
+            // prevents a node that connected to fork peers from adopting the wrong chain.
+            {
+                let mut wl: Vec<String> = Vec::new();
+                let mut regular: Vec<String> = Vec::new();
+                for peer in &sync_peers {
+                    if peer_registry.is_whitelisted(peer).await {
+                        wl.push(peer.clone());
+                    } else {
+                        regular.push(peer.clone());
+                    }
+                }
+                let behind = target.saturating_sub(current);
+                if !wl.is_empty() && behind > 10 {
+                    // Significantly behind and trusted peers available — use ONLY them.
+                    // Prevents fork-peer blocks from polluting the sync pool.
+                    tracing::info!(
+                        "🔒 Restricting sync to {} whitelisted peer(s) only ({} blocks behind) — excluding {} untrusted peer(s)",
+                        wl.len(), behind, regular.len()
+                    );
+                    sync_peers = wl;
+                } else {
+                    // Within 10 blocks or no whitelisted peers: allow all, trusted first.
+                    wl.extend(regular);
+                    sync_peers = wl;
+                }
+            }
+
             tracing::info!(
                 "🚀 Parallel sync: using {} peers {:?}",
                 sync_peers.len(),
