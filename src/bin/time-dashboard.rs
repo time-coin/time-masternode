@@ -183,8 +183,7 @@ struct MempoolInfo {
     finalized: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Debug, Clone, Deserialize, Default)]
 struct TxVin {
     #[serde(default)]
     txid: String,
@@ -1451,7 +1450,11 @@ fn render_mempool_detail(f: &mut Frame, area: Rect, tx: &MempoolTx) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(10), Constraint::Min(4), Constraint::Min(4)])
+        .constraints([
+            Constraint::Length(10),
+            Constraint::Min(4),
+            Constraint::Min(4),
+        ])
         .split(area);
 
     // Header summary
@@ -1462,67 +1465,151 @@ fn render_mempool_detail(f: &mut Frame, area: Rect, tx: &MempoolTx) {
         ]),
         Line::from(vec![
             Span::styled("Status: ", Style::default().fg(Color::Yellow)),
-            Span::styled(tx.status.to_uppercase(), Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                tx.status.to_uppercase(),
+                Style::default()
+                    .fg(status_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("   "),
             Span::styled("Size: ", Style::default().fg(Color::Yellow)),
-            Span::styled(format!("{} bytes", tx.size), Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{} bytes", tx.size),
+                Style::default().fg(Color::White),
+            ),
             Span::raw("   "),
             Span::styled("Age: ", Style::default().fg(Color::Yellow)),
             Span::styled(format_age(tx.age_secs), Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
             Span::styled("Amount: ", Style::default().fg(Color::Yellow)),
-            Span::styled(format!("{:.8} TIME", tx.amount), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{:.8} TIME", tx.amount),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::raw("   "),
             Span::styled("Fee: ", Style::default().fg(Color::Yellow)),
-            Span::styled(format!("{:.8} TIME", tx.fee_time), Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{:.8} TIME", tx.fee_time),
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(""),
-        Line::from(Span::styled("Esc / Enter to go back", Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled(
+            "Esc / Enter to go back",
+            Style::default().fg(Color::DarkGray),
+        )),
     ];
     let header = Paragraph::new(header_lines)
-        .block(Block::default().borders(Borders::ALL).title("Transaction Detail"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Transaction Detail"),
+        )
         .style(Style::default().fg(Color::White));
     f.render_widget(header, chunks[0]);
 
     // Inputs
-    let input_header = Row::new(vec![Cell::from(" # "), Cell::from("Prev TxID"), Cell::from("Vout")])
-        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let input_header = Row::new(vec![
+        Cell::from(" # "),
+        Cell::from("Prev TxID"),
+        Cell::from("Vout"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
     let input_rows: Vec<Row> = if tx.vin.is_empty() {
-        vec![Row::new(vec![Cell::from(""), Cell::from("(coinbase)"), Cell::from("")])]
+        vec![Row::new(vec![
+            Cell::from(""),
+            Cell::from("(coinbase)"),
+            Cell::from(""),
+        ])]
     } else {
-        tx.vin.iter().enumerate().map(|(i, inp)| {
-            let short = if inp.txid.len() > 20 { format!("{}…", &inp.txid[..20]) } else { inp.txid.clone() };
-            Row::new(vec![
-                Cell::from(format!("{:>3}", i + 1)),
-                Cell::from(short).style(Style::default().fg(Color::Gray)),
-                Cell::from(format!("{}", inp.vout)).style(Style::default().fg(Color::White)),
-            ])
-        }).collect()
+        tx.vin
+            .iter()
+            .enumerate()
+            .map(|(i, inp)| {
+                let short = if inp.txid.len() > 20 {
+                    format!("{}…", &inp.txid[..20])
+                } else {
+                    inp.txid.clone()
+                };
+                Row::new(vec![
+                    Cell::from(format!("{:>3}", i + 1)),
+                    Cell::from(short).style(Style::default().fg(Color::Gray)),
+                    Cell::from(format!("{}", inp.vout)).style(Style::default().fg(Color::White)),
+                ])
+            })
+            .collect()
     };
-    let input_table = Table::new(input_rows, [Constraint::Length(4), Constraint::Min(22), Constraint::Length(6)])
-        .header(input_header)
-        .block(Block::default().borders(Borders::ALL).title(format!("Inputs ({})", tx.inputs)));
+    let input_table = Table::new(
+        input_rows,
+        [
+            Constraint::Length(4),
+            Constraint::Min(22),
+            Constraint::Length(6),
+        ],
+    )
+    .header(input_header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!("Inputs ({})", tx.inputs)),
+    );
     f.render_widget(input_table, chunks[1]);
 
     // Outputs
-    let output_header = Row::new(vec![Cell::from(" # "), Cell::from("Address"), Cell::from("Amount (TIME)")])
-        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let output_header = Row::new(vec![
+        Cell::from(" # "),
+        Cell::from("Address"),
+        Cell::from("Amount (TIME)"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
     let output_rows: Vec<Row> = if tx.vout.is_empty() {
-        vec![Row::new(vec![Cell::from(""), Cell::from("(no outputs)"), Cell::from("")])]
+        vec![Row::new(vec![
+            Cell::from(""),
+            Cell::from("(no outputs)"),
+            Cell::from(""),
+        ])]
     } else {
-        tx.vout.iter().enumerate().map(|(i, out)| {
-            let short_addr = if out.address.len() > 28 { format!("{}…", &out.address[..28]) } else { out.address.clone() };
-            Row::new(vec![
-                Cell::from(format!("{:>3}", i)),
-                Cell::from(short_addr).style(Style::default().fg(Color::Cyan)),
-                Cell::from(format!("{:.8}", out.value)).style(Style::default().fg(Color::Green)),
-            ])
-        }).collect()
+        tx.vout
+            .iter()
+            .enumerate()
+            .map(|(i, out)| {
+                let short_addr = if out.address.len() > 28 {
+                    format!("{}…", &out.address[..28])
+                } else {
+                    out.address.clone()
+                };
+                Row::new(vec![
+                    Cell::from(format!("{:>3}", i)),
+                    Cell::from(short_addr).style(Style::default().fg(Color::Cyan)),
+                    Cell::from(format!("{:.8}", out.value))
+                        .style(Style::default().fg(Color::Green)),
+                ])
+            })
+            .collect()
     };
-    let output_table = Table::new(output_rows, [Constraint::Length(4), Constraint::Min(30), Constraint::Length(16)])
-        .header(output_header)
-        .block(Block::default().borders(Borders::ALL).title(format!("Outputs ({})", tx.outputs)));
+    let output_table = Table::new(
+        output_rows,
+        [
+            Constraint::Length(4),
+            Constraint::Min(30),
+            Constraint::Length(16),
+        ],
+    )
+    .header(output_header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!("Outputs ({})", tx.outputs)),
+    );
     f.render_widget(output_table, chunks[2]);
 }
 
@@ -1626,7 +1713,13 @@ fn render_blocks(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(table, area);
 }
 
-fn render_block_detail(f: &mut Frame, area: Rect, blk: &BlockDetail, tx_scroll: usize, tx_cursor: usize) {
+fn render_block_detail(
+    f: &mut Frame,
+    area: Rect,
+    blk: &BlockDetail,
+    tx_scroll: usize,
+    tx_cursor: usize,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(12), Constraint::Min(6)])
@@ -1735,7 +1828,11 @@ fn render_block_detail(f: &mut Frame, area: Rect, blk: &BlockDetail, tx_scroll: 
                 Cell::from(txid.as_str()),
             ]);
             if idx == tx_cursor {
-                row.style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+                row.style(
+                    Style::default()
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
                 row
             }
@@ -1755,7 +1852,11 @@ fn render_block_detail(f: &mut Frame, area: Rect, blk: &BlockDetail, tx_scroll: 
 fn render_tx_detail(f: &mut Frame, area: Rect, tx: &TxDetail) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9), Constraint::Min(4), Constraint::Min(4)])
+        .constraints([
+            Constraint::Length(9),
+            Constraint::Min(4),
+            Constraint::Min(4),
+        ])
         .split(area);
 
     let time_str = if tx.time > 0 {
@@ -1777,64 +1878,145 @@ fn render_tx_detail(f: &mut Frame, area: Rect, tx: &TxDetail) {
         ]),
         Line::from(vec![
             Span::styled("Amount:  ", Style::default().fg(Color::Yellow)),
-            Span::styled(format!("{:.8} TIME", tx.amount), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{:.8} TIME", tx.amount),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::raw("   "),
             Span::styled("Fee: ", Style::default().fg(Color::Yellow)),
-            Span::styled(format!("{:.8} TIME", tx.fee), Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{:.8} TIME", tx.fee),
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Confirms:", Style::default().fg(Color::Yellow)),
-            Span::styled(format!(" {}", tx.confirmations), Style::default().fg(Color::Green)),
+            Span::styled(
+                format!(" {}", tx.confirmations),
+                Style::default().fg(Color::Green),
+            ),
             Span::raw("   "),
             Span::styled("Size: ", Style::default().fg(Color::Yellow)),
-            Span::styled(format!("{} bytes", tx.size), Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{} bytes", tx.size),
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(""),
-        Line::from(Span::styled("Esc/q: Back to block", Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled(
+            "Esc/q: Back to block",
+            Style::default().fg(Color::DarkGray),
+        )),
     ];
     let header = Paragraph::new(header_lines)
-        .block(Block::default().borders(Borders::ALL).title("Transaction Detail"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Transaction Detail"),
+        )
         .style(Style::default().fg(Color::White));
     f.render_widget(header, chunks[0]);
 
     // Inputs
-    let input_header = Row::new(vec![Cell::from(" # "), Cell::from("Prev TxID"), Cell::from("Vout")])
-        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let input_header = Row::new(vec![
+        Cell::from(" # "),
+        Cell::from("Prev TxID"),
+        Cell::from("Vout"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
     let input_rows: Vec<Row> = if tx.vin.is_empty() {
-        vec![Row::new(vec![Cell::from(""), Cell::from("(coinbase)"), Cell::from("")])]
+        vec![Row::new(vec![
+            Cell::from(""),
+            Cell::from("(coinbase)"),
+            Cell::from(""),
+        ])]
     } else {
-        tx.vin.iter().enumerate().map(|(i, inp)| {
-            let short = if inp.txid.len() > 24 { format!("{}…", &inp.txid[..24]) } else { inp.txid.clone() };
-            Row::new(vec![
-                Cell::from(format!("{:>3}", i + 1)),
-                Cell::from(short).style(Style::default().fg(Color::Gray)),
-                Cell::from(format!("{}", inp.vout)).style(Style::default().fg(Color::White)),
-            ])
-        }).collect()
+        tx.vin
+            .iter()
+            .enumerate()
+            .map(|(i, inp)| {
+                let short = if inp.txid.len() > 24 {
+                    format!("{}…", &inp.txid[..24])
+                } else {
+                    inp.txid.clone()
+                };
+                Row::new(vec![
+                    Cell::from(format!("{:>3}", i + 1)),
+                    Cell::from(short).style(Style::default().fg(Color::Gray)),
+                    Cell::from(format!("{}", inp.vout)).style(Style::default().fg(Color::White)),
+                ])
+            })
+            .collect()
     };
-    let input_table = Table::new(input_rows, [Constraint::Length(4), Constraint::Min(26), Constraint::Length(6)])
-        .header(input_header)
-        .block(Block::default().borders(Borders::ALL).title(format!("Inputs ({})", tx.vin.len())));
+    let input_table = Table::new(
+        input_rows,
+        [
+            Constraint::Length(4),
+            Constraint::Min(26),
+            Constraint::Length(6),
+        ],
+    )
+    .header(input_header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!("Inputs ({})", tx.vin.len())),
+    );
     f.render_widget(input_table, chunks[1]);
 
     // Outputs
-    let output_header = Row::new(vec![Cell::from(" # "), Cell::from("Address"), Cell::from("Amount (TIME)")])
-        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let output_header = Row::new(vec![
+        Cell::from(" # "),
+        Cell::from("Address"),
+        Cell::from("Amount (TIME)"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
     let output_rows: Vec<Row> = if tx.vout.is_empty() {
-        vec![Row::new(vec![Cell::from(""), Cell::from("(no outputs)"), Cell::from("")])]
+        vec![Row::new(vec![
+            Cell::from(""),
+            Cell::from("(no outputs)"),
+            Cell::from(""),
+        ])]
     } else {
-        tx.vout.iter().map(|out| {
-            let short_addr = if out.address.len() > 28 { format!("{}…", &out.address[..28]) } else { out.address.clone() };
-            Row::new(vec![
-                Cell::from(format!("{:>3}", out.n)),
-                Cell::from(short_addr).style(Style::default().fg(Color::Cyan)),
-                Cell::from(format!("{:.8}", out.value)).style(Style::default().fg(Color::Green)),
-            ])
-        }).collect()
+        tx.vout
+            .iter()
+            .map(|out| {
+                let short_addr = if out.address.len() > 28 {
+                    format!("{}…", &out.address[..28])
+                } else {
+                    out.address.clone()
+                };
+                Row::new(vec![
+                    Cell::from(format!("{:>3}", out.n)),
+                    Cell::from(short_addr).style(Style::default().fg(Color::Cyan)),
+                    Cell::from(format!("{:.8}", out.value))
+                        .style(Style::default().fg(Color::Green)),
+                ])
+            })
+            .collect()
     };
-    let output_table = Table::new(output_rows, [Constraint::Length(4), Constraint::Min(30), Constraint::Length(16)])
-        .header(output_header)
-        .block(Block::default().borders(Borders::ALL).title(format!("Outputs ({})", tx.vout.len())));
+    let output_table = Table::new(
+        output_rows,
+        [
+            Constraint::Length(4),
+            Constraint::Min(30),
+            Constraint::Length(16),
+        ],
+    )
+    .header(output_header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!("Outputs ({})", tx.vout.len())),
+    );
     f.render_widget(output_table, chunks[2]);
 }
 
@@ -2269,7 +2451,10 @@ async fn run_app<B: ratatui::backend::Backend>(
                             last_update = Instant::now();
                         }
                         KeyCode::Tab | KeyCode::Right => {
-                            if app.mempool_detail.is_none() && app.block_detail.is_none() && app.block_tx_detail.is_none() {
+                            if app.mempool_detail.is_none()
+                                && app.block_detail.is_none()
+                                && app.block_tx_detail.is_none()
+                            {
                                 app.next_tab();
                                 app.mempool_scroll = 0;
                                 app.mempool_cursor = 0;
@@ -2277,7 +2462,10 @@ async fn run_app<B: ratatui::backend::Backend>(
                             }
                         }
                         KeyCode::Left => {
-                            if app.mempool_detail.is_none() && app.block_detail.is_none() && app.block_tx_detail.is_none() {
+                            if app.mempool_detail.is_none()
+                                && app.block_detail.is_none()
+                                && app.block_tx_detail.is_none()
+                            {
                                 app.previous_tab();
                                 app.mempool_scroll = 0;
                                 app.mempool_cursor = 0;
@@ -2324,7 +2512,8 @@ async fn run_app<B: ratatui::backend::Backend>(
                                     // We don't have exact height here, so use a reasonable page size
                                     let page = 20usize;
                                     if app.mempool_cursor >= app.mempool_scroll + page {
-                                        app.mempool_scroll = app.mempool_cursor.saturating_sub(page - 1);
+                                        app.mempool_scroll =
+                                            app.mempool_cursor.saturating_sub(page - 1);
                                     }
                                 }
                             } else if app.current_tab == 1 {
@@ -2358,7 +2547,8 @@ async fn run_app<B: ratatui::backend::Backend>(
                                         app.block_tx_cursor += 1;
                                         let page = 20usize;
                                         if app.block_tx_cursor >= app.block_tx_scroll + page {
-                                            app.block_tx_scroll = app.block_tx_cursor.saturating_sub(page - 1);
+                                            app.block_tx_scroll =
+                                                app.block_tx_cursor.saturating_sub(page - 1);
                                         }
                                     }
                                 } else {
@@ -2387,12 +2577,20 @@ async fn run_app<B: ratatui::backend::Backend>(
                                     app.block_tx_detail = None;
                                 } else if let Some(blk_idx) = app.block_detail {
                                     // Drill into TX detail
-                                    if let Some(txid) = app.data.recent_blocks
+                                    if let Some(txid) = app
+                                        .data
+                                        .recent_blocks
                                         .get(blk_idx)
                                         .and_then(|b| b.tx.get(app.block_tx_cursor))
                                         .cloned()
                                     {
-                                        match app.rpc_call::<TxDetail>("gettransaction", vec![serde_json::json!(txid)]).await {
+                                        match app
+                                            .rpc_call::<TxDetail>(
+                                                "gettransaction",
+                                                vec![serde_json::json!(txid)],
+                                            )
+                                            .await
+                                        {
                                             Ok(mut detail) => {
                                                 detail.txid = txid;
                                                 app.block_tx_detail = Some(detail);

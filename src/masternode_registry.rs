@@ -1291,10 +1291,17 @@ impl MasternodeRegistry {
                 // spent → cleanup_invalid_collaterals removes the entry) then
                 // re-registration at the lower tier.  Gossip-based downgrades are only
                 // used to undermine a node's voting weight or evade collateral audits.
-                let is_local_update = local_ip.as_deref().map(|l| {
-                    let incoming_ip = masternode.address.split(':').next().unwrap_or(&masternode.address);
-                    l == incoming_ip
-                }).unwrap_or(false);
+                let is_local_update = local_ip
+                    .as_deref()
+                    .map(|l| {
+                        let incoming_ip = masternode
+                            .address
+                            .split(':')
+                            .next()
+                            .unwrap_or(&masternode.address);
+                        l == incoming_ip
+                    })
+                    .unwrap_or(false);
                 if !is_local_update
                     && existing.masternode.tier != crate::types::MasternodeTier::Free
                     && masternode.tier == crate::types::MasternodeTier::Free

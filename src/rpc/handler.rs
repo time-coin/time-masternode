@@ -3025,15 +3025,28 @@ impl RpcHandler {
                     .map(|o| String::from_utf8_lossy(&o.script_pubkey).to_string())
                     .unwrap_or_default();
                 let size = bincode::serialize(tx).map(|b| b.len()).unwrap_or(0);
-                let vin: Vec<Value> = tx.inputs.iter().map(|inp| json!({
-                    "txid": hex::encode(inp.previous_output.txid),
-                    "vout": inp.previous_output.vout,
-                })).collect();
-                let vout: Vec<Value> = tx.outputs.iter().enumerate().map(|(n, out)| json!({
-                    "value": out.value as f64 / 100_000_000.0,
-                    "n": n,
-                    "address": String::from_utf8_lossy(&out.script_pubkey).to_string(),
-                })).collect();
+                let vin: Vec<Value> = tx
+                    .inputs
+                    .iter()
+                    .map(|inp| {
+                        json!({
+                            "txid": hex::encode(inp.previous_output.txid),
+                            "vout": inp.previous_output.vout,
+                        })
+                    })
+                    .collect();
+                let vout: Vec<Value> = tx
+                    .outputs
+                    .iter()
+                    .enumerate()
+                    .map(|(n, out)| {
+                        json!({
+                            "value": out.value as f64 / 100_000_000.0,
+                            "n": n,
+                            "address": String::from_utf8_lossy(&out.script_pubkey).to_string(),
+                        })
+                    })
+                    .collect();
                 json!({
                     "txid": hex::encode(tx.txid()),
                     "status": status,

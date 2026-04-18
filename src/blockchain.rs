@@ -6055,7 +6055,9 @@ impl Blockchain {
                                 }
                             }
                         }
-                        if found { break; }
+                        if found {
+                            break;
+                        }
                     }
                 }
             }
@@ -6063,7 +6065,11 @@ impl Blockchain {
                 return None;
             }
         }
-        if input_sum >= output_sum { Some(input_sum - output_sum) } else { None }
+        if input_sum >= output_sum {
+            Some(input_sum - output_sum)
+        } else {
+            None
+        }
     }
 
     /// Compute the total transaction fees for a block by resolving each input UTXO's

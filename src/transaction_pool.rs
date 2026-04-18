@@ -282,12 +282,22 @@ impl TransactionPool {
             .iter()
             .map(|e| {
                 let age = e.value().added_at.elapsed().as_secs();
-                (e.value().tx.clone(), e.value().fee, age, "pending".to_string())
+                (
+                    e.value().tx.clone(),
+                    e.value().fee,
+                    age,
+                    "pending".to_string(),
+                )
             })
             .collect();
         for e in self.confirmed.iter() {
             let age = e.value().added_at.elapsed().as_secs();
-            entries.push((e.value().tx.clone(), e.value().fee, age, "finalized".to_string()));
+            entries.push((
+                e.value().tx.clone(),
+                e.value().fee,
+                age,
+                "finalized".to_string(),
+            ));
         }
         entries
     }

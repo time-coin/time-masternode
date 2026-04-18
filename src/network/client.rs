@@ -500,7 +500,7 @@ impl NetworkClient {
                         } else {
                             false
                         };
-                        if !mn_is_whitelisted && !(priority_wake && is_paid_tier) {
+                        if !(mn_is_whitelisted || priority_wake && is_paid_tier) {
                             let advice = res.reconnection_ai.get_reconnection_advice(mn_ip, true);
                             if !advice.should_attempt {
                                 tracing::debug!(

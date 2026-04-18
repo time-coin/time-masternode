@@ -73,7 +73,10 @@ impl IPBlacklist {
                 {
                     if self.is_whitelisted(ip) {
                         let _ = tree.remove(&k);
-                        tracing::info!("🔓 Cleared persisted permanent ban for whitelisted IP {} on startup", ip);
+                        tracing::info!(
+                            "🔓 Cleared persisted permanent ban for whitelisted IP {} on startup",
+                            ip
+                        );
                         continue;
                     }
                     let reason = String::from_utf8_lossy(&v).into_owned();

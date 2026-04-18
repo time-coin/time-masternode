@@ -964,8 +964,8 @@ async fn audit_collateral_registrations(
             Err(_) => continue, // Not yet in our UTXO set — skip
         };
         let utxo_value = utxo.value;
-        let is_zero_value_collateral = info.masternode.tier == crate::types::MasternodeTier::Free
-            || utxo_value < BRONZE_MIN;
+        let is_zero_value_collateral =
+            info.masternode.tier == crate::types::MasternodeTier::Free || utxo_value < BRONZE_MIN;
         if is_zero_value_collateral {
             tracing::warn!(
                 "🚨 [COLLATERAL AUDIT] [AV40] Zero/sub-minimum collateral detected: \
