@@ -820,7 +820,10 @@ async fn maintain_peer_connection(
         ));
     }
 
-    // Create outbound connection with whitelist status
+    // Create outbound connection. Try TLS first if configured; fall back to
+    // plaintext if the remote rejects the TLS handshake (e.g. the peer is
+    // running an older or plaintext-only build). The server side already
+    // auto-detects TLS vs plaintext on inbound via the 0x16 byte peek.
     let peer_conn = match PeerConnection::new_outbound(
         ip.to_string(),
         port,
@@ -831,6 +834,28 @@ async fn maintain_peer_connection(
     .await
     {
         Ok(conn) => conn,
+        Err(e) if e.contains("TLS handshake failed") => {
+            // Remote rejected TLS (plaintext-only peer). Retry without TLS.
+            tracing::debug!(
+                "🔄 [OUTBOUND] TLS rejected by {}, retrying in plaintext",
+                ip
+            );
+            match PeerConnection::new_outbound(
+                ip.to_string(),
+                port,
+                is_masternode,
+                None,
+                network_type,
+            )
+            .await
+            {
+                Ok(conn) => conn,
+                Err(e2) => {
+                    peer_registry.unregister_peer(ip).await;
+                    return Err(e2);
+                }
+            }
+        }
         Err(e) => {
             // Failed to connect - clean up peer_registry mark
             peer_registry.unregister_peer(ip).await;
