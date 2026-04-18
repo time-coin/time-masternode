@@ -636,14 +636,18 @@ impl RpcHandler {
                                     "hex": hex::encode(&input.script_sig)
                                 }
                             })).collect::<Vec<_>>(),
-                            "vout": tx.outputs.iter().enumerate().map(|(i, output)| json!({
-                                "value": output.value as f64 / 100_000_000.0,
-                                "n": i,
-                                "scriptPubKey": {
-                                    "hex": hex::encode(&output.script_pubkey),
-                                    "address": String::from_utf8_lossy(&output.script_pubkey).to_string()
-                                }
-                            })).collect::<Vec<_>>(),
+                            "vout": tx.outputs.iter().enumerate().map(|(i, output)| {
+                                let addr = String::from_utf8_lossy(&output.script_pubkey).to_string();
+                                json!({
+                                    "value": output.value as f64 / 100_000_000.0,
+                                    "n": i,
+                                    "address": addr.clone(),
+                                    "scriptPubKey": {
+                                        "hex": hex::encode(&output.script_pubkey),
+                                        "address": addr
+                                    }
+                                })
+                            }).collect::<Vec<_>>(),
                             "confirmations": confirmations,
                             "time": tx.timestamp,
                             "blocktime": block.header.timestamp,
@@ -738,14 +742,18 @@ impl RpcHandler {
                     "vout": input.previous_output.vout,
                     "sequence": input.sequence
                 })).collect::<Vec<_>>(),
-                "vout": tx.outputs.iter().enumerate().map(|(i, output)| json!({
-                    "value": output.value as f64 / 100_000_000.0,
-                    "n": i,
-                    "scriptPubKey": {
-                        "hex": hex::encode(&output.script_pubkey),
-                        "address": String::from_utf8_lossy(&output.script_pubkey).to_string()
-                    }
-                })).collect::<Vec<_>>(),
+                "vout": tx.outputs.iter().enumerate().map(|(i, output)| {
+                    let addr = String::from_utf8_lossy(&output.script_pubkey).to_string();
+                    json!({
+                        "value": output.value as f64 / 100_000_000.0,
+                        "n": i,
+                        "address": addr.clone(),
+                        "scriptPubKey": {
+                            "hex": hex::encode(&output.script_pubkey),
+                            "address": addr
+                        }
+                    })
+                }).collect::<Vec<_>>(),
                 "confirmations": 0,
                 "finalized": is_finalized,
                 "time": tx.timestamp,
@@ -3017,6 +3025,15 @@ impl RpcHandler {
                     .map(|o| String::from_utf8_lossy(&o.script_pubkey).to_string())
                     .unwrap_or_default();
                 let size = bincode::serialize(tx).map(|b| b.len()).unwrap_or(0);
+                let vin: Vec<Value> = tx.inputs.iter().map(|inp| json!({
+                    "txid": hex::encode(inp.previous_output.txid),
+                    "vout": inp.previous_output.vout,
+                })).collect();
+                let vout: Vec<Value> = tx.outputs.iter().enumerate().map(|(n, out)| json!({
+                    "value": out.value as f64 / 100_000_000.0,
+                    "n": n,
+                    "address": String::from_utf8_lossy(&out.script_pubkey).to_string(),
+                })).collect();
                 json!({
                     "txid": hex::encode(tx.txid()),
                     "status": status,
@@ -3029,6 +3046,8 @@ impl RpcHandler {
                     "outputs": tx.outputs.len(),
                     "age_secs": age_secs,
                     "to": first_output_addr,
+                    "vin": vin,
+                    "vout": vout,
                 })
             })
             .collect();

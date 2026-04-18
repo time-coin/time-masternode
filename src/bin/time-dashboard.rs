@@ -184,6 +184,46 @@ struct MempoolInfo {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
+struct TxVin {
+    #[serde(default)]
+    txid: String,
+    #[serde(default)]
+    vout: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct TxVout {
+    #[serde(default)]
+    value: f64,
+    #[serde(default)]
+    n: usize,
+    #[serde(default)]
+    address: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct TxDetail {
+    #[serde(default)]
+    txid: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    amount: f64,
+    #[serde(default)]
+    fee: f64,
+    #[serde(default)]
+    size: usize,
+    #[serde(default)]
+    confirmations: i64,
+    #[serde(default)]
+    time: u64,
+    #[serde(default)]
+    vin: Vec<TxVin>,
+    #[serde(default)]
+    vout: Vec<TxVout>,
+}
+
 struct MempoolTx {
     txid: String,
     status: String,
@@ -202,6 +242,10 @@ struct MempoolTx {
     age_secs: u64,
     #[serde(default)]
     to: String,
+    #[serde(default)]
+    vin: Vec<TxVin>,
+    #[serde(default)]
+    vout: Vec<TxVout>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -287,11 +331,14 @@ struct App {
     rpc_connected: bool,
     error_message: Option<String>,
     mempool_scroll: usize,
+    mempool_cursor: usize,
     mempool_detail: Option<usize>,
     peer_scroll: usize,
     block_scroll: usize,
     block_detail: Option<usize>,
     block_tx_scroll: usize,
+    block_tx_cursor: usize,
+    block_tx_detail: Option<TxDetail>,
     governance_scroll: usize,
     masternode_scroll: usize,
     vote_status: Option<(bool, String)>, // (success, message)
@@ -312,11 +359,14 @@ impl App {
             rpc_connected: false,
             error_message: None,
             mempool_scroll: 0,
+            mempool_cursor: 0,
             mempool_detail: None,
             peer_scroll: 0,
             block_scroll: 0,
             block_detail: None,
             block_tx_scroll: 0,
+            block_tx_cursor: 0,
+            block_tx_detail: None,
             governance_scroll: 0,
             masternode_scroll: 0,
             vote_status: None,
@@ -1333,7 +1383,7 @@ fn render_mempool(f: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, tx)| {
             let idx = start + i;
-            let selected = idx == app.mempool_scroll;
+            let selected = idx == app.mempool_cursor;
             let status_style = if tx.status == "finalized" {
                 Style::default().fg(Color::Green)
             } else {
@@ -1399,82 +1449,93 @@ fn render_mempool_detail(f: &mut Frame, area: Rect, tx: &MempoolTx) {
         Color::Magenta
     };
 
-    let lines = vec![
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(10), Constraint::Min(4), Constraint::Min(4)])
+        .split(area);
+
+    // Header summary
+    let mut header_lines = vec![
         Line::from(vec![
-            Span::styled("TxID: ", Style::default().fg(Color::Yellow)),
+            Span::styled("TxID:   ", Style::default().fg(Color::Yellow)),
             Span::styled(&tx.txid, Style::default().fg(Color::White)),
         ]),
-        Line::from(""),
         Line::from(vec![
             Span::styled("Status: ", Style::default().fg(Color::Yellow)),
-            Span::styled(
-                tx.status.to_uppercase(),
-                Style::default()
-                    .fg(status_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(tx.status.to_uppercase(), Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+            Span::raw("   "),
+            Span::styled("Size: ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{} bytes", tx.size), Style::default().fg(Color::White)),
+            Span::raw("   "),
+            Span::styled("Age: ", Style::default().fg(Color::Yellow)),
+            Span::styled(format_age(tx.age_secs), Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
             Span::styled("Amount: ", Style::default().fg(Color::Yellow)),
-            Span::styled(
-                format!("{:.8} TIME", tx.amount),
-                Style::default().fg(Color::White),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Fee:    ", Style::default().fg(Color::Yellow)),
-            Span::styled(
-                format!("{:.8} TIME ({} sats)", tx.fee_time, tx.fee),
-                Style::default().fg(Color::White),
-            ),
+            Span::styled(format!("{:.8} TIME", tx.amount), Style::default().fg(Color::Cyan)),
+            Span::raw("   "),
+            Span::styled("Fee: ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{:.8} TIME", tx.fee_time), Style::default().fg(Color::White)),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Inputs:  ", Style::default().fg(Color::Yellow)),
-            Span::styled(format!("{}", tx.inputs), Style::default().fg(Color::White)),
-        ]),
-        Line::from(vec![
-            Span::styled("Outputs: ", Style::default().fg(Color::Yellow)),
-            Span::styled(format!("{}", tx.outputs), Style::default().fg(Color::White)),
-        ]),
-        Line::from(vec![
-            Span::styled("Size:    ", Style::default().fg(Color::Yellow)),
-            Span::styled(
-                format!("{} bytes", tx.size),
-                Style::default().fg(Color::White),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Age:     ", Style::default().fg(Color::Yellow)),
-            Span::styled(format_age(tx.age_secs), Style::default().fg(Color::White)),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("To: ", Style::default().fg(Color::Yellow)),
-            Span::styled(&tx.to, Style::default().fg(Color::Cyan)),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Press Enter or Esc to go back",
-            Style::default().fg(Color::DarkGray),
-        )),
+        Line::from(Span::styled("Esc / Enter to go back", Style::default().fg(Color::DarkGray))),
     ];
-
-    let block = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Transaction Detail"),
-        )
+    let header = Paragraph::new(header_lines)
+        .block(Block::default().borders(Borders::ALL).title("Transaction Detail"))
         .style(Style::default().fg(Color::White));
-    f.render_widget(block, area);
+    f.render_widget(header, chunks[0]);
+
+    // Inputs
+    let input_header = Row::new(vec![Cell::from(" # "), Cell::from("Prev TxID"), Cell::from("Vout")])
+        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let input_rows: Vec<Row> = if tx.vin.is_empty() {
+        vec![Row::new(vec![Cell::from(""), Cell::from("(coinbase)"), Cell::from("")])]
+    } else {
+        tx.vin.iter().enumerate().map(|(i, inp)| {
+            let short = if inp.txid.len() > 20 { format!("{}…", &inp.txid[..20]) } else { inp.txid.clone() };
+            Row::new(vec![
+                Cell::from(format!("{:>3}", i + 1)),
+                Cell::from(short).style(Style::default().fg(Color::Gray)),
+                Cell::from(format!("{}", inp.vout)).style(Style::default().fg(Color::White)),
+            ])
+        }).collect()
+    };
+    let input_table = Table::new(input_rows, [Constraint::Length(4), Constraint::Min(22), Constraint::Length(6)])
+        .header(input_header)
+        .block(Block::default().borders(Borders::ALL).title(format!("Inputs ({})", tx.inputs)));
+    f.render_widget(input_table, chunks[1]);
+
+    // Outputs
+    let output_header = Row::new(vec![Cell::from(" # "), Cell::from("Address"), Cell::from("Amount (TIME)")])
+        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let output_rows: Vec<Row> = if tx.vout.is_empty() {
+        vec![Row::new(vec![Cell::from(""), Cell::from("(no outputs)"), Cell::from("")])]
+    } else {
+        tx.vout.iter().enumerate().map(|(i, out)| {
+            let short_addr = if out.address.len() > 28 { format!("{}…", &out.address[..28]) } else { out.address.clone() };
+            Row::new(vec![
+                Cell::from(format!("{:>3}", i)),
+                Cell::from(short_addr).style(Style::default().fg(Color::Cyan)),
+                Cell::from(format!("{:.8}", out.value)).style(Style::default().fg(Color::Green)),
+            ])
+        }).collect()
+    };
+    let output_table = Table::new(output_rows, [Constraint::Length(4), Constraint::Min(30), Constraint::Length(16)])
+        .header(output_header)
+        .block(Block::default().borders(Borders::ALL).title(format!("Outputs ({})", tx.outputs)));
+    f.render_widget(output_table, chunks[2]);
 }
 
 fn render_blocks(f: &mut Frame, area: Rect, app: &App) {
-    // Block detail view
+    // TX detail drill-down (third level)
+    if app.block_tx_detail.is_some() {
+        render_tx_detail(f, area, app.block_tx_detail.as_ref().unwrap());
+        return;
+    }
+    // Block detail view (second level)
     if let Some(idx) = app.block_detail {
         if let Some(block) = app.data.recent_blocks.get(idx) {
-            render_block_detail(f, area, block, app.block_tx_scroll);
+            render_block_detail(f, area, block, app.block_tx_scroll, app.block_tx_cursor);
             return;
         }
     }
@@ -1565,7 +1626,7 @@ fn render_blocks(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(table, area);
 }
 
-fn render_block_detail(f: &mut Frame, area: Rect, blk: &BlockDetail, tx_scroll: usize) {
+fn render_block_detail(f: &mut Frame, area: Rect, blk: &BlockDetail, tx_scroll: usize, tx_cursor: usize) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(12), Constraint::Min(6)])
@@ -1632,7 +1693,7 @@ fn render_block_detail(f: &mut Frame, area: Rect, blk: &BlockDetail, tx_scroll: 
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "Press Esc or q to go back",
+            "↑↓ Navigate TXs  Enter: TX Detail  Esc/q: Back",
             Style::default().fg(Color::DarkGray),
         )),
     ];
@@ -1668,21 +1729,113 @@ fn render_block_detail(f: &mut Frame, area: Rect, blk: &BlockDetail, tx_scroll: 
         .iter()
         .enumerate()
         .map(|(i, txid)| {
-            Row::new(vec![
-                Cell::from(format!("{:>3}", start + i + 1)),
+            let idx = start + i;
+            let row = Row::new(vec![
+                Cell::from(format!("{:>3}", idx + 1)),
                 Cell::from(txid.as_str()),
-            ])
+            ]);
+            if idx == tx_cursor {
+                row.style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+            } else {
+                row
+            }
         })
         .collect();
 
     let table = Table::new(rows, [Constraint::Length(5), Constraint::Min(40)])
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(format!(
-            "Transactions ({}/{})",
-            start + 1,
+            "Transactions ({}/{})  Enter: View Detail",
+            tx_cursor + 1,
             blk.tx.len()
         )));
     f.render_widget(table, chunks[1]);
+}
+
+fn render_tx_detail(f: &mut Frame, area: Rect, tx: &TxDetail) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(9), Constraint::Min(4), Constraint::Min(4)])
+        .split(area);
+
+    let time_str = if tx.time > 0 {
+        chrono::DateTime::from_timestamp(tx.time as i64, 0)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| "—".to_string())
+    } else {
+        "pending".to_string()
+    };
+
+    let header_lines = vec![
+        Line::from(vec![
+            Span::styled("TxID:    ", Style::default().fg(Color::Yellow)),
+            Span::styled(&tx.txid, Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("Time:    ", Style::default().fg(Color::Yellow)),
+            Span::styled(&time_str, Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("Amount:  ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{:.8} TIME", tx.amount), Style::default().fg(Color::Cyan)),
+            Span::raw("   "),
+            Span::styled("Fee: ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{:.8} TIME", tx.fee), Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("Confirms:", Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {}", tx.confirmations), Style::default().fg(Color::Green)),
+            Span::raw("   "),
+            Span::styled("Size: ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{} bytes", tx.size), Style::default().fg(Color::White)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("Esc/q: Back to block", Style::default().fg(Color::DarkGray))),
+    ];
+    let header = Paragraph::new(header_lines)
+        .block(Block::default().borders(Borders::ALL).title("Transaction Detail"))
+        .style(Style::default().fg(Color::White));
+    f.render_widget(header, chunks[0]);
+
+    // Inputs
+    let input_header = Row::new(vec![Cell::from(" # "), Cell::from("Prev TxID"), Cell::from("Vout")])
+        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let input_rows: Vec<Row> = if tx.vin.is_empty() {
+        vec![Row::new(vec![Cell::from(""), Cell::from("(coinbase)"), Cell::from("")])]
+    } else {
+        tx.vin.iter().enumerate().map(|(i, inp)| {
+            let short = if inp.txid.len() > 24 { format!("{}…", &inp.txid[..24]) } else { inp.txid.clone() };
+            Row::new(vec![
+                Cell::from(format!("{:>3}", i + 1)),
+                Cell::from(short).style(Style::default().fg(Color::Gray)),
+                Cell::from(format!("{}", inp.vout)).style(Style::default().fg(Color::White)),
+            ])
+        }).collect()
+    };
+    let input_table = Table::new(input_rows, [Constraint::Length(4), Constraint::Min(26), Constraint::Length(6)])
+        .header(input_header)
+        .block(Block::default().borders(Borders::ALL).title(format!("Inputs ({})", tx.vin.len())));
+    f.render_widget(input_table, chunks[1]);
+
+    // Outputs
+    let output_header = Row::new(vec![Cell::from(" # "), Cell::from("Address"), Cell::from("Amount (TIME)")])
+        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let output_rows: Vec<Row> = if tx.vout.is_empty() {
+        vec![Row::new(vec![Cell::from(""), Cell::from("(no outputs)"), Cell::from("")])]
+    } else {
+        tx.vout.iter().map(|out| {
+            let short_addr = if out.address.len() > 28 { format!("{}…", &out.address[..28]) } else { out.address.clone() };
+            Row::new(vec![
+                Cell::from(format!("{:>3}", out.n)),
+                Cell::from(short_addr).style(Style::default().fg(Color::Cyan)),
+                Cell::from(format!("{:.8}", out.value)).style(Style::default().fg(Color::Green)),
+            ])
+        }).collect()
+    };
+    let output_table = Table::new(output_rows, [Constraint::Length(4), Constraint::Min(30), Constraint::Length(16)])
+        .header(output_header)
+        .block(Block::default().borders(Borders::ALL).title(format!("Outputs ({})", tx.vout.len())));
+    f.render_widget(output_table, chunks[2]);
 }
 
 fn render_governance(f: &mut Frame, area: Rect, app: &App) {
@@ -2092,9 +2245,12 @@ async fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Char('q') | KeyCode::Char('Q') => {
                             if app.mempool_detail.is_some() {
                                 app.mempool_detail = None;
+                            } else if app.block_tx_detail.is_some() {
+                                app.block_tx_detail = None;
                             } else if app.block_detail.is_some() {
                                 app.block_detail = None;
                                 app.block_tx_scroll = 0;
+                                app.block_tx_cursor = 0;
                             } else if app.current_tab == 5 && app.vote_status.is_some() {
                                 app.vote_status = None;
                             } else {
@@ -2113,29 +2269,44 @@ async fn run_app<B: ratatui::backend::Backend>(
                             last_update = Instant::now();
                         }
                         KeyCode::Tab | KeyCode::Right => {
-                            if app.mempool_detail.is_none() && app.block_detail.is_none() {
+                            if app.mempool_detail.is_none() && app.block_detail.is_none() && app.block_tx_detail.is_none() {
                                 app.next_tab();
                                 app.mempool_scroll = 0;
+                                app.mempool_cursor = 0;
                                 app.vote_status = None;
                             }
                         }
                         KeyCode::Left => {
-                            if app.mempool_detail.is_none() && app.block_detail.is_none() {
+                            if app.mempool_detail.is_none() && app.block_detail.is_none() && app.block_tx_detail.is_none() {
                                 app.previous_tab();
                                 app.mempool_scroll = 0;
+                                app.mempool_cursor = 0;
                                 app.vote_status = None;
                             }
                         }
                         KeyCode::Up => {
                             if app.current_tab == 3 && app.mempool_detail.is_none() {
-                                app.mempool_scroll = app.mempool_scroll.saturating_sub(1);
+                                if app.mempool_cursor > 0 {
+                                    app.mempool_cursor -= 1;
+                                    // Scroll viewport up if cursor moved above it
+                                    if app.mempool_cursor < app.mempool_scroll {
+                                        app.mempool_scroll = app.mempool_cursor;
+                                    }
+                                }
                             } else if app.current_tab == 1 {
                                 app.peer_scroll = app.peer_scroll.saturating_sub(1);
                             } else if app.current_tab == 2 {
                                 app.masternode_scroll = app.masternode_scroll.saturating_sub(1);
                             } else if app.current_tab == 4 {
-                                if app.block_detail.is_some() {
-                                    app.block_tx_scroll = app.block_tx_scroll.saturating_sub(1);
+                                if app.block_tx_detail.is_some() {
+                                    // nothing — no scrolling in TX detail yet
+                                } else if app.block_detail.is_some() {
+                                    if app.block_tx_cursor > 0 {
+                                        app.block_tx_cursor -= 1;
+                                        if app.block_tx_cursor < app.block_tx_scroll {
+                                            app.block_tx_scroll = app.block_tx_cursor;
+                                        }
+                                    }
                                 } else {
                                     app.block_scroll = app.block_scroll.saturating_sub(1);
                                 }
@@ -2147,8 +2318,14 @@ async fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Down => {
                             if app.current_tab == 3 && app.mempool_detail.is_none() {
                                 let max = app.data.mempool_txs.len().saturating_sub(1);
-                                if app.mempool_scroll < max {
-                                    app.mempool_scroll += 1;
+                                if app.mempool_cursor < max {
+                                    app.mempool_cursor += 1;
+                                    // Scroll viewport down if cursor moved below visible area
+                                    // We don't have exact height here, so use a reasonable page size
+                                    let page = 20usize;
+                                    if app.mempool_cursor >= app.mempool_scroll + page {
+                                        app.mempool_scroll = app.mempool_cursor.saturating_sub(page - 1);
+                                    }
                                 }
                             } else if app.current_tab == 1 {
                                 let max = app.data.peers.len().saturating_sub(1);
@@ -2167,7 +2344,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                                     app.masternode_scroll += 1;
                                 }
                             } else if app.current_tab == 4 {
-                                if let Some(detail_idx) = app.block_detail {
+                                if app.block_tx_detail.is_some() {
+                                    // nothing
+                                } else if let Some(detail_idx) = app.block_detail {
                                     let max_tx = app
                                         .data
                                         .recent_blocks
@@ -2175,8 +2354,12 @@ async fn run_app<B: ratatui::backend::Backend>(
                                         .map(|b| b.tx.len())
                                         .unwrap_or(0)
                                         .saturating_sub(1);
-                                    if app.block_tx_scroll < max_tx {
-                                        app.block_tx_scroll += 1;
+                                    if app.block_tx_cursor < max_tx {
+                                        app.block_tx_cursor += 1;
+                                        let page = 20usize;
+                                        if app.block_tx_cursor >= app.block_tx_scroll + page {
+                                            app.block_tx_scroll = app.block_tx_cursor.saturating_sub(page - 1);
+                                        }
                                     }
                                 } else {
                                     let max = app.data.recent_blocks.len().saturating_sub(1);
@@ -2197,24 +2380,48 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 if app.mempool_detail.is_some() {
                                     app.mempool_detail = None;
                                 } else if !app.data.mempool_txs.is_empty() {
-                                    app.mempool_detail = Some(app.mempool_scroll);
+                                    app.mempool_detail = Some(app.mempool_cursor);
                                 }
                             } else if app.current_tab == 4 {
-                                if app.block_detail.is_some() {
-                                    app.block_detail = None;
-                                    app.block_tx_scroll = 0;
+                                if app.block_tx_detail.is_some() {
+                                    app.block_tx_detail = None;
+                                } else if let Some(blk_idx) = app.block_detail {
+                                    // Drill into TX detail
+                                    if let Some(txid) = app.data.recent_blocks
+                                        .get(blk_idx)
+                                        .and_then(|b| b.tx.get(app.block_tx_cursor))
+                                        .cloned()
+                                    {
+                                        match app.rpc_call::<TxDetail>("gettransaction", vec![serde_json::json!(txid)]).await {
+                                            Ok(mut detail) => {
+                                                detail.txid = txid;
+                                                app.block_tx_detail = Some(detail);
+                                            }
+                                            Err(_) => {
+                                                // Show a minimal placeholder so user sees something
+                                                app.block_tx_detail = Some(TxDetail {
+                                                    txid: txid.clone(),
+                                                    ..Default::default()
+                                                });
+                                            }
+                                        }
+                                    }
                                 } else if !app.data.recent_blocks.is_empty() {
                                     app.block_detail = Some(app.block_scroll);
                                     app.block_tx_scroll = 0;
+                                    app.block_tx_cursor = 0;
                                 }
                             }
                         }
                         KeyCode::Esc => {
                             if app.mempool_detail.is_some() {
                                 app.mempool_detail = None;
+                            } else if app.block_tx_detail.is_some() {
+                                app.block_tx_detail = None;
                             } else if app.block_detail.is_some() {
                                 app.block_detail = None;
                                 app.block_tx_scroll = 0;
+                                app.block_tx_cursor = 0;
                             } else if app.current_tab == 5 {
                                 app.vote_status = None;
                             }
