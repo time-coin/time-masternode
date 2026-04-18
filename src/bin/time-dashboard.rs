@@ -183,7 +183,7 @@ struct MempoolInfo {
     finalized: usize,
 }
 
-#[derive(Debug, Clone, Deserialize, Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 struct TxVin {
     #[serde(default)]
     txid: String,
@@ -223,6 +223,7 @@ struct TxDetail {
     vout: Vec<TxVout>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
 struct MempoolTx {
     txid: String,
     status: String,
