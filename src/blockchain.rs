@@ -6464,7 +6464,24 @@ impl Blockchain {
         // Reject if the bitmap encodes nodes our registry doesn't know.
         // The set of valid masternodes is fully on-chain — an unknown node in the
         // bitmap means the producer fabricated it.
+        // Exception: when the block's bitmap capacity exceeds our registry size, the
+        // producer's registry was larger than ours (registry divergence, typically from
+        // AV40 transitional state where not all nodes have upgraded). Accept with warning.
         if active_bitmap_nodes.len() < bitmap_active_count {
+            let our_registry_size = self.masternode_registry.all_masternodes_cached().len();
+            let bitmap_capacity = block.header.active_masternodes_bitmap.len() * 8;
+            if bitmap_capacity > our_registry_size {
+                tracing::warn!(
+                    "⚠️ Block {} bitmap has {} active bits but we resolved only {} nodes \
+                     (our registry: {}, bitmap capacity: {}) — registry divergence, accepting block.",
+                    block.header.height,
+                    bitmap_active_count,
+                    active_bitmap_nodes.len(),
+                    our_registry_size,
+                    bitmap_capacity,
+                );
+                return Ok(());
+            }
             return Err(format!(
                 "Block {} bitmap contains {} active bits but local registry resolved \
                  only {} nodes — producer may have inserted unknown masternodes",
@@ -6518,6 +6535,26 @@ impl Blockchain {
                         act_amt
                     ));
                 }
+            }
+            // When the producer's bitmap capacity exceeds our registry size, the
+            // reward mismatch is caused by registry divergence (producer has more
+            // registered masternodes than we do, e.g. during AV40 upgrade transition).
+            // Treat this as a warning rather than a hard error to avoid blocking sync
+            // on a transitional registry state. Strict rejection is reserved for
+            // same-registry-size mismatches that indicate true reward manipulation.
+            let our_registry_size = self.masternode_registry.all_masternodes_cached().len();
+            let bitmap_capacity = block.header.active_masternodes_bitmap.len() * 8;
+            if bitmap_capacity > our_registry_size {
+                tracing::warn!(
+                    "⚠️ Block {} reward mismatch due to registry divergence \
+                     (our registry: {}, producer bitmap capacity: {}). \
+                     Discrepancies: {}. Accepting block — rewards normalize once all nodes upgrade.",
+                    block.header.height,
+                    our_registry_size,
+                    bitmap_capacity,
+                    diff.join("; "),
+                );
+                return Ok(());
             }
             return Err(format!(
                 "Block {} reward manipulation: calculator expected {} recipients, \

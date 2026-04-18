@@ -543,10 +543,19 @@ impl MessageHandler {
     }
 
     /// Permanently ban this peer's IP address (strips port first).
+    /// Whitelisted peers are never permanently banned — they are operator-trusted
+    /// and a permanent ban would cut off Michigan from its reference peers.
     async fn permanent_ban_ip(&self, context: &MessageContext, reason: &str) {
         if let Some(blacklist) = &context.blacklist {
             let bare = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
             if let Ok(ip) = bare.parse::<IpAddr>() {
+                if blacklist.read().await.is_whitelisted(ip) {
+                    warn!(
+                        "⚠️ Suppressing permanent ban for whitelisted peer {} — reason: {}",
+                        self.peer_ip, reason
+                    );
+                    return;
+                }
                 blacklist.write().await.add_permanent_ban(ip, reason);
             }
         }
