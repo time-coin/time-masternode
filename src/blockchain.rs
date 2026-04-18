@@ -3707,6 +3707,15 @@ impl Blockchain {
             for input in &tx.inputs {
                 spent_outpoints.insert((input.previous_output.txid, input.previous_output.vout));
             }
+            // AV38-path TXs are added to the pool with fee=0; recompute the actual fee
+            // from the blockchain so block_reward matches what validators compute.
+            let fee = if fee == 0 && !tx.inputs.is_empty() {
+                self.compute_single_tx_fee(&tx, next_height)
+                    .await
+                    .unwrap_or(0)
+            } else {
+                fee
+            };
             valid_finalized_with_fees.push((tx, fee));
         }
 
@@ -6007,6 +6016,54 @@ impl Blockchain {
                 bincode::deserialize(&v).ok()
             })
             .collect()
+    }
+
+    /// Compute the fee for a single transaction by resolving input values from the
+    /// blockchain (tx_index or linear block search). Returns None if any input cannot
+    /// be located. Used to recover fee=0 AV38-path transactions during block assembly.
+    async fn compute_single_tx_fee(&self, tx: &Transaction, search_height: u64) -> Option<u64> {
+        let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+        let mut input_sum: u64 = 0;
+        for input in &tx.inputs {
+            let spent_txid = input.previous_output.txid;
+            let spent_vout = input.previous_output.vout;
+            let mut found = false;
+            if let Some(ref txi) = self.tx_index {
+                if let Some(loc) = txi.get_location(&spent_txid) {
+                    if let Ok(src_block) = self.get_block(loc.block_height) {
+                        if let Some(src_tx) = src_block.transactions.get(loc.tx_index) {
+                            if src_tx.txid() == spent_txid {
+                                if let Some(output) = src_tx.outputs.get(spent_vout as usize) {
+                                    input_sum += output.value;
+                                    found = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !found {
+                let limit = search_height.min(1000);
+                for h in (0..search_height).rev().take(limit as usize) {
+                    if let Ok(sb) = self.get_block(h) {
+                        for stx in &sb.transactions {
+                            if stx.txid() == spent_txid {
+                                if let Some(output) = stx.outputs.get(spent_vout as usize) {
+                                    input_sum += output.value;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if found { break; }
+                    }
+                }
+            }
+            if !found {
+                return None;
+            }
+        }
+        if input_sum >= output_sum { Some(input_sum - output_sum) } else { None }
     }
 
     /// Compute the total transaction fees for a block by resolving each input UTXO's
