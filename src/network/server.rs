@@ -723,7 +723,7 @@ const MAX_GENERAL_SIZE: usize = 50_000;
 /// Side-effects on each confirmed squatter:
 ///   1. Evicted from the masternode registry
 ///   2. Collateral lock released (wallet coins freed)
-///   3. Permanently banned in the IP blacklist
+///   3. Temporarily banned for 2 hours (allows misconfigured-but-legitimate nodes to recover)
 ///
 /// Returns the list of squatter IPs that were evicted (so the caller can kick TCP
 /// connections that are still open).
@@ -741,6 +741,31 @@ async fn audit_collateral_registrations(
     let all_nodes = registry.get_all().await;
     let mut evicted: Vec<String> = Vec::new();
 
+    // Collect IPs that must never be evicted by this sweep:
+    // 1. The local node's own registered IP (it knows its own config is correct).
+    // 2. Any whitelisted IPs (operator-trusted nodes).
+    let local_ip = registry
+        .get_local_masternode()
+        .await
+        .map(|mn| mn.masternode.address.clone())
+        .unwrap_or_default();
+    let whitelist_ips = {
+        let bl = blacklist.read().await;
+        bl.whitelist_ips()
+    };
+    let is_exempt = |ip: &str| -> bool {
+        let bare = ip.split(':').next().unwrap_or(ip);
+        if !local_ip.is_empty() && bare == local_ip.split(':').next().unwrap_or(&local_ip) {
+            return true;
+        }
+        if let Ok(parsed) = bare.parse::<std::net::IpAddr>() {
+            if whitelist_ips.contains(&parsed) {
+                return true;
+            }
+        }
+        false
+    };
+
     // ── Pass 0: on-chain anchor mismatch ────────────────────────────────────
     // The `collateral_anchor:{outpoint}` sled key is written when a valid
     // MasternodeReg on-chain transaction is confirmed.  It is the ground truth:
@@ -757,6 +782,9 @@ async fn audit_collateral_registrations(
             None => continue,
         };
         let ip = info.masternode.address.clone();
+        if is_exempt(&ip) {
+            continue;
+        }
         if let Some(anchored_ip) = registry.get_collateral_anchor(&outpoint) {
             if anchored_ip != ip && !evicted.contains(&ip) {
                 tracing::warn!(
@@ -771,8 +799,9 @@ async fn audit_collateral_registrations(
                 let bare = ip.split(':').next().unwrap_or(&ip);
                 if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
                     let mut bl = blacklist.write().await;
-                    bl.add_permanent_ban(
+                    bl.add_temp_ban(
                         ban_ip,
+                        std::time::Duration::from_secs(7200),
                         "collateral squatter: registry IP ≠ on-chain anchor IP (audit sweep)",
                     );
                 }
@@ -801,6 +830,9 @@ async fn audit_collateral_registrations(
             continue; // No address embedded — cannot prove mismatch, skip
         }
         let ip = info.masternode.address.clone();
+        if is_exempt(&ip) {
+            continue;
+        }
         if info.reward_address != utxo.address {
             tracing::warn!(
                 "🚨 [COLLATERAL AUDIT] Squatter detected: {} registered {:?} with outpoint {} \
@@ -816,8 +848,12 @@ async fn audit_collateral_registrations(
             let bare = ip.split(':').next().unwrap_or(&ip);
             if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
                 let mut bl = blacklist.write().await;
-                bl.add_permanent_ban(
+                // Use a 2-hour temp ban rather than permanent: a misconfigured-but-legitimate
+                // node can fix its reward_address config and reconnect after the ban expires.
+                // Repeat offenders are re-evicted each audit cycle until they fix the config.
+                bl.add_temp_ban(
                     ban_ip,
+                    std::time::Duration::from_secs(7200),
                     "collateral squatter: reward_address ≠ UTXO owner (audit sweep)",
                 );
             }
@@ -880,8 +916,8 @@ async fn audit_collateral_registrations(
         }
         if owner.is_some() {
             for sq_ip in &squatters {
-                if evicted.contains(sq_ip) {
-                    continue; // Already handled in pass 1
+                if evicted.contains(sq_ip) || is_exempt(sq_ip) {
+                    continue; // Already handled in pass 1 or exempt (local/whitelisted)
                 }
                 tracing::warn!(
                     "🚨 [COLLATERAL AUDIT] Duplicate outpoint {}: owner={:?}, squatter={}",
@@ -894,8 +930,9 @@ async fn audit_collateral_registrations(
                 let bare = sq_ip.split(':').next().unwrap_or(sq_ip.as_str());
                 if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
                     let mut bl = blacklist.write().await;
-                    bl.add_permanent_ban(
+                    bl.add_temp_ban(
                         ban_ip,
+                        std::time::Duration::from_secs(7200),
                         "collateral squatter: duplicate outpoint claim (audit sweep)",
                     );
                 }
@@ -1071,7 +1108,10 @@ async fn handle_peer(
                 // demote to DEBUG since it's expected noise from pre-TLS nodes and port scanners.
                 let e_str = e.to_string();
                 if e_str.contains("eof") || e_str.contains("early eof") {
-                    tracing::debug!("🔓 TLS handshake eof from {} (plain-TCP client?)", peer.addr);
+                    tracing::debug!(
+                        "🔓 TLS handshake eof from {} (plain-TCP client?)",
+                        peer.addr
+                    );
                 } else {
                     tracing::warn!("🚫 TLS handshake failed for {}: {}", peer.addr, e);
                 }

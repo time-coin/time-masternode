@@ -259,6 +259,11 @@ impl IPBlacklist {
         self.whitelist.len()
     }
 
+    /// Return a snapshot of all whitelisted IPs (for audit-exemption checks).
+    pub fn whitelist_ips(&self) -> std::collections::HashSet<IpAddr> {
+        self.whitelist.keys().copied().collect()
+    }
+
     /// Ban an entire IPv4 subnet in CIDR notation (e.g. "154.217.246.0/24").
     /// Also accepts a bare /24 prefix like "154.217.246" (prefix_len defaults to 24).
     pub fn add_subnet_ban(&mut self, cidr: &str, reason: &str) {
