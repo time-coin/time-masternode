@@ -3170,21 +3170,56 @@ async fn main() {
 
                 // CRITICAL: If still insufficient, REFUSE to produce blocks (fork prevention)
                 if masternodes.len() < 3 {
-                    // Rate-limit this error (once per 60s)
-                    static LAST_FORK_WARN: std::sync::atomic::AtomicI64 =
-                        std::sync::atomic::AtomicI64::new(0);
-                    let now_secs = chrono::Utc::now().timestamp();
-                    let last = LAST_FORK_WARN.load(Ordering::Relaxed);
-                    if now_secs - last >= 60 {
-                        LAST_FORK_WARN.store(now_secs, Ordering::Relaxed);
-                        tracing::error!(
-                            "🛡️ FORK PREVENTION: Only {} active masternodes (minimum 3 required) - refusing block production",
-                            masternodes.len()
-                        );
+                    // Emergency fallback: when severely stalled (≥5 blocks behind), use ALL
+                    // registered masternodes regardless of active status. After 50+ minutes
+                    // without a block, the "active" gossip state is stale and we must restart
+                    // the chain. This implements the "emergency fallback to all registered"
+                    // step promised in the comment above.
+                    if blocks_behind >= 5 {
+                        let all_registered = block_registry.list_all().await;
+                        let registered_masternodes: Vec<crate::types::Masternode> = all_registered
+                            .iter()
+                            .map(|info| info.masternode.clone())
+                            .collect();
+                        if registered_masternodes.len() >= 3 {
+                            static LAST_EMERGENCY_LOG: std::sync::atomic::AtomicI64 =
+                                std::sync::atomic::AtomicI64::new(0);
+                            let now_secs = chrono::Utc::now().timestamp();
+                            let last = LAST_EMERGENCY_LOG.load(Ordering::Relaxed);
+                            if now_secs - last >= 60 {
+                                LAST_EMERGENCY_LOG.store(now_secs, Ordering::Relaxed);
+                                tracing::warn!(
+                                    "🚨 Emergency fallback: {} active masternodes < 3 but {} blocks behind. \
+                                     Using {} registered masternodes for VRF.",
+                                    masternodes.len(),
+                                    blocks_behind,
+                                    registered_masternodes.len()
+                                );
+                            }
+                            masternodes = registered_masternodes;
+                            // Fall through to production
+                        } else {
+                            // Truly no masternodes registered — cannot produce
+                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                            continue;
+                        }
+                    } else {
+                        // Rate-limit this error (once per 60s)
+                        static LAST_FORK_WARN: std::sync::atomic::AtomicI64 =
+                            std::sync::atomic::AtomicI64::new(0);
+                        let now_secs = chrono::Utc::now().timestamp();
+                        let last = LAST_FORK_WARN.load(Ordering::Relaxed);
+                        if now_secs - last >= 60 {
+                            LAST_FORK_WARN.store(now_secs, Ordering::Relaxed);
+                            tracing::error!(
+                                "🛡️ FORK PREVENTION: Only {} active masternodes (minimum 3 required) - refusing block production",
+                                masternodes.len()
+                            );
+                        }
+                        // Back off to avoid spinning every second
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        continue;
                     }
-                    // Back off to avoid spinning every second
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    continue;
                 }
             }
 

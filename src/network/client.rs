@@ -487,12 +487,20 @@ impl NetworkClient {
                             continue;
                         }
                         // Respect AI advice to avoid hammering offline nodes.
-                        // Exception: when this iteration was triggered by a paid-tier
-                        // disconnect signal (priority_wake), bypass AI cooldown for
-                        // Bronze/Silver/Gold nodes so they reconnect in milliseconds
-                        // rather than being held back by backoff from a prior blip.
+                        // Exceptions:
+                        //   (a) paid-tier node on a priority-wake signal → reconnect immediately
+                        //   (b) whitelisted peer → always bypass AI cooldown (operator trust)
                         let is_paid_tier = !matches!(mn_info.masternode.tier, MasternodeTier::Free);
-                        if !(priority_wake && is_paid_tier) {
+                        let mn_is_whitelisted = if let Some(ref bl) = res.ip_blacklist {
+                            if let Ok(parsed) = mn_ip.parse::<std::net::IpAddr>() {
+                                bl.read().await.is_whitelisted(parsed)
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        if !mn_is_whitelisted && !(priority_wake && is_paid_tier) {
                             let advice = res.reconnection_ai.get_reconnection_advice(mn_ip, true);
                             if !advice.should_attempt {
                                 tracing::debug!(
@@ -691,18 +699,33 @@ impl ConnectionResources {
         tracing::debug!("{} spawn_connection_task called for {}", tag, ip);
 
         tokio::spawn(async move {
-            // Check if AI advises skipping this peer entirely
-            let advice = res
-                .reconnection_ai
-                .get_reconnection_advice(&ip, is_masternode);
-            if !advice.should_attempt {
-                tracing::debug!(
-                    "🧠 [AI] Skipping connection to {}: {}",
-                    ip,
-                    advice.reasoning
-                );
-                res.connection_manager.clear_reconnecting(&ip);
-                return;
+            // Whitelisted peers bypass AI cooldown — operator trust is absolute.
+            // If a whitelisted node keeps failing, reconnect immediately rather
+            // than letting backoff hold it offline for minutes.
+            let peer_is_whitelisted = if let Some(ref bl) = res.ip_blacklist {
+                if let Ok(parsed) = ip.parse::<std::net::IpAddr>() {
+                    bl.read().await.is_whitelisted(parsed)
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if !peer_is_whitelisted {
+                // Check if AI advises skipping this peer entirely
+                let advice = res
+                    .reconnection_ai
+                    .get_reconnection_advice(&ip, is_masternode);
+                if !advice.should_attempt {
+                    tracing::debug!(
+                        "🧠 [AI] Skipping connection to {}: {}",
+                        ip,
+                        advice.reasoning
+                    );
+                    res.connection_manager.clear_reconnecting(&ip);
+                    return;
+                }
             }
 
             let connect_start = std::time::Instant::now();
