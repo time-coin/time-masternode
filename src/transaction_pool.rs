@@ -274,22 +274,22 @@ impl TransactionPool {
     }
 
     /// Get all user-visible mempool entries with metadata (for dashboard/verbose RPC).
-    /// Only shows `pending` — confirmed TXs have already settled from the user's
-    /// perspective (their inputs are SpentFinalized) and are excluded.
+    /// Returns both pending and finalized (confirmed-but-not-yet-archived) transactions.
     pub fn get_all_entries_verbose(&self) -> Vec<(Transaction, u64, u64, String)> {
         // Returns (tx, fee, age_secs, status)
-        self.pending
+        let mut entries: Vec<(Transaction, u64, u64, String)> = self
+            .pending
             .iter()
             .map(|e| {
                 let age = e.value().added_at.elapsed().as_secs();
-                (
-                    e.value().tx.clone(),
-                    e.value().fee,
-                    age,
-                    "pending".to_string(),
-                )
+                (e.value().tx.clone(), e.value().fee, age, "pending".to_string())
             })
-            .collect()
+            .collect();
+        for e in self.confirmed.iter() {
+            let age = e.value().added_at.elapsed().as_secs();
+            entries.push((e.value().tx.clone(), e.value().fee, age, "finalized".to_string()));
+        }
+        entries
     }
 
     /// Clear finalized transactions (after block inclusion)
