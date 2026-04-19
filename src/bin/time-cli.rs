@@ -24,6 +24,16 @@ Commands:
   Network
     getnetworkinfo         Get network information
     getpeerinfo            Get peer information
+    getconnectioncount     Get number of active peer connections
+    getwhitelist           List all whitelisted IPs
+    addwhitelist           Add an IP to the whitelist
+    removewhitelist        Remove an IP from the whitelist
+    getblacklist           List all banned IPs with reasons
+    ban                    Permanently ban an IP address
+    unban                  Remove an IP from the ban list
+    clearbanlist           Remove ALL bans
+    auditcollateral        Scan for collateral squatters and evict them
+    aggregateblacklists    Collect and merge ban lists from multiple nodes
   Wallet
     getbalance             Get wallet balance [address]
     getwalletinfo          Get wallet information
@@ -37,6 +47,8 @@ Commands:
     sendtoaddress          Send TIME to an address
     sendfrom               Send TIME from a specific address
     mergeutxos             Merge UTXOs to reduce UTXO set size
+    signmessage            Sign a message with this node's wallet key
+    verifymessage          Verify a signed message
   Payment Requests
     requestpayment         Create a payment request
     payrequest             Pay a payment request
@@ -51,9 +63,12 @@ Commands:
     createrawtransaction   Create a new transaction
     decoderawtransaction   Decode a raw transaction
     sendrawtransaction     Send a raw transaction
+    gettransactionfinality Get finality status for a transaction
+    estimatesmartfee       Estimate fee for a target confirmation speed
   Masternode
     masternodelist         List all masternodes
     masternodestatus       Get this node's masternode status
+    masternoderegstatus    Get on-chain registration status of a masternode
     checkcollateral        Check collateral UTXO health (on-chain, lock, squatter, tier)
     findcollateral         Look up who is claiming any collateral outpoint [txid:vout]
     masternode genkey      Generate a new masternode key
@@ -77,16 +92,26 @@ Commands:
     getmempoolverbose      Get detailed mempool transactions
   Consensus
     getconsensusinfo       Get consensus information
+    gettimevotestatus      Get TimeVote consensus engine status
   Treasury
     gettreasurybalance     Get on-chain treasury balance
+  Governance
+    listproposals          List all governance proposals
+    getproposal            Get a specific governance proposal
+    submitproposal         Submit a new governance proposal
+    voteproposal           Vote on a governance proposal
   Utility
     validateaddress        Validate a TIME address
     stop                   Stop the daemon
     uptime                 Get daemon uptime
     getinfo                Get general node information
+    getfeeschedule         Get the current transaction fee schedule
+    gettxindexstatus       Get transaction index rebuild status
     reindextransactions    Rebuild transaction index
     reindex                Full reindex: rebuild UTXOs + tx index from block 0
-    resetfinalitylock      [DANGER] Reset BFT finality lock to recover a node stuck on a minority fork
+    rollbacktoblock0       [DANGER] Delete all blocks above genesis and reset chain
+    rollbacktoheight       [DANGER] Roll back chain to a specific block height
+    resetfinalitylock      [DANGER] Reset BFT finality lock to recover a stuck fork node
 
     help                   Print this message or the help of the given subcommand(s)
 
@@ -157,6 +182,13 @@ enum Commands {
         height: u64,
     },
 
+    /// Get block header information
+    #[command(next_help_heading = "Blockchain")]
+    GetBlockHeader {
+        /// Block height or hash
+        height_or_hash: String,
+    },
+
     /// Get information about the UTXO set
     #[command(next_help_heading = "Blockchain")]
     GetTxOutSetInfo,
@@ -217,6 +249,33 @@ enum Commands {
         ip: String,
     },
 
+    /// List all whitelisted IPs
+    #[command(next_help_heading = "Network")]
+    GetWhitelist,
+
+    /// Remove an IP from the whitelist
+    #[command(next_help_heading = "Network")]
+    RemoveWhitelist {
+        /// IP address to remove from whitelist
+        ip: String,
+    },
+
+    /// Get number of active peer connections
+    #[command(next_help_heading = "Network")]
+    GetConnectionCount,
+
+    /// Collect and merge ban lists from multiple nodes.
+    /// Queries each node's getblacklist RPC and produces a unified report
+    /// showing which IPs are banned across the network and on how many nodes.
+    ///
+    /// Example:
+    ///   time-cli aggregateblacklists http://1.2.3.4:24001 http://5.6.7.8:24001
+    #[command(next_help_heading = "Network")]
+    AggregateBlacklists {
+        /// RPC URLs to query (e.g. http://1.2.3.4:24001). Queries localhost only if none given.
+        nodes: Vec<String>,
+    },
+
     // ============================================================
     // WALLET COMMANDS
     // ============================================================
@@ -266,6 +325,40 @@ enum Commands {
         /// Number of transactions to show (default: 10)
         #[arg(short = 'n', long, default_value = "10")]
         count: u64,
+    },
+
+    /// Get info about an address (ismine, pubkey, type)
+    #[command(next_help_heading = "Wallet")]
+    GetAddressInfo {
+        /// TIME address to look up
+        address: String,
+    },
+
+    /// List unspent UTXOs across multiple addresses
+    #[command(next_help_heading = "Wallet")]
+    ListUnspentMulti {
+        /// JSON array of addresses (e.g. '["addr1","addr2"]')
+        addresses: String,
+    },
+
+    /// Sign a message with this node's wallet key
+    #[command(next_help_heading = "Wallet")]
+    SignMessage {
+        /// Message to sign
+        message: String,
+        /// Address to sign with (uses default wallet address if not specified)
+        address: Option<String>,
+    },
+
+    /// Verify a message signature
+    #[command(next_help_heading = "Wallet")]
+    VerifyMessage {
+        /// Address that signed the message
+        address: String,
+        /// Signature (hex)
+        signature: String,
+        /// Original message
+        message: String,
     },
 
     /// Send TIME to an address
@@ -452,6 +545,21 @@ enum Commands {
         hex: String,
     },
 
+    /// Get finality status for a transaction
+    #[command(next_help_heading = "Transaction")]
+    GetTransactionFinality {
+        /// Transaction ID (hex)
+        txid: String,
+    },
+
+    /// Estimate the fee required for a target confirmation speed
+    #[command(next_help_heading = "Transaction")]
+    EstimateSmartFee {
+        /// Target blocks for confirmation (default: 1)
+        #[arg(default_value = "1")]
+        conf_target: u32,
+    },
+
     // ============================================================
     // MASTERNODE COMMANDS
     // ============================================================
@@ -483,6 +591,13 @@ enum Commands {
     /// List all locked collaterals
     #[command(next_help_heading = "Masternode")]
     ListLockedCollaterals,
+
+    /// Get on-chain registration status of a masternode
+    #[command(next_help_heading = "Masternode")]
+    MasternodeRegStatus {
+        /// Node address IP:port to check (uses this node's address if not specified)
+        address: Option<String>,
+    },
 
     /// Check the health of the local masternode's configured collateral UTXO.
     ///
@@ -586,12 +701,48 @@ enum Commands {
     #[command(next_help_heading = "Consensus")]
     GetConsensusInfo,
 
+    /// Get TimeVote consensus engine status
+    #[command(next_help_heading = "Consensus")]
+    GetTimeVoteStatus,
+
     // ============================================================
     // TREASURY COMMANDS
     // ============================================================
     /// Get the on-chain treasury balance
     #[command(next_help_heading = "Treasury")]
     GetTreasuryBalance,
+
+    // ============================================================
+    // GOVERNANCE COMMANDS
+    // ============================================================
+    /// List all governance proposals
+    #[command(next_help_heading = "Governance")]
+    ListProposals,
+
+    /// Get a specific governance proposal
+    #[command(next_help_heading = "Governance")]
+    GetProposal {
+        /// Proposal ID
+        proposal_id: String,
+    },
+
+    /// Submit a new governance proposal
+    #[command(next_help_heading = "Governance")]
+    SubmitProposal {
+        /// Proposal type: treasury_spend, fee_schedule_change, emission_rate_change
+        proposal_type: String,
+        /// Proposal data as JSON string
+        data: String,
+    },
+
+    /// Vote on a governance proposal
+    #[command(next_help_heading = "Governance")]
+    VoteProposal {
+        /// Proposal ID
+        proposal_id: String,
+        /// Vote: yes or no
+        vote: String,
+    },
 
     // ============================================================
     // UTILITY COMMANDS
@@ -614,6 +765,14 @@ enum Commands {
     /// Get general information about the node
     #[command(next_help_heading = "Utility")]
     GetInfo,
+
+    /// Get the current transaction fee schedule
+    #[command(next_help_heading = "Utility")]
+    GetFeeSchedule,
+
+    /// Get transaction index rebuild status
+    #[command(next_help_heading = "Utility")]
+    GetTxIndexStatus,
 
     /// Rebuild transaction index
     #[command(next_help_heading = "Utility")]
@@ -969,14 +1128,124 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
     // ── End MasternodeReg ────────────────────────────────────────────────────
 
+    // ── AggregateBlacklists: query multiple nodes and merge ──────────────────
+    if let Commands::AggregateBlacklists { nodes } = &args.command {
+        let mut query_urls: Vec<String> = nodes.clone();
+        // Always include localhost
+        if query_urls.is_empty() || !query_urls.iter().any(|u| u.contains("127.0.0.1") || u.contains("localhost")) {
+            let port = if is_testnet { 24101 } else { 24001 };
+            let use_tls = timed::rpc::credentials::read_conf_rpctls(is_testnet);
+            let scheme = if use_tls { "https" } else { "http" };
+            query_urls.insert(0, format!("{}://127.0.0.1:{}", scheme, port));
+        }
+
+        let auth = if !rpc_user.is_empty() && !rpc_pass.is_empty() {
+            Some((rpc_user.as_str(), rpc_pass.as_str()))
+        } else {
+            None
+        };
+        let blacklist_req = serde_json::json!({
+            "jsonrpc": "2.0", "id": "agg", "method": "getblacklist", "params": []
+        });
+
+        // ip -> (ban_reason, Vec<node_url>)
+        let mut permanent_map: std::collections::HashMap<String, (String, Vec<String>)> = std::collections::HashMap::new();
+        let mut node_results: Vec<(String, u64, u64)> = Vec::new(); // (url, perm_count, temp_count)
+        let mut all_violations: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+
+        for url in &query_urls {
+            match client.post_json(url, &blacklist_req, auth).await {
+                Ok(resp) if resp.is_success() => {
+                    if let Ok(rpc_resp) = resp.json::<RpcResponse>() {
+                        if let Some(result) = rpc_resp.result {
+                            let perm_count = result.get("summary")
+                                .and_then(|s| s.get("permanent_bans"))
+                                .and_then(|v| v.as_u64()).unwrap_or(0);
+                            let temp_count = result.get("summary")
+                                .and_then(|s| s.get("temporary_bans"))
+                                .and_then(|v| v.as_u64()).unwrap_or(0);
+                            node_results.push((url.clone(), perm_count, temp_count));
+
+                            if let Some(perms) = result.get("permanent").and_then(|v| v.as_array()) {
+                                for entry in perms {
+                                    let ip = entry.get("ip").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let e = permanent_map.entry(ip).or_insert_with(|| (reason.clone(), Vec::new()));
+                                    e.1.push(url.clone());
+                                }
+                            }
+                            if let Some(viols) = result.get("violations").and_then(|v| v.as_array()) {
+                                for entry in viols {
+                                    let ip = entry.get("ip").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let count = entry.get("violations").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    let e = all_violations.entry(ip).or_insert(0);
+                                    *e += count;
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("⚠️  Could not reach {}", url);
+                }
+            }
+        }
+
+        println!("=== Aggregated Blacklist ({} nodes queried) ===\n", query_urls.len());
+        println!("Node Summary:");
+        for (url, perm, temp) in &node_results {
+            println!("  {:45}  {} permanent  {} temporary", url, perm, temp);
+        }
+
+        // Sort by node count (most-banned first)
+        let mut sorted: Vec<_> = permanent_map.iter().collect();
+        sorted.sort_by(|a, b| b.1.1.len().cmp(&a.1.1.len()).then(a.0.cmp(b.0)));
+
+        println!("\n--- Permanently Banned IPs ({} unique) ---", sorted.len());
+        println!("{:<22} {:>6}  {}", "IP", "Nodes", "Reason (first seen)");
+        println!("{}", "-".repeat(90));
+        for (ip, (reason, node_urls)) in &sorted {
+            let short_reason = if reason.len() > 55 { &reason[..55] } else { reason };
+            println!("{:<22} {:>6}  {}", ip, node_urls.len(), short_reason);
+        }
+
+        if !all_violations.is_empty() {
+            let mut viols: Vec<_> = all_violations.iter().collect();
+            viols.sort_by(|a, b| b.1.cmp(a.1));
+            println!("\n--- Top Violation Counts (aggregate) ---");
+            for (ip, count) in viols.iter().take(20) {
+                println!("  {:<22}  {} violation(s)", ip, count);
+            }
+        }
+
+        // IPs banned on ALL queried nodes
+        let all_node_count = query_urls.len();
+        let banned_everywhere: Vec<_> = sorted.iter()
+            .filter(|(_, (_, nodes))| nodes.len() == all_node_count)
+            .collect();
+        if !banned_everywhere.is_empty() {
+            println!("\n--- Banned on ALL {} nodes ---", all_node_count);
+            for (ip, _) in &banned_everywhere {
+                println!("  {}", ip);
+            }
+        }
+
+        return Ok(());
+    }
+    // ── End AggregateBlacklists ──────────────────────────────────────────────
+
     let (method, params) = match &args.command {
         Commands::GetBlockchainInfo => ("getblockchaininfo", json!([])),
         Commands::GetBlock { height } => ("getblock", json!([height])),
         Commands::GetBlockCount => ("getblockcount", json!([])),
         Commands::GetBestBlockHash => ("getbestblockhash", json!([])),
         Commands::GetBlockHash { height } => ("getblockhash", json!([height])),
+        Commands::GetBlockHeader { height_or_hash } => ("getblockheader", json!([height_or_hash])),
         Commands::GetNetworkInfo => ("getnetworkinfo", json!([])),
         Commands::GetPeerInfo => ("getpeerinfo", json!([])),
+        Commands::GetConnectionCount => ("getconnectioncount", json!([])),
+        Commands::GetWhitelist => ("getwhitelist", json!([])),
+        Commands::RemoveWhitelist { ip } => ("removewhitelist", json!([ip])),
         Commands::AuditCollateral => ("auditcollateral", json!([])),
         Commands::GetBlacklist => ("getblacklist", json!([])),
         Commands::Ban { ip, reason } => (
@@ -993,6 +1262,8 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             ("getrawtransaction", json!([txid, verbose]))
         }
         Commands::SendRawTransaction { hex } => ("sendrawtransaction", json!([hex])),
+        Commands::GetTransactionFinality { txid } => ("gettransactionfinality", json!([txid])),
+        Commands::EstimateSmartFee { conf_target } => ("estimatesmartfee", json!([conf_target])),
         Commands::CreateRawTransaction { inputs, outputs } => {
             let inputs_json: Value = serde_json::from_str(inputs)?;
             let outputs_json: Value = serde_json::from_str(outputs)?;
@@ -1014,6 +1285,16 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::GetNewAddress => ("getnewaddress", json!([])),
         Commands::GetWalletInfo => ("getwalletinfo", json!([])),
         Commands::ListTransactions { count } => ("listtransactions", json!([count])),
+        Commands::GetAddressInfo { address } => ("getaddressinfo", json!([address])),
+        Commands::ListUnspentMulti { addresses } => {
+            let addrs: Value = serde_json::from_str(addresses)
+                .map_err(|_| "addresses must be a JSON array, e.g. '[\"addr1\",\"addr2\"]'")?;
+            ("listunspentmulti", json!([addrs]))
+        }
+        Commands::SignMessage { message, address } => ("signmessage", json!([address, message])),
+        Commands::VerifyMessage { address, signature, message } => {
+            ("verifymessage", json!([address, signature, message]))
+        }
         Commands::ListReceivedByAddress {
             minconf,
             include_empty,
@@ -1027,16 +1308,29 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         },
         Commands::ReleaseAllCollaterals => ("releaseallcollaterals", json!([])),
         Commands::ListLockedCollaterals => ("listlockedcollaterals", json!([])),
+        Commands::MasternodeRegStatus { address } => ("masternoderegstatus", json!([address])),
         Commands::CheckCollateral => ("checkcollateral", json!([])),
         Commands::FindCollateral { outpoint } => ("findcollateral", json!([outpoint])),
         Commands::MasternodeReg { .. } => unreachable!("handled above"),
         Commands::DumpPrivKey { .. } => unreachable!("handled above"),
+        Commands::AggregateBlacklists { .. } => unreachable!("handled above"),
         Commands::GetConsensusInfo => ("getconsensusinfo", json!([])),
+        Commands::GetTimeVoteStatus => ("gettimevotestatus", json!([])),
         Commands::GetTreasuryBalance => ("gettreasurybalance", json!([])),
+        Commands::ListProposals => ("listproposals", json!([])),
+        Commands::GetProposal { proposal_id } => ("getproposal", json!([proposal_id])),
+        Commands::SubmitProposal { proposal_type, data } => {
+            let data_val: Value = serde_json::from_str(data)
+                .map_err(|_| "data must be valid JSON")?;
+            ("submitproposal", json!([proposal_type, data_val]))
+        }
+        Commands::VoteProposal { proposal_id, vote } => ("voteproposal", json!([proposal_id, vote])),
         Commands::ValidateAddress { address } => ("validateaddress", json!([address])),
         Commands::Stop => ("stop", json!([])),
         Commands::Uptime => ("uptime", json!([])),
         Commands::GetInfo => ("getinfo", json!([])),
+        Commands::GetFeeSchedule => ("getfeeschedule", json!([])),
+        Commands::GetTxIndexStatus => ("gettxindexstatus", json!([])),
         Commands::ReindexTransactions => ("reindextransactions", json!([])),
         Commands::Reindex => ("reindex", json!([])),
         Commands::RollbackToBlock0 => ("rollbacktoblock0", json!([])),
