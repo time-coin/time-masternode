@@ -325,6 +325,22 @@ pub enum NetworkMessage {
         /// Human-readable explanation of the connectivity problem and how to fix it.
         message: String,
     },
+    /// Request a full UTXO state snapshot for reconciliation. Sent when a node
+    /// computes a different reward outcome than the producer, indicating its UTXO
+    /// set has diverged. The responder sends all spendable UTXOs at `at_height`.
+    RequestUtxoReconciliation {
+        /// Block height at which the disagreement occurred.
+        at_height: u64,
+        /// Hash of the disputed block, so the responder can verify we're on the same chain.
+        block_hash: [u8; 32],
+    },
+    /// Full UTXO snapshot response. Recipient should apply/merge these UTXOs,
+    /// then re-verify reward computation. Node will not receive rewards until
+    /// it can produce matching results (it won't appear in the bitmap until then).
+    UtxoReconciliationResponse {
+        at_height: u64,
+        utxos: Vec<crate::types::UTXO>,
+    },
     /// Placeholder for messages from newer protocol versions that we can't parse
     UnknownMessage,
 }
@@ -508,6 +524,8 @@ impl NetworkMessage {
             NetworkMessage::GovernanceStateResponse { .. } => "GovernanceStateResponse",
             NetworkMessage::ConnectivityWarning { .. } => "ConnectivityWarning",
             NetworkMessage::MasternodeAnnouncementV4 { .. } => "MasternodeAnnouncementV4",
+            NetworkMessage::RequestUtxoReconciliation { .. } => "RequestUtxoReconciliation",
+            NetworkMessage::UtxoReconciliationResponse { .. } => "UtxoReconciliationResponse",
         }
     }
 

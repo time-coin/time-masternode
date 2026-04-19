@@ -3935,40 +3935,6 @@ impl Blockchain {
                 voters_set.insert(v);
             }
 
-            let gossip_active = self.masternode_registry.get_active_masternodes().await;
-            let gossip_count_before = voters_set.len();
-            for mn in &gossip_active {
-                voters_set.insert(mn.masternode.address.clone());
-            }
-
-            // Free-tier nodes don't submit TimeVote consensus votes — their
-            // "participation" is running a reachable node (gossip-active within
-            // the extended 15-min window used by get_eligible_pool_nodes).
-            // Without this, the free pool always rolls up to the producer because
-            // no free nodes ever appear in the vote-based voter set.
-            let pool_eligible = self
-                .masternode_registry
-                .get_eligible_pool_nodes(next_height)
-                .await;
-            let free_before = voters_set.len();
-            for mn in pool_eligible
-                .iter()
-                .filter(|mn| mn.masternode.tier == MasternodeTier::Free)
-            {
-                voters_set.insert(mn.masternode.address.clone());
-            }
-            let added_free = voters_set.len() - free_before;
-
-            let added_via_gossip = voters_set.len() - gossip_count_before;
-            if added_via_gossip > 0 {
-                tracing::debug!(
-                    "📊 Block {}: added {} gossip-active masternode(s) to bitmap ({} via free-tier eligibility)",
-                    next_height,
-                    added_via_gossip,
-                    added_free,
-                );
-            }
-
             let precommit_voters: Vec<String> = voters_set.into_iter().collect();
             if precommit_voters.is_empty() {
                 let all_active = self.masternode_registry.get_active_masternodes().await;
@@ -4005,20 +3971,6 @@ impl Blockchain {
                         .map(|mn| mn.masternode.address)
                         .collect();
                 }
-                // Always include eligible free-tier nodes in the fallback set.
-                let eligible_free = self
-                    .masternode_registry
-                    .get_eligible_pool_nodes(next_height)
-                    .await;
-                for mn in eligible_free
-                    .iter()
-                    .filter(|mn| mn.masternode.tier == MasternodeTier::Free)
-                {
-                    if !on_chain_voters.contains(&mn.masternode.address) {
-                        on_chain_voters.push(mn.masternode.address.clone());
-                    }
-                }
-
                 tracing::warn!(
                     "⚠️ No precommit voters for block {} — fallback to {} on-chain masternodes",
                     next_height - 1,
@@ -4052,18 +4004,13 @@ impl Blockchain {
             .get_active_from_bitmap(&active_bitmap)
             .await;
 
-        // All on-chain-registered active free-tier nodes are eligible for the free
-        // pool — derived from the full registry, not filtered through the bitmap.
-        // Filtering through the bitmap was circular: free nodes only got pool
-        // rewards if they were already in the bitmap, but they were never in the
-        // bitmap because they don't submit consensus votes.
-        let free_tier_registered: std::collections::HashSet<String> = self
-            .masternode_registry
-            .get_eligible_free_nodes(next_height)
-            .await
-            .into_iter()
+        // Free nodes that voted appear in the bitmap — that is the evidence of
+        // participation. Only bitmap-present free nodes are eligible for rewards.
+        let free_tier_registered: std::collections::HashSet<String> = active_bitmap_nodes
+            .iter()
+            .filter(|info| info.masternode.tier == MasternodeTier::Free)
             .filter(|info| self.is_masternode_registered(&info.masternode.address))
-            .map(|info| info.masternode.address)
+            .map(|info| info.masternode.address.clone())
             .collect();
 
         let fairness_map = self
@@ -6630,16 +6577,13 @@ impl Blockchain {
             ));
         }
 
-        // All on-chain-registered active free-tier nodes are eligible for the free
-        // pool — derived from the full registry, not filtered through the bitmap.
-        // Must match the producer's free_tier_registered computation exactly.
-        let free_tier_registered: std::collections::HashSet<String> = self
-            .masternode_registry
-            .get_eligible_free_nodes(block.header.height)
-            .await
-            .into_iter()
+        // Mirror the producer's free_tier_registered: bitmap is the evidence of
+        // voting. Only free nodes present in the decoded bitmap are eligible.
+        let free_tier_registered: std::collections::HashSet<String> = active_bitmap_nodes
+            .iter()
+            .filter(|info| info.masternode.tier == MasternodeTier::Free)
             .filter(|info| self.is_masternode_registered(&info.masternode.address))
-            .map(|info| info.masternode.address)
+            .map(|info| info.masternode.address.clone())
             .collect();
 
         let calc_input = crate::reward_calculator::RewardInput {
@@ -6679,34 +6623,95 @@ impl Blockchain {
                     ));
                 }
             }
-            // When the producer's bitmap capacity exceeds our registry size, the
-            // reward mismatch is caused by registry divergence (producer has more
-            // registered masternodes than we do, e.g. during AV40 upgrade transition).
-            // Treat this as a warning rather than a hard error to avoid blocking sync
-            // on a transitional registry state. Strict rejection is reserved for
-            // same-registry-size mismatches that indicate true reward manipulation.
+            // ── Disagreement investigation ─────────────────────────────────────
+            // Before rejecting: diagnose WHY we disagree with the producer. The
+            // common causes are: (a) registry divergence, (b) we are behind on
+            // height, (c) our UTXO set differs, (d) wrong version / stale node.
             let our_registry_size = self.masternode_registry.all_masternodes_cached().len();
             let bitmap_capacity = block.header.active_masternodes_bitmap.len() * 8;
+            let our_height = self.get_height();
+            let block_height = block.header.height;
+            let our_free_in_bitmap = active_bitmap_nodes
+                .iter()
+                .filter(|n| n.masternode.tier == crate::types::MasternodeTier::Free)
+                .count();
+
+            // Registry divergence: producer knew more nodes than we do.
             if bitmap_capacity > our_registry_size {
                 tracing::warn!(
-                    "⚠️ Block {} reward mismatch due to registry divergence \
+                    "⚠️ Block {} reward mismatch — registry divergence \
                      (our registry: {}, producer bitmap capacity: {}). \
-                     Discrepancies: {}. Accepting block — rewards normalize once all nodes upgrade.",
-                    block.header.height,
+                     Discrepancies: {}. Accepting — will normalize once registry syncs.",
+                    block_height,
                     our_registry_size,
                     bitmap_capacity,
                     diff.join("; "),
                 );
                 return Ok(());
             }
-            return Err(format!(
-                "Block {} reward manipulation: calculator expected {} recipients, \
-                 block has {} recipients. Discrepancies: {}",
-                block.header.height,
+
+            // Height lag: we may be behind and have a stale registry/UTXO set.
+            let height_lag = block_height.saturating_sub(our_height);
+            if height_lag > 0 {
+                tracing::warn!(
+                    "⚠️ Block {} reward disagreement — local node is {} block(s) behind \
+                     (our height: {}). Registry: {}, bitmap capacity: {}, \
+                     free-in-bitmap: {}. Node needs to sync before voting.",
+                    block_height,
+                    height_lag,
+                    our_height,
+                    our_registry_size,
+                    bitmap_capacity,
+                    our_free_in_bitmap,
+                );
+                // Behind-height node should not vote until caught up; accept the block
+                // so sync can continue rather than stalling on a reward check.
+                return Ok(());
+            }
+
+            // Same height, same registry size — UTXO state divergence or version
+            // mismatch. Trigger a reconciliation request so we can re-sync, then
+            // accept the block. This node will not appear in the next bitmap (no
+            // rewards) until it can produce matching results after reconciliation.
+            tracing::warn!(
+                "⚠️ Block {} reward disagreement — requesting UTXO reconciliation. \
+                 Our height: {}, registry: {}, bitmap capacity: {}, \
+                 free-in-bitmap: {}. \
+                 Expected {} recipients, block has {}. Discrepancies: {}. \
+                 This node will re-enter voting after reconciling its UTXO state.",
+                block_height,
+                our_height,
+                our_registry_size,
+                bitmap_capacity,
+                our_free_in_bitmap,
                 expected_norm.len(),
                 actual_norm.len(),
                 diff.join("; "),
-            ));
+            );
+            // Request a full UTXO snapshot from the producer so we can reconcile.
+            if let Some(registry) = self.get_peer_registry().await {
+                let block_hash = block.hash();
+                let msg = crate::network::message::NetworkMessage::RequestUtxoReconciliation {
+                    at_height: block_height,
+                    block_hash,
+                };
+                // Send to the block producer specifically (they have the correct state).
+                let producer_ip = producer_addr
+                    .split(':')
+                    .next()
+                    .unwrap_or(producer_addr)
+                    .to_string();
+                let registry_clone = registry.clone();
+                tokio::spawn(async move {
+                    if registry_clone.send_to_peer(&producer_ip, msg.clone()).await.is_err() {
+                        // Fall back to broadcast if direct send fails.
+                        registry_clone.broadcast(msg).await;
+                    }
+                });
+            }
+            // Accept the block — this node simply won't be in the next bitmap
+            // until UTXO reconciliation completes and it can vote correctly.
+            return Ok(());
         }
 
         tracing::debug!(

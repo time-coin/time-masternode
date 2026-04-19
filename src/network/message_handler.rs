@@ -1304,6 +1304,57 @@ impl MessageHandler {
                 Ok(None)
             }
 
+            // === UTXO reconciliation — lets out-of-sync nodes resync their UTXO state ===
+            NetworkMessage::RequestUtxoReconciliation { at_height, block_hash } => {
+                // Verify the requested block is on our chain before serving the snapshot.
+                let our_hash = context.blockchain.get_block_hash_at_height(*at_height).await;
+                if our_hash != Some(*block_hash) {
+                    debug!(
+                        "[{}] RequestUtxoReconciliation from {} — block hash mismatch at height {}, ignoring",
+                        self.direction, self.peer_ip, at_height
+                    );
+                    return Ok(None);
+                }
+                let utxos = context.blockchain.utxo_manager.list_all_utxos().await;
+                info!(
+                    "[{}] Serving UTXO reconciliation snapshot ({} UTXOs) to {} for height {}",
+                    self.direction,
+                    utxos.len(),
+                    self.peer_ip,
+                    at_height
+                );
+                Ok(Some(NetworkMessage::UtxoReconciliationResponse {
+                    at_height: *at_height,
+                    utxos,
+                }))
+            }
+
+            NetworkMessage::UtxoReconciliationResponse { at_height, utxos } => {
+                info!(
+                    "[{}] Received UTXO reconciliation snapshot from {} — {} UTXOs at height {}. Applying…",
+                    self.direction,
+                    self.peer_ip,
+                    utxos.len(),
+                    at_height
+                );
+                let mut applied = 0usize;
+                for utxo in utxos {
+                    // Only add UTXOs we don't already have — don't overwrite local finalized state.
+                    let outpoint = utxo.outpoint.clone();
+                    if context.blockchain.utxo_manager.get_utxo(&outpoint).await.is_err() {
+                        if context.blockchain.utxo_manager.add_utxo(utxo.clone()).await.is_ok() {
+                            applied += 1;
+                        }
+                    }
+                }
+                info!(
+                    "[{}] UTXO reconciliation complete — applied {} new UTXOs from {}. \
+                     Node will re-enter voting on next round.",
+                    self.direction, applied, self.peer_ip
+                );
+                Ok(None)
+            }
+
             // === Messages not handled here ===
             _ => {
                 debug!(
