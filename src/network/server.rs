@@ -1882,19 +1882,24 @@ async fn handle_peer(
 
                                     // AV41: ghost special_data guard.  The attacker crafts a TX
                                     // with 0 inputs, 0 outputs, and a MasternodeRegistration
-                                    // special_data carrying empty/garbage fields.  This satisfies
-                                    // is_masternode_reg() and bypasses the null-TX guard above
-                                    // (special_data.is_some() → guard evaluates false).  We apply
-                                    // the same relay-safe finality-injection tracking so innocent
-                                    // relay nodes are not penalised.
+                                    // special_data carrying valid-format but forge-signed fields.
+                                    // We verify the Ed25519 signature within the special_data so
+                                    // format-valid but cryptographically invalid TXs are rejected.
                                     if tx.inputs.is_empty() && tx.outputs.is_empty() {
-                                        let field_err = tx.special_data.as_ref().map_or(
-                                            true, // no special_data — already caught above, belt-and-suspenders
-                                            |sd| sd.validate_fields().is_err(),
+                                        let sig_ok = tx.special_data.as_ref().map_or(
+                                            false, // no special_data — null TX caught above
+                                            |sd| {
+                                                if sd.validate_fields().is_err() {
+                                                    return false;
+                                                }
+                                                // Verify the embedded Ed25519 signature so
+                                                // format-valid but forged TXs are rejected.
+                                                sd.verify_signature().is_ok()
+                                            },
                                         );
-                                        if field_err {
+                                        if !sig_ok {
                                             tracing::debug!(
-                                                "🗑️ Ghost special_data TX {} via TransactionFinalized from {} — dropped (AV41)",
+                                                "🗑️ Ghost/forged special_data TX {} via TransactionFinalized from {} — dropped (AV41)",
                                                 hex::encode(*txid), peer.addr
                                             );
                                             if let Some(ref ai) = ai_system {

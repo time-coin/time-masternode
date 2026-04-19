@@ -249,6 +249,68 @@ impl SpecialTransactionData {
             }
         }
     }
+
+    /// Cryptographic signature verification for 0-input/0-output special TXs.
+    ///
+    /// Used in the TransactionFinalized handler to reject format-valid but
+    /// forged TXs (AV41 extension). Mirrors the message formats from
+    /// masternode_registry.rs so the verifier is consistent with the signer.
+    pub fn verify_signature(&self) -> Result<(), &'static str> {
+        use ed25519_dalek::Verifier;
+        match self {
+            SpecialTransactionData::MasternodeRegistration {
+                node_address,
+                wallet_address,
+                collateral_outpoint,
+                pubkey,
+                signature,
+                ..
+            } => {
+                let pk_bytes = hex::decode(pubkey).map_err(|_| "invalid pubkey hex")?;
+                let pk_arr: [u8; 32] = pk_bytes.try_into().map_err(|_| "pubkey must be 32 bytes")?;
+                let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk_arr)
+                    .map_err(|_| "invalid Ed25519 pubkey")?;
+                let sig_bytes = hex::decode(signature).map_err(|_| "invalid sig hex")?;
+                let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| "sig must be 64 bytes")?;
+                let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+                let collateral = if collateral_outpoint.is_empty() { "none" } else { collateral_outpoint.as_str() };
+                let msg = format!("MNREG:{}:{}:{}:{}", node_address, wallet_address, pubkey, collateral);
+                vk.verify(msg.as_bytes(), &sig).map_err(|_| "MasternodeRegistration signature invalid")
+            }
+            SpecialTransactionData::MasternodeDeregistration {
+                node_address,
+                slot_id,
+                pubkey,
+                signature,
+            } => {
+                let pk_bytes = hex::decode(pubkey).map_err(|_| "invalid pubkey hex")?;
+                let pk_arr: [u8; 32] = pk_bytes.try_into().map_err(|_| "pubkey must be 32 bytes")?;
+                let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk_arr)
+                    .map_err(|_| "invalid Ed25519 pubkey")?;
+                let sig_bytes = hex::decode(signature).map_err(|_| "invalid sig hex")?;
+                let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| "sig must be 64 bytes")?;
+                let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+                let msg = format!("MNDEREG:{}:{}", node_address, slot_id);
+                vk.verify(msg.as_bytes(), &sig).map_err(|_| "MasternodeDeregistration signature invalid")
+            }
+            SpecialTransactionData::MasternodePayoutUpdate {
+                node_address,
+                new_reward_address,
+                pubkey,
+                signature,
+            } => {
+                let pk_bytes = hex::decode(pubkey).map_err(|_| "invalid pubkey hex")?;
+                let pk_arr: [u8; 32] = pk_bytes.try_into().map_err(|_| "pubkey must be 32 bytes")?;
+                let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk_arr)
+                    .map_err(|_| "invalid Ed25519 pubkey")?;
+                let sig_bytes = hex::decode(signature).map_err(|_| "invalid sig hex")?;
+                let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| "sig must be 64 bytes")?;
+                let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+                let msg = format!("MNPAYOUT:{}:{}", node_address, new_reward_address);
+                vk.verify(msg.as_bytes(), &sig).map_err(|_| "MasternodePayoutUpdate signature invalid")
+            }
+        }
+    }
 }
 
 /// On-chain record for a registered masternode (any tier).
