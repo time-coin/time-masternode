@@ -1315,12 +1315,20 @@ async fn handle_peer(
                             tracing::debug!("🔌 Connection from {} ended before handshake: {}", peer.addr, e);
                         }
                         // Pre-handshake oversized frame: trivial 4-byte DoS — penalise.
-                        // Post-handshake: the peer completed our protocol handshake, so it is
-                        // a legitimate TIME node. A large frame after handshake most likely
-                        // means the peer is running older code with different frame-size limits
-                        // or a TLS/plaintext framing mismatch.  Recording a violation would
-                        // ban a peer we need for sync/fork-resolution.
-                        if e.contains("Frame too large") && !handshake_done {
+                        // Post-handshake frames > 100 MB are clearly malicious (e.g. 926 MB
+                        // frames from fork-attack peers); penalise those too. Smaller
+                        // post-handshake overflows may be a framing mismatch with older nodes
+                        // and are not penalised so we don't ban legitimate sync peers.
+                        const MALICIOUS_FRAME_BYTES: u64 = 100 * 1024 * 1024; // 100 MB
+                        let is_large_frame = e.contains("Frame too large");
+                        let frame_bytes: Option<u64> = if is_large_frame {
+                            e.split_whitespace()
+                                .find_map(|w| w.trim_end_matches("bytes").trim_end_matches(':').parse::<u64>().ok())
+                        } else {
+                            None
+                        };
+                        let clearly_malicious = frame_bytes.map_or(false, |b| b > MALICIOUS_FRAME_BYTES);
+                        if is_large_frame && (!handshake_done || clearly_malicious) {
                             blacklist.write().await.record_violation(
                                 ip,
                                 &format!("Oversized frame header: {}", e),

@@ -9993,6 +9993,17 @@ impl Blockchain {
                                     && supporting >= MIN_PEERS_FINALITY_ESCAPE
                                     && total_ahead > 0;
 
+                                // WHITELISTED PEER ESCAPE: if the peer that delivered the
+                                // alternative chain is operator-whitelisted, bypass the peer
+                                // registry count requirement. The registry scan runs AFTER the
+                                // peer may have disconnected (e.g. oversized-frame disconnect),
+                                // yielding supporting=0 / total_ahead=0 and stalling convergence
+                                // indefinitely. A short 10s grace period prevents instant
+                                // override on the very first resolution cycle.
+                                let whitelisted_peer_escape = peer_tip_height > our_height
+                                    && blocked_secs >= 10
+                                    && registry.is_whitelisted(&peer_addr).await;
+
                                 if same_height_consensus_override {
                                     warn!(
                                         "⚠️  SAME-HEIGHT MINORITY FORK: {}/{} peers confirm \
@@ -10030,11 +10041,21 @@ impl Blockchain {
                                         common_ancestor, blocked_secs,
                                         supporting, total_ahead, common_ancestor
                                     );
+                                } else if whitelisted_peer_escape {
+                                    warn!(
+                                        "⚠️  WHITELISTED PEER ESCAPE: {} is operator-whitelisted and \
+                                         delivered a longer valid chain ({} > {}). Finality lock \
+                                         blocked ancestor {} for {}s. Bypassing peer count requirement \
+                                         and resetting finality lock to rejoin canonical chain.",
+                                        peer_addr, peer_tip_height, our_height,
+                                        common_ancestor, blocked_secs
+                                    );
                                 }
                                 same_height_consensus_override
                                     || normal_override
                                     || longer_chain_escape
                                     || escape_override
+                                    || whitelisted_peer_escape
                             } else {
                                 false
                             };
