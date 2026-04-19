@@ -620,7 +620,8 @@ impl TransactionPool {
                 }
                 match &tx.special_data {
                     None => true, // pure null TX
-                    Some(sd) => sd.validate_fields().is_err(),
+                    // Reject if field format invalid OR signature doesn't verify
+                    Some(sd) => sd.validate_fields().is_err() || sd.verify_signature().is_err(),
                 }
             })
             .map(|e| *e.key())
@@ -651,7 +652,8 @@ impl TransactionPool {
                 }
                 match &tx.special_data {
                     None => true,
-                    Some(sd) => sd.validate_fields().is_err(),
+                    // Reject if field format invalid OR signature doesn't verify
+                    Some(sd) => sd.validate_fields().is_err() || sd.verify_signature().is_err(),
                 }
             })
             .map(|e| *e.key())

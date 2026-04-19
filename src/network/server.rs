@@ -492,13 +492,13 @@ impl NetworkServer {
             tracing::info!("🔍 Collateral audit sweep started (5-minute interval)");
         }
 
-        // AV41: Ghost transaction mempool sweep — runs every 5 minutes.
-        // Catches any ghost TXs (0 inputs, 0 outputs, invalid/no special_data) that
-        // slipped in before the fix was deployed or via a race with the guard.
+        // AV41: Ghost transaction mempool sweep — runs every 60 seconds.
+        // Catches any ghost TXs (0 inputs, 0 outputs, invalid or forged special_data)
+        // that slipped in before the fix was deployed or via a race with the guard.
         {
             let ghost_consensus = self.consensus.clone();
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300));
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
                 loop {
                     interval.tick().await;
                     let removed = ghost_consensus.tx_pool.purge_ghost_transactions();
