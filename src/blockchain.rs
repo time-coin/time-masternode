@@ -3685,6 +3685,27 @@ impl Blockchain {
                 continue;
             }
 
+            // Ghost TX guard: 0-input/0-output TXs must either carry a
+            // cryptographically valid special_data payload (masternode reg/dereg)
+            // or be evicted before block inclusion. This is the last line of
+            // defence — the TransactionFinalized handler already rejects forged
+            // TXs via verify_signature(), but any that leaked in before that fix
+            // are caught here (AV41).
+            if tx.inputs.is_empty() && tx.outputs.is_empty() {
+                let ok = tx.special_data.as_ref().map_or(false, |sd| {
+                    sd.validate_fields().is_ok() && sd.verify_signature().is_ok()
+                });
+                if !ok {
+                    tracing::warn!(
+                        "🗑️ Block {}: Evicting ghost/forged TX {} from finalized pool (AV41)",
+                        next_height, hex::encode(txid)
+                    );
+                    evict_txids.push(txid);
+                    ds_invalid_count += 1;
+                    continue;
+                }
+            }
+
             // Validate input UTXOs exist and are in a spent state (SpentFinalized/SpentPending/Locked).
             // If inputs are Unspent or missing, the TX was cleared/reverted — evict from pool.
             let mut inputs_valid = true;
