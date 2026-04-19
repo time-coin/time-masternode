@@ -5,7 +5,7 @@
 **Version:** 1.4  
 **Audit Scope:** Full system security analysis against known cryptocurrency vulnerabilities + Bitcoin development insights  
 **Last Verification:** April 19, 2026  
-**Last Updated:** April 19, 2026 — AV47–AV48 added (Section 15.24–15.25); cross-chain replay protection (AV-REPLAY) implemented in v1.5.0, activating at block 1000
+**Last Updated:** April 19, 2026 — AV47–AV48 added (Section 15.24–15.25); AV49 added (Section 15.26): deregistration spam flood; cross-chain replay protection (AV-REPLAY) implemented in v1.5.0, activating at block 1000
 
 ---
 
@@ -18,7 +18,7 @@ This document provides a comprehensive security analysis of TimeCoin against all
 ### Key Findings
 - ✅ **22 attack vectors fully mitigated** (+6 from April 2026 mainnet findings)
 - ✅ **24 attack vectors fully mitigated** (+2 from April 16, 2026: AV40 + AV41)
-- ✅ **31 attack vectors fully mitigated** (+2 from April 19, 2026: AV47–AV48)
+- ✅ **32 attack vectors fully mitigated** (+3 from April 19, 2026: AV47–AV49)
 - ⚠️ **4 attack vectors with recommended enhancements**
 - ❌ **0 critical vulnerabilities**
 - 🟢 **Already 2106-safe** (ahead of Bitcoin's uint32 → uint64 migration)
@@ -1724,6 +1724,26 @@ Applied at all four enforcement points:
 | AV46 | Whitelisted-peer-exclusive sync bypass | Medium | ✅ Fixed |
 | AV47 | Ghost TX mempool sync injection (MempoolSyncResponse bypass) | High | ✅ Fixed |
 | AV48 | Ghost TX fresh-keypair address-binding bypass (Phase 3) | High | ✅ Fixed |
+| AV49 | Deregistration spam flood — multiple dereg TXs for same slot in one block | High | ✅ Fixed |
+
+### 15.26 ✅ FIXED — Deregistration Spam Flood (AV49)
+
+**Observed:** Block 710 on LW-Arizona (April 19, 2026) contained **50+ `MasternodeDeregistration` transactions all targeting the same slot** (`64.91.248.55`, slot `659724`). Each had a unique txid but identical target. The block was accepted and all 50 deregistrations were applied redundantly, wasting processing time and registry state operations.
+
+**Root Cause:** No deduplication existed at any layer — mempool, block assembly, or block processing — to prevent multiple deregistration transactions for the same slot entering the same block.
+
+**Impact:**
+- Block space exhaustion: 50+ wasted transactions crowd out legitimate TXs
+- Registry thrashing: each deregistration triggers sled writes and gossip
+- Can be used to grief specific masternodes by cycling deregister/re-register rapidly
+- Contributes to registry divergence across nodes (different nodes apply different subsets)
+
+**Fix Applied (three layers):**
+1. **Mempool** (`transaction_pool.rs`): `add_pending_with_submitter()` rejects a deregistration TX if the pending pool already contains one for the same `slot_id`. Returns `PoolError::AlreadyExists`.
+2. **Block assembly** (`blockchain.rs`): Before the size-cap pass, `retain()` removes all but the first deregistration per `slot_id` from the finalized TX list.
+3. **Block processing** (`blockchain.rs`): `process_special_transactions()` tracks `seen_dereg_slots: HashSet<u32>`; duplicate slot entries are logged as AV49 and skipped.
+
+**Also fixed (related observation):** `64.118.156.97` induced a bad reorg on Arizona at height 710 using the hash tiebreaker, placing Arizona on a minority fork. Arizona was recovered via `rollbacktoheight 709`.
 
 **Observed (April 8 watchdog log):**
 ```

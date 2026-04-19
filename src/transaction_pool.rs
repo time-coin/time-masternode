@@ -171,6 +171,22 @@ impl TransactionPool {
             return Err(PoolError::AlreadyExists);
         }
 
+        // AV49: reject duplicate deregistration for the same slot_id — only one
+        // deregistration per slot is meaningful; flooding the pool with duplicates
+        // wastes space and is used to exhaust block capacity.
+        if let Some(crate::types::SpecialTransactionData::MasternodeDeregistration { slot_id, .. }) = &tx.special_data {
+            let slot = *slot_id;
+            let duplicate = self.pending.iter().any(|e| {
+                matches!(
+                    &e.value().tx.special_data,
+                    Some(crate::types::SpecialTransactionData::MasternodeDeregistration { slot_id: s, .. }) if *s == slot
+                )
+            });
+            if duplicate {
+                return Err(PoolError::AlreadyExists);
+            }
+        }
+
         // Fast path: Check if previously rejected
         if self.rejected.contains_key(&txid) {
             return Err(PoolError::PreviouslyRejected);

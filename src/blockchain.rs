@@ -3807,6 +3807,21 @@ impl Blockchain {
             );
         }
 
+        // AV49: dedup deregistrations — keep only the first TX per slot_id.
+        {
+            use std::collections::HashSet;
+            let mut seen_dereg_slots: HashSet<u32> = HashSet::new();
+            valid_finalized_with_fees.retain(|(tx, _)| {
+                if let Some(crate::types::SpecialTransactionData::MasternodeDeregistration { slot_id, .. }) = &tx.special_data {
+                    if !seen_dereg_slots.insert(*slot_id) {
+                        tracing::warn!("✂️  Block {}: Dropping duplicate deregistration for slot {} (AV49)", next_height, slot_id);
+                        return false;
+                    }
+                }
+                true
+            });
+        }
+
         // Size-cap: ensure the assembled block fits within MAX_BLOCK_ASSEMBLY_SIZE.
         // Reserve 32KB for block header, masternode rewards, coinbase tx, and bincode framing.
         // Transactions are already sorted by canonical order, so we simply truncate the tail.
@@ -5936,8 +5951,15 @@ impl Blockchain {
     /// and apply them to the masternode registry.
     async fn process_special_transactions(&self, block: &Block) -> SpecialTxUndoRecord {
         use crate::types::SpecialTransactionData;
+        use std::collections::HashSet;
 
         let mut undo = SpecialTxUndoRecord::default();
+        // AV49: deduplicate deregistrations within a block — only the first
+        // deregistration for a given slot_id is applied; subsequent ones are
+        // silently skipped. An attacker flooding a block with 50+ deregistrations
+        // for the same slot would otherwise waste processing and could be used to
+        // manipulate registry state across a reorg.
+        let mut seen_dereg_slots: HashSet<u32> = HashSet::new();
 
         for tx in &block.transactions {
             let special = match &tx.special_data {
@@ -5997,6 +6019,14 @@ impl Blockchain {
                     pubkey,
                     signature,
                 } => {
+                    // AV49: skip duplicate deregistrations for the same slot in this block
+                    if !seen_dereg_slots.insert(*slot_id) {
+                        tracing::warn!(
+                            "⚠️ [AV49] Duplicate MasternodeDeregistration for slot {} in block {} — skipped (tx {})",
+                            slot_id, block.header.height, &txid_hex[..16]
+                        );
+                        continue;
+                    }
                     match self
                         .masternode_registry
                         .apply_masternode_deregistration(
