@@ -5,7 +5,7 @@
 **Version:** 1.4  
 **Audit Scope:** Full system security analysis against known cryptocurrency vulnerabilities + Bitcoin development insights  
 **Last Verification:** April 19, 2026  
-**Last Updated:** April 19, 2026 — AV47–AV48 added (Section 15.24–15.25): ghost TX mempool sync injection and fresh-keypair address-binding bypass; cross-chain replay protection added to planned v2.0 upgrades
+**Last Updated:** April 19, 2026 — AV47–AV48 added (Section 15.24–15.25); cross-chain replay protection (AV-REPLAY) implemented in v1.5.0, activating at block 1000
 
 ---
 
@@ -1809,7 +1809,7 @@ Applied at all four enforcement points:
 | **Double Block Rewards** | ✅ Fixed | 🟢 Low | Strict validation (Jan 19, 2026) |
 | **Hash Collision** | ✅ Secure | 🟢 Low | SHA256 collision-resistant |
 | **Quantum Computing** | ⚠️ Future Risk | 🟡 Medium | Industry-standard, 10-20 year horizon |
-| **Cross-Chain Replay** | ✅ Mitigated | 🟢 Low | Chain-ID binding |
+| **Cross-Chain Replay** | ✅ Fixed (v1.5.0) | 🟢 Low | CHAIN_ID in v2 signing message; activates at block 1000 |
 | **Governance Capture** | ⚠️ Partial | 🟡 Medium | Plutocracy risk (whale dominance) |
 | **Bribery/Vote Buying** | ⚠️ Monitoring | 🟡 Medium | Hard to prevent technically |
 | **Inflation** | ✅ Impossible | 🟢 Low | Strict supply enforcement |
@@ -1935,14 +1935,13 @@ Applied at all four enforcement points:
    - **Status:** Should be added to CI/CD pipeline
 
 ### 🟢 LOW PRIORITY (FUTURE ENHANCEMENTS)
-6. **Cross-Chain Replay Protection (Planned v2.0 Protocol Upgrade)**
-   - **Background:** The `Transaction` struct does not include `chain_id` in its signed bytes. Protocol-level messages (`TimeVote`, `GovernanceProposal`, etc.) already include `chain_id=1`, but base transactions do not. If a persistent chain split ever occurs, a transaction signed on one chain would be cryptographically valid on the other.
-   - **Threat model:** Does NOT allow creating coins from nothing. An attacker could spend pre-fork UTXOs (coins they legitimately owned before the fork) on both chains simultaneously. Post-fork UTXOs are already rejected by the mainnet UTXO set (`"UTXO not found"`), so the amassing-coins-on-a-fork scenario is already mitigated.
-   - **Why not fixable without a consensus change:** Replay protection requires embedding chain-specific data inside the signed message. Any relay-layer-only approach can be bypassed by submitting to a node that doesn't enforce it, causing consensus divergence.
-   - **Fix:** Add `CHAIN_ID` (mainnet=1) to `Transaction`'s signing hash as a prefix. Any fork would be assigned a new chain_id before diverging.
-   - **Current risk:** Negligible — no persistent fork has occurred; this is not a PoW chain where forks are cheap to sustain; TimeGuard and fork choice rules make lasting splits very hard.
-   - **Action:** Schedule as a flag-day upgrade in v2.0. Assign `chain_id=2` to any future intentional fork before it diverges. No immediate action required.
-   - Estimated effort: 1 day implementation + coordinated network upgrade
+6. **Cross-Chain Replay Protection — ✅ Implemented in v1.5.0, activates at block 1000**
+   - **Background:** Base transactions did not include `chain_id` in their signed bytes, meaning a transaction signed on one chain was cryptographically valid on any fork sharing the same genesis.
+   - **Threat model:** Does NOT allow creating coins from nothing. An attacker could spend pre-fork UTXOs on both chains simultaneously. Post-fork UTXOs are already rejected by the mainnet UTXO set (`"UTXO not found"`).
+   - **Fix implemented:** Transaction `version >= 2` uses a new signing message format: `CHAIN_ID(4 bytes LE) || txid || input_index || outputs_hash`. `CHAIN_ID = 1` for mainnet. Any future intentional fork must be assigned a distinct chain_id before diverging.
+   - **Activation mechanism:** All value-transfer transactions (non-empty inputs) in blocks at height ≥ 1000 must have `version >= 2`. v1 transactions are evicted at block assembly. Special/coinbase transactions (no inputs) are exempt.
+   - **Upgrade path:** All operators must upgrade to v1.5.0 before block 1000 (~2.8 days from April 19, 2026). Upgrade notifications sent to all newsletter subscribers. Nodes that do not upgrade will fork off the canonical chain at block 1000.
+   - **Files:** `src/constants.rs` (`CHAIN_ID`, `REPLAY_PROTECTION_ACTIVATION_HEIGHT`), `src/consensus.rs` (`compute_signing_message`), `src/blockchain.rs` (block assembly eviction), `src/rpc/handler.rs` (v2 transaction creation)
 
 7. **Post-Quantum Cryptography**
    - Add hybrid signatures (Ed25519 + PQC)
