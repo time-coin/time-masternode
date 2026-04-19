@@ -3940,12 +3940,32 @@ impl Blockchain {
             for mn in &gossip_active {
                 voters_set.insert(mn.masternode.address.clone());
             }
+
+            // Free-tier nodes don't submit TimeVote consensus votes — their
+            // "participation" is running a reachable node (gossip-active within
+            // the extended 15-min window used by get_eligible_pool_nodes).
+            // Without this, the free pool always rolls up to the producer because
+            // no free nodes ever appear in the vote-based voter set.
+            let pool_eligible = self
+                .masternode_registry
+                .get_eligible_pool_nodes(next_height)
+                .await;
+            let free_before = voters_set.len();
+            for mn in pool_eligible
+                .iter()
+                .filter(|mn| mn.masternode.tier == MasternodeTier::Free)
+            {
+                voters_set.insert(mn.masternode.address.clone());
+            }
+            let added_free = voters_set.len() - free_before;
+
             let added_via_gossip = voters_set.len() - gossip_count_before;
             if added_via_gossip > 0 {
                 tracing::debug!(
-                    "📊 Block {}: added {} gossip-active masternode(s) to bitmap",
+                    "📊 Block {}: added {} gossip-active masternode(s) to bitmap ({} via free-tier eligibility)",
                     next_height,
                     added_via_gossip,
+                    added_free,
                 );
             }
 
@@ -3985,6 +4005,19 @@ impl Blockchain {
                         .map(|mn| mn.masternode.address)
                         .collect();
                 }
+                // Always include eligible free-tier nodes in the fallback set.
+                let eligible_free = self
+                    .masternode_registry
+                    .get_eligible_pool_nodes(next_height)
+                    .await;
+                for mn in eligible_free
+                    .iter()
+                    .filter(|mn| mn.masternode.tier == MasternodeTier::Free)
+                {
+                    if !on_chain_voters.contains(&mn.masternode.address) {
+                        on_chain_voters.push(mn.masternode.address.clone());
+                    }
+                }
 
                 tracing::warn!(
                     "⚠️ No precommit voters for block {} — fallback to {} on-chain masternodes",
@@ -4019,12 +4052,18 @@ impl Blockchain {
             .get_active_from_bitmap(&active_bitmap)
             .await;
 
-        // Build on-chain-registered Free-tier set (mirrors validate_pool_distribution).
-        let free_tier_registered: std::collections::HashSet<String> = active_bitmap_nodes
-            .iter()
-            .filter(|info| info.masternode.tier == MasternodeTier::Free)
+        // All on-chain-registered active free-tier nodes are eligible for the free
+        // pool — derived from the full registry, not filtered through the bitmap.
+        // Filtering through the bitmap was circular: free nodes only got pool
+        // rewards if they were already in the bitmap, but they were never in the
+        // bitmap because they don't submit consensus votes.
+        let free_tier_registered: std::collections::HashSet<String> = self
+            .masternode_registry
+            .get_eligible_free_nodes(next_height)
+            .await
+            .into_iter()
             .filter(|info| self.is_masternode_registered(&info.masternode.address))
-            .map(|info| info.masternode.address.clone())
+            .map(|info| info.masternode.address)
             .collect();
 
         let fairness_map = self
@@ -6591,12 +6630,16 @@ impl Blockchain {
             ));
         }
 
-        // Build the on-chain-registered Free-tier set (all registered = eligible).
-        let free_tier_registered: std::collections::HashSet<String> = active_bitmap_nodes
-            .iter()
-            .filter(|info| info.masternode.tier == MasternodeTier::Free)
+        // All on-chain-registered active free-tier nodes are eligible for the free
+        // pool — derived from the full registry, not filtered through the bitmap.
+        // Must match the producer's free_tier_registered computation exactly.
+        let free_tier_registered: std::collections::HashSet<String> = self
+            .masternode_registry
+            .get_eligible_free_nodes(block.header.height)
+            .await
+            .into_iter()
             .filter(|info| self.is_masternode_registered(&info.masternode.address))
-            .map(|info| info.masternode.address.clone())
+            .map(|info| info.masternode.address)
             .collect();
 
         let calc_input = crate::reward_calculator::RewardInput {
