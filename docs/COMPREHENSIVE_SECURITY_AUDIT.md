@@ -4,8 +4,8 @@
 **Date:** January 23, 2026  
 **Version:** 1.4  
 **Audit Scope:** Full system security analysis against known cryptocurrency vulnerabilities + Bitcoin development insights  
-**Last Verification:** April 16, 2026  
-**Last Updated:** April 16, 2026 — AV40 added (Section 15.17): `tx_finalized` rate-limit saturation without peer escalation
+**Last Verification:** April 19, 2026  
+**Last Updated:** April 19, 2026 — AV42–AV46 added (Section 15.19–15.23): coordinated multi-vector attack observed on mainnet
 
 ---
 
@@ -18,6 +18,7 @@ This document provides a comprehensive security analysis of TimeCoin against all
 ### Key Findings
 - ✅ **22 attack vectors fully mitigated** (+6 from April 2026 mainnet findings)
 - ✅ **24 attack vectors fully mitigated** (+2 from April 16, 2026: AV40 + AV41)
+- ✅ **29 attack vectors fully mitigated** (+5 from April 19, 2026: AV42–AV46)
 - ⚠️ **4 attack vectors with recommended enhancements**
 - ❌ **0 critical vulnerabilities**
 - 🟢 **Already 2106-safe** (ahead of Bitcoin's uint32 → uint64 migration)
@@ -1522,35 +1523,135 @@ if tx_finalized_excess_streak >= 5 {
 
 ### 15.18 ✅ FIXED — Ghost Special_data Transaction Mempool Flood (AV41)
 
-**Status:** **FIXED** (v1.4.37)
-**Severity:** Medium — mempool resource exhaustion; ghost TXs occupy slots indefinitely
+**Status:** **FIXED** (v1.4.37, extended v1.4.38)
+**Severity:** High — mempool resource exhaustion + fork induction via block hash divergence
 
-**Attack:** The attacker crafts transactions with 0 inputs, 0 outputs, and a `special_data` field set to `Some(MasternodeRegistration { node_address: "", pubkey: "garbage", ... })`. These TXs:
-1. Pass the AV39 null-TX guard (which only drops when `special_data.is_none()`)
-2. Pass `process_transaction()` via the special-TX early return (`is_masternode_reg()` → `return Ok(0)` — skips all fee/value checks)
-3. Enter the mempool as ghost entries that can never be mined and never expire
+**Attack (Phase 1 — April 16, 2026):** Attacker crafts TXs with 0 inputs, 0 outputs, and `special_data` set to `Some(MasternodeRegistration { empty fields })`. These passed the AV39 null-TX guard (`special_data.is_none()` = false) and entered the mempool permanently.
 
-**Observed attack (April 16, 2026 — dashboard):**
-- 71 pending + 71 finalized ghost TXs occupying the mempool
-- All showed 0.00 TIME amount, 0.00 fee, 0 inputs, 0 outputs, ~331 bytes (fake special_data)
-- Age: several minutes — persisted across gossip cleanup cycles with no eviction
+**Attack (Phase 2 — April 19, 2026):** After format validation was added, attackers evolved to craft TXs with **valid-format but cryptographically forged** signatures — correct pubkey length, valid IP:port format, non-empty fields, but a signature that does not verify. These passed `validate_fields()` and re-entered the mempool. With 35 ghost TXs in the finalized pool, they were being included in blocks, causing different nodes to produce blocks with different hashes (fork induction without mining a competing chain).
 
-**Root cause (two paths):**
-1. `process_transaction()` in `consensus.rs`: `is_masternode_reg() || is_masternode_dereg()` triggers an unconditional `return Ok(0)` before any field validation. A TX with a structurally valid (deserializable) but semantically empty `MasternodeRegistration` bypasses all economic checks.
-2. `TransactionFinalized` AV38 unknown-TX path in `server.rs`: calls `tx_pool.add_pending()` directly. The AV39 null-TX guard checks `special_data.is_none()`, which is false for ghost special_data TXs — so they also bypass this path.
+**Observed attack (April 19, 2026):**
+- 35 finalized ghost TXs in pool, all 0.00 TIME, 0 fee, ~270 bytes (valid-format fake special_data)
+- Ghost TXs surviving the periodic sweep (which only checked `validate_fields()`, not signatures)
+- Ghost TXs included in block 589, visible in explorer as `(coinbase)` / `(no outputs)` entries
 
-**Fixes Applied:**
-- **`SpecialTransactionData::validate_fields()`** (new method in `types.rs`): checks that all required string fields are non-empty, `pubkey` is exactly 64 hex chars (32-byte Ed25519), and `node_address` contains `:` (IP:port format). Returns `Err(&'static str)` on failure.
-- **`process_transaction()` guard** (`consensus.rs`): before `return Ok(0)` for masternode TXs, calls `sd.validate_fields()`. Invalid fields → `Err("Invalid special_data fields (AV41): ...")` → TX rejected from mempool entry.
-- **AV38 handler guard** (`server.rs`): after the null-TX guard, added a second check for `inputs.is_empty() && outputs.is_empty()` — if `special_data.is_none()` OR `validate_fields()` fails, drop the TX and call `record_finality_injection()` (relay-safe AI escalation).
-- **`TransactionPool::purge_ghost_transactions()`** (new method in `transaction_pool.rs`): sweeps both pending and confirmed pools, removes any TX with 0 inputs, 0 outputs, and invalid/no special_data. Runs at startup (after mempool restore) and every 5 minutes via a dedicated periodic task in `server.rs`.
+**Root cause of Phase 2:** `purge_ghost_transactions()` and the `TransactionFinalized` guard both called only `validate_fields()` (format check) — not `verify_signature()` (crypto check). The block assembly loop's UTXO input check also silently skipped 0-input TXs since the validation loop body never executed.
+
+**All Fixes Applied:**
+- **`SpecialTransactionData::validate_fields()`** (`types.rs`): format check — non-empty strings, 64-hex pubkey, IP:port format.
+- **`SpecialTransactionData::verify_signature()`** (`types.rs`, new in v1.4.38): full Ed25519 signature verification using the embedded pubkey and canonical message format (mirrors `masternode_registry.rs`). Covers `MasternodeRegistration`, `MasternodeDeregistration`, `MasternodePayoutUpdate`.
+- **`TransactionFinalized` handler** (`server.rs`): 0-input/0-output TXs must pass both `validate_fields()` AND `verify_signature()` before pool admission.
+- **`purge_ghost_transactions()`** (`transaction_pool.rs`): extended to also call `verify_signature()` — catches forged-signature TXs already in the pool. Sweep interval reduced from 5 minutes to 60 seconds.
+- **Block assembly guard** (`blockchain.rs`): 0-input/0-output TXs evicted from the finalized pool before block inclusion unless `validate_fields()` + `verify_signature()` both pass. Prevents ghost TXs from ever reaching a block regardless of how they entered the pool.
+- **Startup purge** (`main.rs`): runs extended purge on mempool restore, clearing any TXs that persisted from before the fix.
+
+**Why ghost TXs cause forks:** Different nodes accumulate different ghost TX sets. When a block producer includes ghost TXs from its finalized pool, nodes missing those TXs produce a different block hash at the same height, triggering fork resolution storms without the attacker needing to mine anything.
 
 **Code References:**
-- `src/types.rs` — `SpecialTransactionData::validate_fields()`
-- `src/consensus.rs` — `process_transaction()` AV41 guard (before special-TX early return)
-- `src/network/server.rs` — AV38 handler ghost special_data guard + periodic sweep task
-- `src/transaction_pool.rs` — `purge_ghost_transactions()`
-- `src/main.rs` — startup ghost purge after mempool restore
+- `src/types.rs` — `SpecialTransactionData::validate_fields()`, `verify_signature()`
+- `src/consensus.rs` — `process_transaction()` AV41 guard
+- `src/network/server.rs` — `TransactionFinalized` guard + periodic sweep (60s)
+- `src/transaction_pool.rs` — `purge_ghost_transactions()` (signature-aware)
+- `src/blockchain.rs` — block assembly ghost TX eviction gate
+- `src/main.rs` — startup ghost purge
+
+---
+
+### 15.19 ✅ FIXED — Finality Lock Whitelist Bypass via Post-Block-Delivery Disconnect (AV42)
+
+**Status:** **FIXED** (v1.4.38)
+**Severity:** High — permanently strands nodes on minority forks despite valid whitelisted peer delivering correct chain
+
+**Attack:** When a whitelisted peer delivers a longer valid chain during fork resolution, it may disconnect immediately after (e.g., due to a separate oversized-frame attack — see AV43). The finality lock's peer count scan runs after disconnection, finds `supporting=0` and `total_ahead=0`, and fails all escape conditions. The node remains locked on its minority fork indefinitely. All subsequent sync attempts from the same whitelisted peer repeat this race.
+
+**Observed attack (April 19, 2026):**
+```
+✅ Fork: ACCEPT 50.28.107.33 — longer chain (586 > ours 583)
+✅ Chain validation passed: 10 blocks form valid continuous chain
+🚫 Finality lock prevents reorg to ancestor 576 (confirmed 583).
+   Not enough ahead peers (1 required) support the alternative chain.
+```
+Peer `50.28.107.33` (whitelisted) disconnected due to an 842 MB frame (AV43) before the peer count scan ran.
+
+**Root cause:** All finality lock escape conditions (`normal_override`, `longer_chain_escape`, `escape_override`) require `total_ahead > 0` or `supporting >= 1`, which evaluate to zero when the delivering peer has already disconnected from the registry.
+
+**Fix Applied:** New `whitelisted_peer_escape` condition in `blockchain.rs`: if `peer_tip_height > our_height` AND the delivering peer is whitelisted AND the finality lock has been blocked for ≥10 seconds, bypass the peer count requirement entirely. A whitelisted peer is operator-trusted — if it delivered a longer valid chain, that is sufficient evidence the local node is on a minority fork.
+
+**Code References:**
+- `src/blockchain.rs` — `whitelisted_peer_escape` condition in the finality lock override block (~line 9994)
+
+---
+
+### 15.20 ✅ FIXED — Post-Handshake Oversized Frame DoS (AV43)
+
+**Status:** **FIXED** (v1.4.38)
+**Severity:** Medium — forcibly disconnects sync peers; combined with AV42 prevents fork recovery
+
+**Attack:** After completing the protocol handshake (so the IP is not penalised as a pre-handshake DoS), the attacker sends a TCP frame with a declared length of 800–930 MB. This causes an immediate `Frame too large` disconnect. The attacker targets nodes that are serving block sync to recovering nodes, breaking the sync pipe at the critical moment when blocks are in transit.
+
+**Observed attack (April 19, 2026):**
+- Peers 47.82.240.104, 47.79.38.55, 47.79.35.65 sending 842–926 MB frames post-handshake
+- Pre-existing guard only penalised pre-handshake oversized frames
+
+**Root cause:** `server.rs` Frame-too-large handler checked `!handshake_done` before recording a violation. Post-handshake large frames were treated as potential framing-mismatch with old nodes and not penalised.
+
+**Fix Applied:** Frames > 100 MB post-handshake are now treated as clearly malicious (no legitimate TIME message approaches this size) and trigger a violation record. Smaller post-handshake overflows (framing-mismatch with old nodes) are still not penalised.
+
+**Code References:**
+- `src/network/server.rs` — Frame-too-large handler (`MALICIOUS_FRAME_BYTES = 100 MB` threshold)
+
+---
+
+### 15.21 ✅ FIXED — Whitelisted Peer Self-Isolation via False Reward-Hijack Ban (AV44)
+
+**Status:** **FIXED** (v1.4.38)
+**Severity:** Critical — node permanently bans all its own whitelisted peers, achieving complete network isolation without the attacker touching those peers at all
+
+**Attack:** A node running slightly outdated code has a stale masternode registry (e.g., 226 entries vs the network's 232). When it receives block 598 from any peer, its reward calculator produces a different result than the block (it doesn't know about 6 masternodes). The reward-hijacking detector fires, permanently bans the peer, and marks it incompatible. Because every peer serves the same correct block 598, the node permanently bans **all** its peers including whitelisted ones within ~5 seconds of startup, achieving complete isolation.
+
+**Observed attack (April 19, 2026):**
+- Arizona node (commit 1995, registry size 226) received block 598 (bitmap capacity 232)
+- Banned all 8+ peers including whitelisted 69.167.168.176, 165.84.215.117, 158.247.220.125, 188.166.243.108, 139.180.206.91 within 5 seconds
+- Node had no remaining compatible peers, could not sync or produce blocks
+
+**Root cause:** The reward-hijacking permanent ban had no exception for whitelisted peers. A reward discrepancy with a whitelisted peer almost certainly indicates the local node has a stale registry — not that the whitelisted peer is malicious.
+
+**Fix Applied:** Before issuing a permanent ban for reward manipulation, check if the peer is whitelisted. If so, disconnect without banning and log a warning to update the local node. Applies to both the `BlockAnnounce` handler and the `spawn_fork_resolution` reorg path.
+
+**Code References:**
+- `src/network/message_handler.rs` — reward-hijack ban with whitelist guard (both `BlockAnnounce` and `spawn_fork_resolution`)
+
+---
+
+### 15.22 ✅ FIXED — Coordinated Multi-Vector Network Destabilisation (AV45)
+
+**Status:** **FIXED** (v1.4.38, mitigated across multiple fixes)
+**Severity:** Critical — combination of individually-medium vectors achieves chain halt and node isolation
+
+**Attack:** Observed April 19, 2026. The 154.217.246.x/24 subnet and 47.79.x.x/47.82.x.x subnets executed a coordinated attack using four simultaneous vectors:
+
+1. **Ghost TX flood (AV41 Phase 2)**: Forged-signature special_data TXs injected into finalized pools → different nodes include different ghost TXs in blocks → artificial fork creation without mining
+2. **Post-handshake oversized frames (AV43)**: 800–930 MB frames disconnect whitelisted sync peers mid-delivery → combined with finality lock race (AV42) to strand nodes on minority forks
+3. **tx_finalized spam**: 64.118.152.210 and 154.64.252.184 flooding hundreds of `TransactionFinalized` messages/second → CPU load, log noise masking real attack activity
+4. **Reward-manipulation blocks**: 154.217.246.x nodes serving blocks with redistributed rewards → triggers reward-hijack bans against legitimate peers on nodes with stale registries (AV44)
+
+**Effect:** Nodes that banned their whitelisted peers (AV44) were then stuck on minority forks (AV42) with no clean sync path. Ghost TXs in blocks caused those forks to have different hashes even when legitimate TXs were identical. The combination prevented convergence for ~30+ minutes.
+
+**Mitigations:** Each component vector is individually fixed (AV41, AV42, AV43, AV44). Additionally, whitelist-exclusive sync (nodes >10 blocks behind only download from whitelisted peers) prevents attacker-controlled peers from providing the canonical chain during recovery.
+
+---
+
+### 15.23 ✅ FIXED — Whitelisted-Peer-Exclusive Sync Bypass (AV46)
+
+**Status:** **FIXED** (v1.4.38)
+**Severity:** Medium — nodes >10 blocks behind could sync from attacker peers instead of trusted whitelisted peers
+
+**Attack:** When a node is significantly behind (>10 blocks), it previously selected sync peers from all connected peers ranked by chain tip height. An attacker with many connected peers (from the regular peer pool) could outrank the 1–2 whitelisted peers and serve a fork chain, causing the recovering node to adopt the attacker's chain.
+
+**Fix Applied:** When a node is >10 blocks behind AND at least one whitelisted peer is connected, block downloads are restricted exclusively to whitelisted peers. The attacker's peers are excluded regardless of their reported chain tip height.
+
+**Code References:**
+- `src/blockchain.rs` — `sync_from_peers()` whitelist-exclusive gate (~line 2289)
 
 ---
 
@@ -1575,7 +1676,12 @@ if tx_finalized_excess_streak >= 5 {
 | AV36 | Reputation poisoning / blacklist manipulation | High | ✅ Fixed |
 | AV37 | Registration spam / slot ID exhaustion | High | ✅ Fixed (height-gated, fork height 200) |
 | AV40 | `tx_finalized` rate-limit saturation without peer escalation | Medium | ✅ Fixed |
-| AV41 | Ghost special_data transaction mempool flood | Medium | ✅ Fixed |
+| AV41 | Ghost special_data transaction mempool flood (incl. forged-sig phase) | High | ✅ Fixed |
+| AV42 | Finality lock whitelist bypass via post-delivery disconnect | High | ✅ Fixed |
+| AV43 | Post-handshake oversized frame DoS (>100 MB) | Medium | ✅ Fixed |
+| AV44 | Whitelisted peer self-isolation via false reward-hijack ban | Critical | ✅ Fixed |
+| AV45 | Coordinated multi-vector network destabilisation | Critical | ✅ Fixed (component vectors AV41–AV44) |
+| AV46 | Whitelisted-peer-exclusive sync bypass | Medium | ✅ Fixed |
 
 **Observed (April 8 watchdog log):**
 ```
@@ -2046,8 +2152,17 @@ With unique TXIDs on every injection, the bloom-filter dedup never fires, and th
 
 ---
 
-**Document Version:** 1.5
-**Last Updated:** April 16, 2026
+**Document Version:** 1.6
+**Last Updated:** April 19, 2026
+**Changes from v1.5:**
+- Updated executive summary: 29 vectors fully mitigated (+5: AV42–AV46)
+- Extended AV41 (Section 15.18): Phase 2 — forged-signature ghost TXs bypassed format-only validation; added `verify_signature()` to `SpecialTransactionData`, block assembly ghost guard, and startup purge. Ghost TX purpose documented: fork induction via block hash divergence.
+- Added AV42 (Section 15.19): Finality lock whitelist bypass via post-delivery disconnect — `whitelisted_peer_escape` condition added to finality lock override logic
+- Added AV43 (Section 15.20): Post-handshake oversized frame DoS — frames >100 MB now trigger violation regardless of handshake state
+- Added AV44 (Section 15.21): Whitelisted peer self-isolation via false reward-hijack ban — reward discrepancy with whitelisted peer now disconnects without banning
+- Added AV45 (Section 15.22): Coordinated multi-vector destabilisation — April 19 mainnet attack; documents the combined ghost TX + oversized frame + tx_finalized spam + reward-manipulation block attack
+- Added AV46 (Section 15.23): Whitelist-exclusive sync bypass — nodes >10 blocks behind now restricted to whitelisted peers for block download
+
 **Changes from v1.4:**
 - Updated executive summary: 24 vectors fully mitigated (+2: AV40, AV41)
 - Added AV40 (Section 15.17): `tx_finalized` rate-limit saturation without peer escalation — fixed in v1.4.37
