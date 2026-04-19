@@ -183,25 +183,36 @@ fn spawn_fork_resolution(
         if let Err(e) = blockchain.handle_fork(blocks, peer_ip.clone()).await {
             warn!("Fork resolution failed: {}", e);
             if e.contains("unique reward recipient") || e.contains("reward-hijacking") {
-                error!(
-                    "🚨 Reorg revealed REWARD-HIJACKING chain from {} — PERMANENTLY BANNING: {}",
-                    peer_ip, e
-                );
-                if let Some(bl) = &blacklist {
-                    let bare = peer_ip.split(':').next().unwrap_or(&peer_ip);
-                    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-                        bl.write()
-                            .await
-                            .add_permanent_ban(ip, &format!("Reward-hijacking reorg chain: {}", e));
+                // Never permanently ban a whitelisted peer — reward mismatch with
+                // a whitelisted peer indicates local registry divergence, not an attack.
+                let is_whitelisted = peer_registry.is_whitelisted(&peer_ip).await;
+                if is_whitelisted {
+                    warn!(
+                        "⚠️ Reward mismatch in reorg from WHITELISTED peer {} — \
+                         likely local registry divergence, not banning. Error: {}",
+                        peer_ip, e
+                    );
+                } else {
+                    error!(
+                        "🚨 Reorg revealed REWARD-HIJACKING chain from {} — PERMANENTLY BANNING: {}",
+                        peer_ip, e
+                    );
+                    if let Some(bl) = &blacklist {
+                        let bare = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                        if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+                            bl.write()
+                                .await
+                                .add_permanent_ban(ip, &format!("Reward-hijacking reorg chain: {}", e));
+                        }
                     }
+                    peer_registry
+                        .mark_incompatible(
+                            &peer_ip,
+                            &format!("Reward-hijacking reorg chain: {}", e),
+                            true,
+                        )
+                        .await;
                 }
-                peer_registry
-                    .mark_incompatible(
-                        &peer_ip,
-                        &format!("Reward-hijacking reorg chain: {}", e),
-                        true,
-                    )
-                    .await;
             }
         }
     });
@@ -2398,6 +2409,28 @@ impl MessageHandler {
                     || e.contains("reward manipulation")
                     || e.contains("unknown masternodes")
                 {
+                    // Whitelisted peers are operator-trusted. A reward discrepancy
+                    // with a whitelisted peer almost certainly means OUR registry is
+                    // stale (we're running old code or missed some registrations) —
+                    // not that the peer is malicious. Never permanently ban a
+                    // whitelisted peer for reward disagreement; disconnect and let
+                    // the node resync instead.
+                    let is_whitelisted = context
+                        .peer_registry
+                        .is_whitelisted(&self.peer_ip)
+                        .await;
+                    if is_whitelisted {
+                        warn!(
+                            "⚠️ [{}] Reward mismatch on block {} from WHITELISTED peer {} — \
+                             likely local registry divergence (our code may be outdated). \
+                             Disconnecting without banning. Error: {}",
+                            self.direction, block_height, self.peer_ip, e
+                        );
+                        return Err(format!(
+                            "Reward mismatch with whitelisted peer {} on block {} (registry divergence — update your node)",
+                            self.peer_ip, block_height
+                        ));
+                    }
                     // The peer sent a block that violates the reward distribution
                     // rules (e.g. single-payout block 1, pool manipulation, ghost
                     // masternodes in bitmap).  This is a permanent protocol violation
