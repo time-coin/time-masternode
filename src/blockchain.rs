@@ -3708,6 +3708,24 @@ impl Blockchain {
                 }
             }
 
+            // Replay-protection version check (AV-REPLAY): from block 1000 onward all
+            // value-transfer transactions (those with inputs) must use version >= 2,
+            // i.e. signed with CHAIN_ID prepended to the signing message.
+            // Special/coinbase transactions (no inputs) are exempt — they carry no
+            // user signature and cannot be replayed cross-chain.
+            if next_height >= crate::constants::fork_heights::REPLAY_PROTECTION_ACTIVATION_HEIGHT
+                && !tx.inputs.is_empty()
+                && tx.version < 2
+            {
+                tracing::warn!(
+                    "🗑️ Block {}: Evicting v1 TX {} — replay-protection requires version >= 2 at this height",
+                    next_height, hex::encode(txid)
+                );
+                evict_txids.push(txid);
+                ds_invalid_count += 1;
+                continue;
+            }
+
             // Validate input UTXOs exist and are in a spent state (SpentFinalized/SpentPending/Locked).
             // If inputs are Unspent or missing, the TX was cleared/reverted — evict from pool.
             let mut inputs_valid = true;

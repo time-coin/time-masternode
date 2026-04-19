@@ -2751,8 +2751,15 @@ impl ConsensusEngine {
         signing_tx.encrypted_memo = None;
         let tx_hash = signing_tx.txid();
 
-        // Create message: txid || input_index || outputs_hash
+        // Create message.
+        //   v1: txid || input_index || outputs_hash
+        //   v2: CHAIN_ID(4 LE) || txid || input_index || outputs_hash
+        // v2 activates at REPLAY_PROTECTION_ACTIVATION_HEIGHT (AV-REPLAY).
         let mut message = Vec::new();
+
+        if tx.version >= 2 {
+            message.extend_from_slice(&crate::constants::CHAIN_ID.to_le_bytes());
+        }
 
         // Add transaction hash (32 bytes)
         message.extend_from_slice(&tx_hash);

@@ -1188,7 +1188,7 @@ impl RpcHandler {
 
         // Create transaction
         let tx = Transaction {
-            version: 1,
+            version: 2,
             inputs: tx_inputs,
             outputs: tx_outputs,
             timestamp: std::time::SystemTime::now()
@@ -3498,7 +3498,7 @@ impl RpcHandler {
                     .ok();
 
                 let mut cons_tx = Transaction {
-                    version: 1,
+                    version: 2,
                     inputs: cons_inputs,
                     outputs: cons_outputs,
                     lock_time: 0,
@@ -3640,7 +3640,7 @@ impl RpcHandler {
             };
 
             let mut tx = Transaction {
-                version: 1,
+                version: 2,
                 inputs,
                 outputs,
                 lock_time: 0,
@@ -3896,7 +3896,7 @@ impl RpcHandler {
         let merge_memo = self.consensus.encrypt_memo_for_self("UTXO Merge").ok();
 
         let mut tx = Transaction {
-            version: 1,
+            version: 2,
             inputs,
             outputs,
             lock_time: 0,

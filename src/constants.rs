@@ -21,6 +21,12 @@ pub mod genesis {
 /// fail fast with a clear error message instead of silently corrupting state.
 pub const STORAGE_VERSION: u32 = 2;
 
+/// Chain identifier included in v2 transaction signing messages.
+/// Mainnet = 1.  Any future intentional hard fork must be assigned a distinct
+/// chain_id BEFORE the fork diverges so that transactions cannot be replayed
+/// across chains (AV-REPLAY).
+pub const CHAIN_ID: u32 = 1;
+
 /// Blockchain protocol constants
 pub mod blockchain {
     /// Target block time in seconds (10 minutes)
@@ -152,6 +158,19 @@ pub mod fork_heights {
     /// existing slot_id instead of allocating a new one, preventing registration-spam
     /// slot exhaustion (AV-NEW / AV37).
     pub const SLOT_UNIQUENESS_FORK_HEIGHT: u64 = 200;
+
+    /// Height at which cross-chain replay protection activates (AV-REPLAY).
+    ///
+    /// From this height onward all transaction inputs MUST be signed using
+    /// the v2 signing message format, which prepends CHAIN_ID to the message:
+    ///
+    ///   v1 (before activation): txid || input_index || outputs_hash
+    ///   v2 (from activation):   CHAIN_ID(4 LE) || txid || input_index || outputs_hash
+    ///
+    /// Transactions with `version < 2` are rejected in blocks at or above this
+    /// height.  All operators must upgrade to v1.5.0 before the chain reaches
+    /// this block.
+    pub const REPLAY_PROTECTION_ACTIVATION_HEIGHT: u64 = 1000;
 }
 
 /// Performance tuning constants
