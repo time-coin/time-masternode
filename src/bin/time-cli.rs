@@ -1132,7 +1132,11 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if let Commands::AggregateBlacklists { nodes } = &args.command {
         let mut query_urls: Vec<String> = nodes.clone();
         // Always include localhost
-        if query_urls.is_empty() || !query_urls.iter().any(|u| u.contains("127.0.0.1") || u.contains("localhost")) {
+        if query_urls.is_empty()
+            || !query_urls
+                .iter()
+                .any(|u| u.contains("127.0.0.1") || u.contains("localhost"))
+        {
             let port = if is_testnet { 24101 } else { 24001 };
             let use_tls = timed::rpc::credentials::read_conf_rpctls(is_testnet);
             let scheme = if use_tls { "https" } else { "http" };
@@ -1149,35 +1153,60 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         });
 
         // ip -> (ban_reason, Vec<node_url>)
-        let mut permanent_map: std::collections::HashMap<String, (String, Vec<String>)> = std::collections::HashMap::new();
+        let mut permanent_map: std::collections::HashMap<String, (String, Vec<String>)> =
+            std::collections::HashMap::new();
         let mut node_results: Vec<(String, u64, u64)> = Vec::new(); // (url, perm_count, temp_count)
-        let mut all_violations: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        let mut all_violations: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
 
         for url in &query_urls {
             match client.post_json(url, &blacklist_req, auth).await {
                 Ok(resp) if resp.is_success() => {
                     if let Ok(rpc_resp) = resp.json::<RpcResponse>() {
                         if let Some(result) = rpc_resp.result {
-                            let perm_count = result.get("summary")
+                            let perm_count = result
+                                .get("summary")
                                 .and_then(|s| s.get("permanent_bans"))
-                                .and_then(|v| v.as_u64()).unwrap_or(0);
-                            let temp_count = result.get("summary")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let temp_count = result
+                                .get("summary")
                                 .and_then(|s| s.get("temporary_bans"))
-                                .and_then(|v| v.as_u64()).unwrap_or(0);
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
                             node_results.push((url.clone(), perm_count, temp_count));
 
-                            if let Some(perms) = result.get("permanent").and_then(|v| v.as_array()) {
+                            if let Some(perms) = result.get("permanent").and_then(|v| v.as_array())
+                            {
                                 for entry in perms {
-                                    let ip = entry.get("ip").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                    let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                    let e = permanent_map.entry(ip).or_insert_with(|| (reason.clone(), Vec::new()));
+                                    let ip = entry
+                                        .get("ip")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let reason = entry
+                                        .get("reason")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let e = permanent_map
+                                        .entry(ip)
+                                        .or_insert_with(|| (reason.clone(), Vec::new()));
                                     e.1.push(url.clone());
                                 }
                             }
-                            if let Some(viols) = result.get("violations").and_then(|v| v.as_array()) {
+                            if let Some(viols) = result.get("violations").and_then(|v| v.as_array())
+                            {
                                 for entry in viols {
-                                    let ip = entry.get("ip").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                    let count = entry.get("violations").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    let ip = entry
+                                        .get("ip")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let count = entry
+                                        .get("violations")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
                                     let e = all_violations.entry(ip).or_insert(0);
                                     *e += count;
                                 }
@@ -1191,7 +1220,10 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        println!("=== Aggregated Blacklist ({} nodes queried) ===\n", query_urls.len());
+        println!(
+            "=== Aggregated Blacklist ({} nodes queried) ===\n",
+            query_urls.len()
+        );
         println!("Node Summary:");
         for (url, perm, temp) in &node_results {
             println!("  {:45}  {} permanent  {} temporary", url, perm, temp);
@@ -1199,13 +1231,17 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
         // Sort by node count (most-banned first)
         let mut sorted: Vec<_> = permanent_map.iter().collect();
-        sorted.sort_by(|a, b| b.1.1.len().cmp(&a.1.1.len()).then(a.0.cmp(b.0)));
+        sorted.sort_by(|a, b| b.1 .1.len().cmp(&a.1 .1.len()).then(a.0.cmp(b.0)));
 
         println!("\n--- Permanently Banned IPs ({} unique) ---", sorted.len());
-        println!("{:<22} {:>6}  {}", "IP", "Nodes", "Reason (first seen)");
+        println!("{:<22} {:>6}  Reason (first seen)", "IP", "Nodes");
         println!("{}", "-".repeat(90));
         for (ip, (reason, node_urls)) in &sorted {
-            let short_reason = if reason.len() > 55 { &reason[..55] } else { reason };
+            let short_reason = if reason.len() > 55 {
+                &reason[..55]
+            } else {
+                reason
+            };
             println!("{:<22} {:>6}  {}", ip, node_urls.len(), short_reason);
         }
 
@@ -1220,7 +1256,8 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
         // IPs banned on ALL queried nodes
         let all_node_count = query_urls.len();
-        let banned_everywhere: Vec<_> = sorted.iter()
+        let banned_everywhere: Vec<_> = sorted
+            .iter()
             .filter(|(_, (_, nodes))| nodes.len() == all_node_count)
             .collect();
         if !banned_everywhere.is_empty() {
@@ -1292,9 +1329,11 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             ("listunspentmulti", json!([addrs]))
         }
         Commands::SignMessage { message, address } => ("signmessage", json!([address, message])),
-        Commands::VerifyMessage { address, signature, message } => {
-            ("verifymessage", json!([address, signature, message]))
-        }
+        Commands::VerifyMessage {
+            address,
+            signature,
+            message,
+        } => ("verifymessage", json!([address, signature, message])),
         Commands::ListReceivedByAddress {
             minconf,
             include_empty,
@@ -1319,12 +1358,17 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::GetTreasuryBalance => ("gettreasurybalance", json!([])),
         Commands::ListProposals => ("listproposals", json!([])),
         Commands::GetProposal { proposal_id } => ("getproposal", json!([proposal_id])),
-        Commands::SubmitProposal { proposal_type, data } => {
-            let data_val: Value = serde_json::from_str(data)
-                .map_err(|_| "data must be valid JSON")?;
+        Commands::SubmitProposal {
+            proposal_type,
+            data,
+        } => {
+            let data_val: Value =
+                serde_json::from_str(data).map_err(|_| "data must be valid JSON")?;
             ("submitproposal", json!([proposal_type, data_val]))
         }
-        Commands::VoteProposal { proposal_id, vote } => ("voteproposal", json!([proposal_id, vote])),
+        Commands::VoteProposal { proposal_id, vote } => {
+            ("voteproposal", json!([proposal_id, vote]))
+        }
         Commands::ValidateAddress { address } => ("validateaddress", json!([address])),
         Commands::Stop => ("stop", json!([])),
         Commands::Uptime => ("uptime", json!([])),

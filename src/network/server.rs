@@ -1327,7 +1327,7 @@ async fn handle_peer(
                         } else {
                             None
                         };
-                        let clearly_malicious = frame_bytes.map_or(false, |b| b > MALICIOUS_FRAME_BYTES);
+                        let clearly_malicious = frame_bytes.is_some_and(|b| b > MALICIOUS_FRAME_BYTES);
                         if is_large_frame && (!handshake_done || clearly_malicious) {
                             blacklist.write().await.record_violation(
                                 ip,
@@ -1885,14 +1885,12 @@ async fn handle_peer(
                                     //   Phase 2 — forged signature (verify_signature)
                                     //   Phase 3 — fresh keypair with mismatched wallet_address (verify_address_binding)
                                     if tx.inputs.is_empty() && tx.outputs.is_empty() {
-                                        let sig_ok = tx.special_data.as_ref().map_or(
-                                            false,
-                                            |sd| {
+                                        let sig_ok =
+                                            tx.special_data.as_ref().is_some_and(|sd| {
                                                 sd.validate_fields().is_ok()
                                                     && sd.verify_signature().is_ok()
                                                     && sd.verify_address_binding().is_ok()
-                                            },
-                                        );
+                                            });
                                         if !sig_ok {
                                             tracing::debug!(
                                                 "🗑️ Ghost/forged special_data TX {} via TransactionFinalized from {} — dropped (AV41)",

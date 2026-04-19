@@ -3692,7 +3692,7 @@ impl Blockchain {
             // TXs via verify_signature(), but any that leaked in before that fix
             // are caught here (AV41).
             if tx.inputs.is_empty() && tx.outputs.is_empty() {
-                let ok = tx.special_data.as_ref().map_or(false, |sd| {
+                let ok = tx.special_data.as_ref().is_some_and(|sd| {
                     sd.validate_fields().is_ok()
                         && sd.verify_signature().is_ok()
                         && sd.verify_address_binding().is_ok()
