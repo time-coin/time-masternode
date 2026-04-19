@@ -3693,11 +3693,13 @@ impl Blockchain {
             // are caught here (AV41).
             if tx.inputs.is_empty() && tx.outputs.is_empty() {
                 let ok = tx.special_data.as_ref().map_or(false, |sd| {
-                    sd.validate_fields().is_ok() && sd.verify_signature().is_ok()
+                    sd.validate_fields().is_ok()
+                        && sd.verify_signature().is_ok()
+                        && sd.verify_address_binding().is_ok()
                 });
                 if !ok {
                     tracing::warn!(
-                        "🗑️ Block {}: Evicting ghost/forged TX {} from finalized pool (AV41)",
+                        "🗑️ Block {}: Evicting ghost/forged TX {} from finalized pool (AV41/AV48)",
                         next_height, hex::encode(txid)
                     );
                     evict_txids.push(txid);

@@ -2973,6 +2973,23 @@ impl MessageHandler {
                 }
 
                 if entry.is_finalized {
+                    // AV47: Validate ghost TXs before accepting from mempool sync.
+                    // A peer with ghost TXs in its finalized pool will send them here.
+                    // Without this check they bypass the TransactionFinalized guard entirely.
+                    if entry.tx.inputs.is_empty() && entry.tx.outputs.is_empty() {
+                        let ok = entry.tx.special_data.as_ref().map_or(false, |sd| {
+                            sd.validate_fields().is_ok()
+                                && sd.verify_signature().is_ok()
+                                && sd.verify_address_binding().is_ok()
+                        });
+                        if !ok {
+                            tracing::debug!(
+                                "🗑️ [AV47] Ghost TX in mempool sync from {} — dropped",
+                                self.peer_ip
+                            );
+                            continue;
+                        }
+                    }
                     consensus.add_finalized_direct(entry.tx, entry.fee);
                     added_finalized += 1;
                 } else {

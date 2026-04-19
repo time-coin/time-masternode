@@ -619,9 +619,12 @@ impl TransactionPool {
                     return false;
                 }
                 match &tx.special_data {
-                    None => true, // pure null TX
-                    // Reject if field format invalid OR signature doesn't verify
-                    Some(sd) => sd.validate_fields().is_err() || sd.verify_signature().is_err(),
+                    None => true,
+                    Some(sd) => {
+                        sd.validate_fields().is_err()
+                            || sd.verify_signature().is_err()
+                            || sd.verify_address_binding().is_err()
+                    }
                 }
             })
             .map(|e| *e.key())
@@ -652,8 +655,11 @@ impl TransactionPool {
                 }
                 match &tx.special_data {
                     None => true,
-                    // Reject if field format invalid OR signature doesn't verify
-                    Some(sd) => sd.validate_fields().is_err() || sd.verify_signature().is_err(),
+                    Some(sd) => {
+                        sd.validate_fields().is_err()
+                            || sd.verify_signature().is_err()
+                            || sd.verify_address_binding().is_err()
+                    }
                 }
             })
             .map(|e| *e.key())

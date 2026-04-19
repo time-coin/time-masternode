@@ -5,7 +5,7 @@
 **Version:** 1.4  
 **Audit Scope:** Full system security analysis against known cryptocurrency vulnerabilities + Bitcoin development insights  
 **Last Verification:** April 19, 2026  
-**Last Updated:** April 19, 2026 — AV42–AV46 added (Section 15.19–15.23): coordinated multi-vector attack observed on mainnet
+**Last Updated:** April 19, 2026 — AV47–AV48 added (Section 15.24–15.25): ghost TX mempool sync injection and fresh-keypair address-binding bypass
 
 ---
 
@@ -18,7 +18,7 @@ This document provides a comprehensive security analysis of TimeCoin against all
 ### Key Findings
 - ✅ **22 attack vectors fully mitigated** (+6 from April 2026 mainnet findings)
 - ✅ **24 attack vectors fully mitigated** (+2 from April 16, 2026: AV40 + AV41)
-- ✅ **29 attack vectors fully mitigated** (+5 from April 19, 2026: AV42–AV46)
+- ✅ **31 attack vectors fully mitigated** (+2 from April 19, 2026: AV47–AV48)
 - ⚠️ **4 attack vectors with recommended enhancements**
 - ❌ **0 critical vulnerabilities**
 - 🟢 **Already 2106-safe** (ahead of Bitcoin's uint32 → uint64 migration)
@@ -1655,6 +1655,46 @@ Peer `50.28.107.33` (whitelisted) disconnected due to an 842 MB frame (AV43) bef
 
 ---
 
+### 15.24 ✅ FIXED — Ghost TX Mempool Sync Injection (AV47)
+
+**Status:** **FIXED** (v1.4.37)
+**Severity:** High — ghost transactions entered the finalized pool with zero validation, bypassing all AV41 guards
+
+**Attack:** The `MempoolSyncResponse` handler (`handle_mempool_sync_response` in `message_handler.rs`) added finalized transactions directly via `consensus.add_finalized_direct()` with no validation. When an honest node connects to an attacker peer, the peer includes ghost TXs in its `MempoolSyncResponse` marked as `is_finalized=true`. These bypass the `TransactionFinalized` message guard entirely and enter the finalized pool directly.
+
+**Observed:** 35 ghost TXs accumulated in the finalized pool with ages up to 2m 15s — after AV41 Phase 2 fixes were deployed. All had 0 inputs, 0 outputs, and 0 fees. The AV41 guard in `server.rs` was correct but only applied to `TransactionFinalized` messages, not to mempool sync.
+
+**Root cause:** Two code paths can add TXs to the finalized pool: (1) `TransactionFinalized` messages (guarded), and (2) `MempoolSyncResponse` (unguarded).
+
+**Fix Applied:** Added the same AV41/AV48 validation guard to `handle_mempool_sync_response` before calling `add_finalized_direct`. Ghost TXs in incoming mempool syncs are now silently dropped.
+
+**Code References:**
+- `src/network/message_handler.rs` — `handle_mempool_sync_response()`, guard before `add_finalized_direct`
+
+---
+
+### 15.25 ✅ FIXED — Ghost TX Fresh-Keypair Bypass (AV48)
+
+**Status:** **FIXED** (v1.4.37)
+**Severity:** High — attacker could generate valid-signature ghost TXs that bypassed AV41's cryptographic check
+
+**Attack (Phase 3):** AV41 Phase 2 added `verify_signature()` to reject ghost TXs with forged signatures. The attacker adapted: they generate a fresh Ed25519 keypair, derive a valid `wallet_address` from it (using the standard TIME address derivation), and sign the `MasternodeRegistration` special_data with their fresh private key. The `verify_signature()` check PASSES because the signature is cryptographically valid — the key and address are internally consistent. The collateral UTXO they reference does not exist, but that check happens later in block assembly, not in the mempool admission gate.
+
+**Root cause:** `verify_signature()` only verifies that the signature was produced by the private key for the embedded `pubkey`. It does not verify that `wallet_address` was actually derived from `pubkey`. An attacker can pair any arbitrary `wallet_address` string with a fresh keypair and valid signature.
+
+**Fix Applied:** Added `verify_address_binding()` to `SpecialTransactionData` which derives the expected address from `pubkey` using `Address::from_public_key()` (SHA-256 → RIPEMD-160 → base58check with TIME prefix) and compares it to `wallet_address`. If they don't match, the TX is rejected.
+
+Applied at all four enforcement points:
+1. `TransactionFinalized` message handler (`src/network/server.rs`)
+2. `MempoolSyncResponse` handler (`src/network/message_handler.rs`)
+3. Ghost TX purge sweep (`src/transaction_pool.rs`, both pending and confirmed)
+4. Block assembly ghost TX gate (`src/blockchain.rs`)
+
+**Code References:**
+- `src/types.rs` — `SpecialTransactionData::verify_address_binding()`
+
+---
+
 ## SUMMARY TABLE — Additional Vectors (Section 15)
 
 | ID | Name | Severity | Status |
@@ -1682,6 +1722,8 @@ Peer `50.28.107.33` (whitelisted) disconnected due to an 842 MB frame (AV43) bef
 | AV44 | Whitelisted peer self-isolation via false reward-hijack ban | Critical | ✅ Fixed |
 | AV45 | Coordinated multi-vector network destabilisation | Critical | ✅ Fixed (component vectors AV41–AV44) |
 | AV46 | Whitelisted-peer-exclusive sync bypass | Medium | ✅ Fixed |
+| AV47 | Ghost TX mempool sync injection (MempoolSyncResponse bypass) | High | ✅ Fixed |
+| AV48 | Ghost TX fresh-keypair address-binding bypass (Phase 3) | High | ✅ Fixed |
 
 **Observed (April 8 watchdog log):**
 ```

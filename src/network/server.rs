@@ -1880,21 +1880,17 @@ async fn handle_peer(
                                         continue;
                                     }
 
-                                    // AV41: ghost special_data guard.  The attacker crafts a TX
-                                    // with 0 inputs, 0 outputs, and a MasternodeRegistration
-                                    // special_data carrying valid-format but forge-signed fields.
-                                    // We verify the Ed25519 signature within the special_data so
-                                    // format-valid but cryptographically invalid TXs are rejected.
+                                    // AV41/AV48: ghost special_data guard. Rejects:
+                                    //   Phase 1 — empty/malformed fields (validate_fields)
+                                    //   Phase 2 — forged signature (verify_signature)
+                                    //   Phase 3 — fresh keypair with mismatched wallet_address (verify_address_binding)
                                     if tx.inputs.is_empty() && tx.outputs.is_empty() {
                                         let sig_ok = tx.special_data.as_ref().map_or(
-                                            false, // no special_data — null TX caught above
+                                            false,
                                             |sd| {
-                                                if sd.validate_fields().is_err() {
-                                                    return false;
-                                                }
-                                                // Verify the embedded Ed25519 signature so
-                                                // format-valid but forged TXs are rejected.
-                                                sd.verify_signature().is_ok()
+                                                sd.validate_fields().is_ok()
+                                                    && sd.verify_signature().is_ok()
+                                                    && sd.verify_address_binding().is_ok()
                                             },
                                         );
                                         if !sig_ok {

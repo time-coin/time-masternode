@@ -311,6 +311,32 @@ impl SpecialTransactionData {
             }
         }
     }
+
+    /// AV48: Verify that `wallet_address` was actually derived from `pubkey`.
+    /// Prevents attackers from generating a fresh Ed25519 keypair, creating a
+    /// well-signed ghost TX, but using an arbitrary/mismatched wallet_address.
+    /// Only enforced on MasternodeRegistration (the only TX type with a pubkey→address binding).
+    pub fn verify_address_binding(&self) -> Result<(), &'static str> {
+        use crate::address::Address;
+        use crate::network_type::NetworkType;
+
+        match self {
+            SpecialTransactionData::MasternodeRegistration { wallet_address, pubkey, .. } => {
+                let pk_bytes = hex::decode(pubkey).map_err(|_| "invalid pubkey hex")?;
+                if pk_bytes.len() != 32 {
+                    return Err("pubkey must be 32 bytes");
+                }
+                // Derive the address that should correspond to this pubkey on both networks
+                let expected_mainnet = Address::from_public_key(&pk_bytes, NetworkType::Mainnet).as_string();
+                let expected_testnet = Address::from_public_key(&pk_bytes, NetworkType::Testnet).as_string();
+                if wallet_address != &expected_mainnet && wallet_address != &expected_testnet {
+                    return Err("wallet_address does not match pubkey");
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 /// On-chain record for a registered masternode (any tier).
