@@ -3700,7 +3700,8 @@ impl Blockchain {
                 if !ok {
                     tracing::warn!(
                         "🗑️ Block {}: Evicting ghost/forged TX {} from finalized pool (AV41/AV48)",
-                        next_height, hex::encode(txid)
+                        next_height,
+                        hex::encode(txid)
                     );
                     evict_txids.push(txid);
                     ds_invalid_count += 1;
@@ -3812,9 +3813,17 @@ impl Blockchain {
             use std::collections::HashSet;
             let mut seen_dereg_slots: HashSet<u32> = HashSet::new();
             valid_finalized_with_fees.retain(|(tx, _)| {
-                if let Some(crate::types::SpecialTransactionData::MasternodeDeregistration { slot_id, .. }) = &tx.special_data {
+                if let Some(crate::types::SpecialTransactionData::MasternodeDeregistration {
+                    slot_id,
+                    ..
+                }) = &tx.special_data
+                {
                     if !seen_dereg_slots.insert(*slot_id) {
-                        tracing::warn!("✂️  Block {}: Dropping duplicate deregistration for slot {} (AV49)", next_height, slot_id);
+                        tracing::warn!(
+                            "✂️  Block {}: Dropping duplicate deregistration for slot {} (AV49)",
+                            next_height,
+                            slot_id
+                        );
                         return false;
                     }
                 }
@@ -6703,7 +6712,11 @@ impl Blockchain {
                     .to_string();
                 let registry_clone = registry.clone();
                 tokio::spawn(async move {
-                    if registry_clone.send_to_peer(&producer_ip, msg.clone()).await.is_err() {
+                    if registry_clone
+                        .send_to_peer(&producer_ip, msg.clone())
+                        .await
+                        .is_err()
+                    {
                         // Fall back to broadcast if direct send fails.
                         registry_clone.broadcast(msg).await;
                     }

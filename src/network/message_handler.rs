@@ -200,9 +200,10 @@ fn spawn_fork_resolution(
                     if let Some(bl) = &blacklist {
                         let bare = peer_ip.split(':').next().unwrap_or(&peer_ip);
                         if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-                            bl.write()
-                                .await
-                                .add_permanent_ban(ip, &format!("Reward-hijacking reorg chain: {}", e));
+                            bl.write().await.add_permanent_ban(
+                                ip,
+                                &format!("Reward-hijacking reorg chain: {}", e),
+                            );
                         }
                     }
                     peer_registry
@@ -1305,9 +1306,15 @@ impl MessageHandler {
             }
 
             // === UTXO reconciliation — lets out-of-sync nodes resync their UTXO state ===
-            NetworkMessage::RequestUtxoReconciliation { at_height, block_hash } => {
+            NetworkMessage::RequestUtxoReconciliation {
+                at_height,
+                block_hash,
+            } => {
                 // Verify the requested block is on our chain before serving the snapshot.
-                let our_hash = context.blockchain.get_block_hash_at_height(*at_height).await;
+                let our_hash = context
+                    .blockchain
+                    .get_block_hash_at_height(*at_height)
+                    .await;
                 if our_hash != Some(*block_hash) {
                     debug!(
                         "[{}] RequestUtxoReconciliation from {} — block hash mismatch at height {}, ignoring",
@@ -1341,8 +1348,20 @@ impl MessageHandler {
                 for utxo in utxos {
                     // Only add UTXOs we don't already have — don't overwrite local finalized state.
                     let outpoint = utxo.outpoint.clone();
-                    if context.blockchain.utxo_manager.get_utxo(&outpoint).await.is_err() {
-                        if context.blockchain.utxo_manager.add_utxo(utxo.clone()).await.is_ok() {
+                    if context
+                        .blockchain
+                        .utxo_manager
+                        .get_utxo(&outpoint)
+                        .await
+                        .is_err()
+                    {
+                        if context
+                            .blockchain
+                            .utxo_manager
+                            .add_utxo(utxo.clone())
+                            .await
+                            .is_ok()
+                        {
                             applied += 1;
                         }
                     }
@@ -2466,10 +2485,7 @@ impl MessageHandler {
                     // not that the peer is malicious. Never permanently ban a
                     // whitelisted peer for reward disagreement; disconnect and let
                     // the node resync instead.
-                    let is_whitelisted = context
-                        .peer_registry
-                        .is_whitelisted(&self.peer_ip)
-                        .await;
+                    let is_whitelisted = context.peer_registry.is_whitelisted(&self.peer_ip).await;
                     if is_whitelisted {
                         warn!(
                             "⚠️ [{}] Reward mismatch on block {} from WHITELISTED peer {} — \
