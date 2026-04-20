@@ -4184,6 +4184,13 @@ impl MasternodeRegistry {
             .and_then(|info| info.operator_pubkey.clone())
     }
 
+    /// Overwrite the sled anchor for a collateral outpoint (used when a V4 proof evicts a squatter).
+    pub fn set_collateral_anchor(&self, outpoint: &OutPoint, ip: &str) {
+        let outpoint_key = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
+        let anchor_db_key = format!("collateral_anchor:{}", outpoint_key);
+        let _ = self.db.insert(anchor_db_key.as_bytes(), ip.as_bytes());
+    }
+
     /// Return the canonical IP address anchored to this collateral outpoint in sled,
     /// if any.  The anchor is written by the first peer to register the outpoint (gossip)
     /// or by an on-chain MasternodeReg tx (on-chain, always wins over gossip).

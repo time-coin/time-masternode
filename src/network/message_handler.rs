@@ -3431,103 +3431,156 @@ impl MessageHandler {
                                 }
                             }
 
-                            // ── On-chain anchor check (highest priority) ────────────────
+                            // ── On-chain anchor check ───────────────────────────────────
                             //
-                            // The `collateral_anchor:{outpoint}` sled key is written when a
-                            // MasternodeReg special transaction is confirmed on-chain.  It
-                            // records the ONLY IP that has ever produced a valid on-chain
-                            // signature over this collateral.  A squatter who copies the
-                            // UTXO address (address-match stalemate) cannot forge this key
-                            // because they never had the private key.
+                            // The `collateral_anchor:{outpoint}` sled key records the IP that
+                            // produced the first confirmed on-chain MasternodeReg for this
+                            // collateral.  Normally this is the legitimate owner — but a squatter
+                            // who raced an on-chain registration first would poison the anchor.
                             //
-                            // If an anchor exists for a DIFFERENT IP than the announcer,
-                            // reject and permanently ban — this is the most definitive
-                            // squatter signal available, stronger than even V4 proof.
+                            // Resolution priority (highest wins):
+                            //   1. Valid V4 proof — cryptographic signature by the private key
+                            //      that controls the collateral UTXO output address.  This is
+                            //      unforgeable and overrides any stale anchor.  Update the anchor
+                            //      to the proving IP and evict the old squatter.
+                            //   2. Anchor match — announcer IP matches the stored anchor with no
+                            //      V4 proof.  Allow through normally.
+                            //   3. Anchor mismatch, no V4 proof — ban the announcer as a squatter.
                             if let Some(anchored_ip) =
                                 context.masternode_registry.get_collateral_anchor(&outpoint)
                             {
                                 if anchored_ip != masternode_ip {
-                                    static ANCHOR_BAN: std::sync::OnceLock<
-                                        dashmap::DashMap<String, std::time::Instant>,
-                                    > = std::sync::OnceLock::new();
-                                    let wm = ANCHOR_BAN.get_or_init(dashmap::DashMap::new);
-                                    if should_warn_now(wm, &masternode_ip, 300) {
+                                    // Check whether the announcer carries a valid V4 proof.
+                                    // A V4 proof is a signature over "TIME_COLLATERAL_CLAIM:{txid}:{vout}"
+                                    // by the private key of the collateral UTXO's output address.
+                                    let txid_hex = hex::encode(outpoint.txid);
+                                    let proof_msg = format!(
+                                        "TIME_COLLATERAL_CLAIM:{}:{}",
+                                        txid_hex, outpoint.vout
+                                    );
+                                    let claimant_matches_utxo = reward_address == utxo.address;
+                                    let has_valid_v4_proof =
+                                        !collateral_proof.is_empty() && claimant_matches_utxo && {
+                                            use ed25519_dalek::Verifier;
+                                            ed25519_dalek::Signature::from_slice(&collateral_proof)
+                                                .map(|sig| {
+                                                    public_key
+                                                        .verify(proof_msg.as_bytes(), &sig)
+                                                        .is_ok()
+                                                })
+                                                .unwrap_or(false)
+                                        };
+
+                                    if has_valid_v4_proof {
+                                        // Legitimate owner proved key ownership — the anchor was
+                                        // poisoned by a squatter's earlier on-chain registration.
+                                        // Evict the squatter, update the anchor, allow through.
                                         warn!(
-                                            "🚨 [{}] ON-CHAIN ANCHOR VIOLATION: {} claims \
-                                             collateral {} but on-chain anchor belongs to {} \
-                                             — permanently banning squatter{}",
-                                            self.direction,
-                                            masternode_ip,
-                                            outpoint,
-                                            anchored_ip,
-                                            if is_relayed {
-                                                format!(" (relayed via {})", peer_ip)
-                                            } else {
-                                                String::new()
-                                            }
+                                            "🛡️ [{}] V4 proof overrides stale anchor for {}: \
+                                             {} is the true owner (anchor was {}), evicting squatter",
+                                            self.direction, outpoint, masternode_ip, anchored_ip
                                         );
-                                    }
-                                    // Permanently ban the squatter's actual IP
-                                    let bare =
-                                        masternode_ip.split(':').next().unwrap_or(&masternode_ip);
-                                    if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
-                                        if let Some(bl) = &context.blacklist {
-                                            let mut guard = bl.write().await;
-                                            guard.add_permanent_ban(
-                                                ban_ip,
-                                                "collateral squatter: on-chain anchor belongs to different IP",
-                                            );
-                                            // If relayed: also record a violation against the relay
-                                            // for propagating squatter announcements so it purges
-                                            // the stale entry from its own registry.
-                                            if is_relayed {
-                                                let bare_relay =
-                                                    peer_ip.split(':').next().unwrap_or(&peer_ip);
-                                                if let Ok(relay_ip) =
-                                                    bare_relay.parse::<std::net::IpAddr>()
-                                                {
-                                                    guard.record_violation(
-                                                        relay_ip,
-                                                        "relayed on-chain anchor squatter announcement",
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        if let Some(ai) = &context.ai_system {
-                                            ai.attack_detector.record_collateral_spoof_attempt(
-                                                &masternode_ip,
-                                                &outpoint.to_string(),
-                                            );
-                                        }
-                                    }
-                                    // Also evict any existing registry entry for this squatter
-                                    // so the lock is released and the legitimate owner can
-                                    // re-register on the next announcement.
-                                    if context
-                                        .masternode_registry
-                                        .get_registered_ip_for_collateral(&outpoint)
-                                        .await
-                                        .as_deref()
-                                        == Some(masternode_ip.as_str())
-                                    {
+                                        // Evict the squatter from registry and collateral lock.
                                         let _ = context
                                             .masternode_registry
-                                            .unregister(&masternode_ip)
+                                            .unregister(&anchored_ip)
                                             .await;
                                         let _ = utxo_manager.unlock_collateral(&outpoint);
+                                        // Update the anchor to the true owner.
+                                        context
+                                            .masternode_registry
+                                            .set_collateral_anchor(&outpoint, &masternode_ip);
+                                        // Ban the old anchored IP (the squatter).
+                                        let bare_squatter =
+                                            anchored_ip.split(':').next().unwrap_or(&anchored_ip);
+                                        if let Ok(ban_ip) =
+                                            bare_squatter.parse::<std::net::IpAddr>()
+                                        {
+                                            if let Some(bl) = &context.blacklist {
+                                                let mut guard = bl.write().await;
+                                                guard.add_permanent_ban(
+                                                    ban_ip,
+                                                    "collateral squatter: evicted by V4 proof from true owner",
+                                                );
+                                            }
+                                        }
+                                        // Fall through — allow the true owner to register.
+                                    } else {
+                                        // No valid V4 proof and anchor disagrees — ban this announcer.
+                                        static ANCHOR_BAN: std::sync::OnceLock<
+                                            dashmap::DashMap<String, std::time::Instant>,
+                                        > = std::sync::OnceLock::new();
+                                        let wm = ANCHOR_BAN.get_or_init(dashmap::DashMap::new);
+                                        if should_warn_now(wm, &masternode_ip, 300) {
+                                            warn!(
+                                                "🚨 [{}] ON-CHAIN ANCHOR VIOLATION: {} claims \
+                                                 collateral {} but on-chain anchor belongs to {} \
+                                                 — permanently banning squatter{}",
+                                                self.direction,
+                                                masternode_ip,
+                                                outpoint,
+                                                anchored_ip,
+                                                if is_relayed {
+                                                    format!(" (relayed via {})", peer_ip)
+                                                } else {
+                                                    String::new()
+                                                }
+                                            );
+                                        }
+                                        let bare = masternode_ip
+                                            .split(':')
+                                            .next()
+                                            .unwrap_or(&masternode_ip);
+                                        if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
+                                            if let Some(bl) = &context.blacklist {
+                                                let mut guard = bl.write().await;
+                                                guard.add_permanent_ban(
+                                                    ban_ip,
+                                                    "collateral squatter: on-chain anchor belongs to different IP",
+                                                );
+                                                if is_relayed {
+                                                    let bare_relay = peer_ip
+                                                        .split(':')
+                                                        .next()
+                                                        .unwrap_or(&peer_ip);
+                                                    if let Ok(relay_ip) =
+                                                        bare_relay.parse::<std::net::IpAddr>()
+                                                    {
+                                                        guard.record_violation(
+                                                            relay_ip,
+                                                            "relayed on-chain anchor squatter announcement",
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            if let Some(ai) = &context.ai_system {
+                                                ai.attack_detector.record_collateral_spoof_attempt(
+                                                    &masternode_ip,
+                                                    &outpoint.to_string(),
+                                                );
+                                            }
+                                        }
+                                        if context
+                                            .masternode_registry
+                                            .get_registered_ip_for_collateral(&outpoint)
+                                            .await
+                                            .as_deref()
+                                            == Some(masternode_ip.as_str())
+                                        {
+                                            let _ = context
+                                                .masternode_registry
+                                                .unregister(&masternode_ip)
+                                                .await;
+                                            let _ = utxo_manager.unlock_collateral(&outpoint);
+                                        }
+                                        if is_relayed {
+                                            return Ok(None);
+                                        }
+                                        return Err(format!(
+                                            "DISCONNECT: on-chain anchor squatter banned {}",
+                                            masternode_ip
+                                        ));
                                     }
-                                    // For relayed squatter messages: disconnect from the relay
-                                    // so it re-evaluates its registry against the anchor. For
-                                    // direct squatter connections: disconnect the squatter itself.
-                                    if is_relayed {
-                                        // Don't disconnect the relay (it's an honest peer); just
-                                        // drop the message so the relay has to re-check on reconnect.
-                                        return Ok(None);
-                                    }
-                                    return Err(format!(
-                                        "DISCONNECT: on-chain anchor squatter banned {}",
-                                        masternode_ip
-                                    ));
                                 }
                             }
                             // ── End on-chain anchor check ────────────────────────────

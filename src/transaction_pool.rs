@@ -174,7 +174,11 @@ impl TransactionPool {
         // AV49: reject duplicate deregistration for the same slot_id — only one
         // deregistration per slot is meaningful; flooding the pool with duplicates
         // wastes space and is used to exhaust block capacity.
-        if let Some(crate::types::SpecialTransactionData::MasternodeDeregistration { slot_id, .. }) = &tx.special_data {
+        if let Some(crate::types::SpecialTransactionData::MasternodeDeregistration {
+            slot_id,
+            ..
+        }) = &tx.special_data
+        {
             let slot = *slot_id;
             let duplicate = self.pending.iter().any(|e| {
                 matches!(

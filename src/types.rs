@@ -267,15 +267,24 @@ impl SpecialTransactionData {
                 ..
             } => {
                 let pk_bytes = hex::decode(pubkey).map_err(|_| "invalid pubkey hex")?;
-                let pk_arr: [u8; 32] = pk_bytes.try_into().map_err(|_| "pubkey must be 32 bytes")?;
+                let pk_arr: [u8; 32] =
+                    pk_bytes.try_into().map_err(|_| "pubkey must be 32 bytes")?;
                 let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk_arr)
                     .map_err(|_| "invalid Ed25519 pubkey")?;
                 let sig_bytes = hex::decode(signature).map_err(|_| "invalid sig hex")?;
                 let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| "sig must be 64 bytes")?;
                 let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
-                let collateral = if collateral_outpoint.is_empty() { "none" } else { collateral_outpoint.as_str() };
-                let msg = format!("MNREG:{}:{}:{}:{}", node_address, wallet_address, pubkey, collateral);
-                vk.verify(msg.as_bytes(), &sig).map_err(|_| "MasternodeRegistration signature invalid")
+                let collateral = if collateral_outpoint.is_empty() {
+                    "none"
+                } else {
+                    collateral_outpoint.as_str()
+                };
+                let msg = format!(
+                    "MNREG:{}:{}:{}:{}",
+                    node_address, wallet_address, pubkey, collateral
+                );
+                vk.verify(msg.as_bytes(), &sig)
+                    .map_err(|_| "MasternodeRegistration signature invalid")
             }
             SpecialTransactionData::MasternodeDeregistration {
                 node_address,
@@ -284,14 +293,16 @@ impl SpecialTransactionData {
                 signature,
             } => {
                 let pk_bytes = hex::decode(pubkey).map_err(|_| "invalid pubkey hex")?;
-                let pk_arr: [u8; 32] = pk_bytes.try_into().map_err(|_| "pubkey must be 32 bytes")?;
+                let pk_arr: [u8; 32] =
+                    pk_bytes.try_into().map_err(|_| "pubkey must be 32 bytes")?;
                 let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk_arr)
                     .map_err(|_| "invalid Ed25519 pubkey")?;
                 let sig_bytes = hex::decode(signature).map_err(|_| "invalid sig hex")?;
                 let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| "sig must be 64 bytes")?;
                 let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
                 let msg = format!("MNDEREG:{}:{}", node_address, slot_id);
-                vk.verify(msg.as_bytes(), &sig).map_err(|_| "MasternodeDeregistration signature invalid")
+                vk.verify(msg.as_bytes(), &sig)
+                    .map_err(|_| "MasternodeDeregistration signature invalid")
             }
             SpecialTransactionData::MasternodePayoutUpdate {
                 node_address,
@@ -300,14 +311,16 @@ impl SpecialTransactionData {
                 signature,
             } => {
                 let pk_bytes = hex::decode(pubkey).map_err(|_| "invalid pubkey hex")?;
-                let pk_arr: [u8; 32] = pk_bytes.try_into().map_err(|_| "pubkey must be 32 bytes")?;
+                let pk_arr: [u8; 32] =
+                    pk_bytes.try_into().map_err(|_| "pubkey must be 32 bytes")?;
                 let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk_arr)
                     .map_err(|_| "invalid Ed25519 pubkey")?;
                 let sig_bytes = hex::decode(signature).map_err(|_| "invalid sig hex")?;
                 let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| "sig must be 64 bytes")?;
                 let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
                 let msg = format!("MNPAYOUT:{}:{}", node_address, new_reward_address);
-                vk.verify(msg.as_bytes(), &sig).map_err(|_| "MasternodePayoutUpdate signature invalid")
+                vk.verify(msg.as_bytes(), &sig)
+                    .map_err(|_| "MasternodePayoutUpdate signature invalid")
             }
         }
     }
@@ -321,14 +334,20 @@ impl SpecialTransactionData {
         use crate::network_type::NetworkType;
 
         match self {
-            SpecialTransactionData::MasternodeRegistration { wallet_address, pubkey, .. } => {
+            SpecialTransactionData::MasternodeRegistration {
+                wallet_address,
+                pubkey,
+                ..
+            } => {
                 let pk_bytes = hex::decode(pubkey).map_err(|_| "invalid pubkey hex")?;
                 if pk_bytes.len() != 32 {
                     return Err("pubkey must be 32 bytes");
                 }
                 // Derive the address that should correspond to this pubkey on both networks
-                let expected_mainnet = Address::from_public_key(&pk_bytes, NetworkType::Mainnet).as_string();
-                let expected_testnet = Address::from_public_key(&pk_bytes, NetworkType::Testnet).as_string();
+                let expected_mainnet =
+                    Address::from_public_key(&pk_bytes, NetworkType::Mainnet).as_string();
+                let expected_testnet =
+                    Address::from_public_key(&pk_bytes, NetworkType::Testnet).as_string();
                 if wallet_address != &expected_mainnet && wallet_address != &expected_testnet {
                     return Err("wallet_address does not match pubkey");
                 }
