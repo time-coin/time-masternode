@@ -3042,14 +3042,26 @@ impl ConsensusEngine {
             return Err("No masternodes available".to_string());
         }
 
-        // AV39: Reject structurally null transactions before touching any state.
+        // AV39/AV41: Reject structurally null transactions before touching any state.
         // Masternode reg/dereg TXs legitimately have no inputs/outputs (they carry
-        // special_data instead), so they are exempt from this check.
-        if tx.inputs.is_empty() && tx.special_data.is_none() {
-            return Err("Transaction has no inputs".to_string());
-        }
-        if tx.outputs.is_empty() && tx.special_data.is_none() {
-            return Err("Transaction has no outputs".to_string());
+        // special_data instead), but the special_data must pass full validation.
+        // Ghost TXs exploit the is_some() check by setting invalid special_data.
+        if tx.inputs.is_empty() && tx.outputs.is_empty() {
+            let valid = tx.special_data.as_ref().is_some_and(|sd| {
+                sd.validate_fields().is_ok()
+                    && sd.verify_signature().is_ok()
+                    && sd.verify_address_binding().is_ok()
+            });
+            if !valid {
+                return Err("Ghost TX rejected: no inputs/outputs and no valid special_data".to_string());
+            }
+        } else {
+            if tx.inputs.is_empty() && tx.special_data.is_none() {
+                return Err("Transaction has no inputs".to_string());
+            }
+            if tx.outputs.is_empty() && tx.special_data.is_none() {
+                return Err("Transaction has no outputs".to_string());
+            }
         }
         // UTXOs are already in Locked state - DO NOT transition to SpentPending here
         // That transition happens when voting actually starts (after broadcast)
