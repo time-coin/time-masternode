@@ -766,10 +766,21 @@ impl ConnectionResources {
             .await
             {
                 Ok(_) => {
-                    let connect_time = connect_start.elapsed().as_millis() as u64;
-                    res.reconnection_ai
-                        .record_connection_success(&ip, is_masternode, connect_time);
-                    tracing::info!("{} Connection to {} ended gracefully", tag, ip);
+                    let elapsed = connect_start.elapsed();
+                    let connect_time = elapsed.as_millis() as u64;
+                    // A session that lived < 10 s succeeded at TCP/TLS but ended almost
+                    // immediately — typical of a version-mismatch flood-gate or frame-size
+                    // kick.  Count as a failure so the reconnect backoff applies and we don't
+                    // hammer a peer that can't stay connected at the current protocol version.
+                    if elapsed < std::time::Duration::from_secs(10) {
+                        res.reconnection_ai
+                            .record_connection_failure(&ip, is_masternode, "short-lived session");
+                        tracing::info!("{} Connection to {} ended quickly ({:.1}s)", tag, ip, elapsed.as_secs_f64());
+                    } else {
+                        res.reconnection_ai
+                            .record_connection_success(&ip, is_masternode, connect_time);
+                        tracing::info!("{} Connection to {} ended gracefully", tag, ip);
+                    }
                     true
                 }
                 Err(e) => {

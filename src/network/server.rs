@@ -1332,18 +1332,31 @@ async fn handle_peer(
                         };
                         let clearly_malicious = frame_bytes.is_some_and(|b| b > MALICIOUS_FRAME_BYTES);
                         if is_large_frame && (!handshake_done || clearly_malicious) {
-                            blacklist.write().await.record_violation(
-                                ip,
-                                &format!("Oversized frame header: {}", e),
-                            );
-                            if let Some(ai) = &ai_system {
-                                ai.attack_detector.record_frame_bomb(&ip_str);
+                            if is_whitelisted {
+                                // Likely a framing protocol mismatch with an older friendly node.
+                                // Don't penalise — the backoff in the reconnect loop handles pacing.
+                                tracing::debug!("🔌 Oversized frame from whitelisted peer {} — version mismatch likely, skipping penalty", peer.addr);
+                            } else {
+                                blacklist.write().await.record_violation(
+                                    ip,
+                                    &format!("Oversized frame header: {}", e),
+                                );
+                                if let Some(ai) = &ai_system {
+                                    ai.attack_detector.record_frame_bomb(&ip_str);
+                                }
                             }
                         } else if e.contains("Message flood detected") {
-                            tracing::warn!("🌊 Message flood from {} — pre-channel gate triggered, recording violation", peer.addr);
-                            blacklist.write().await.record_violation(ip, "Message flood: sustained >500 msgs/s");
-                            if let Some(ai) = &ai_system {
-                                ai.attack_detector.record_message_flood(&ip_str);
+                            if is_whitelisted {
+                                // Friendly node on a different version may burst more messages
+                                // than the gate expects right after handshake.  Log only; the
+                                // short-lived-session backoff in the reconnect loop handles pacing.
+                                tracing::debug!("🔌 Message burst from whitelisted peer {} tripped pre-channel gate — version mismatch likely, skipping penalty", peer.addr);
+                            } else {
+                                tracing::warn!("🌊 Message flood from {} — pre-channel gate triggered, recording violation", peer.addr);
+                                blacklist.write().await.record_violation(ip, "Message flood: sustained >500 msgs/s");
+                                if let Some(ai) = &ai_system {
+                                    ai.attack_detector.record_message_flood(&ip_str);
+                                }
                             }
                         }
                         break;
