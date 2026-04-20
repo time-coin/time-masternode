@@ -3,6 +3,7 @@
 set -e
 
 SWAPFILE="/swapfile"
+SWAPFILE_NEW="/swapfile.new"
 
 echo "[*] Detecting system resources..."
 
@@ -12,18 +13,7 @@ DISK_MB=$(df -m / | awk 'NR==2 {print $4}')
 echo "RAM: ${RAM_MB} MB"
 echo "Disk free: ${DISK_MB} MB"
 
-# --- Remove existing swap ---
-echo "[*] Removing existing swap..."
-swapoff -a 2>/dev/null || true
-rm -f /swapfile /swapfile.new 2>/dev/null || true
-sed -i.bak '/swap/d' /etc/fstab 2>/dev/null || true
-echo "[*] Old swap cleared."
-
-# --- Recalculate free disk after removal ---
-DISK_MB=$(df -m / | awk 'NR==2 {print $4}')
-echo "Disk free after cleanup: ${DISK_MB} MB"
-
-# --- Calculate swap size ---
+# --- Calculate swap size up front (before removing old swap) ---
 if [ "$RAM_MB" -lt 2048 ]; then
     SWAP_MB=$((RAM_MB * 2))
 elif [ "$RAM_MB" -lt 8192 ]; then
@@ -32,7 +22,6 @@ else
     SWAP_MB=4096
 fi
 
-# 4 GB floor, capped to 50% of free disk
 if [ "$SWAP_MB" -lt 4096 ]; then
     SWAP_MB=4096
 fi
@@ -48,11 +37,25 @@ if [ "$SWAP_MB" -lt 512 ]; then
     exit 1
 fi
 
+# --- Create new swap first, then disable old one ---
+# This avoids OOM-killing swapoff: the kernel needs somewhere to move pages
+# before it can deactivate the existing swap file.
 echo "[*] Creating ${SWAP_MB} MB swap..."
-fallocate -l ${SWAP_MB}M "$SWAPFILE" || dd if=/dev/zero of="$SWAPFILE" bs=1M count=$SWAP_MB
-chmod 600 "$SWAPFILE"
-mkswap "$SWAPFILE"
-swapon "$SWAPFILE"
+rm -f "$SWAPFILE_NEW"
+fallocate -l ${SWAP_MB}M "$SWAPFILE_NEW" || dd if=/dev/zero of="$SWAPFILE_NEW" bs=1M count=$SWAP_MB
+chmod 600 "$SWAPFILE_NEW"
+mkswap "$SWAPFILE_NEW"
+swapon "$SWAPFILE_NEW"
+
+echo "[*] Removing old swap..."
+swapoff "$SWAPFILE" 2>/dev/null || true
+rm -f "$SWAPFILE" 2>/dev/null || true
+mv "$SWAPFILE_NEW" "$SWAPFILE"
+
+DISK_MB=$(df -m / | awk 'NR==2 {print $4}')
+echo "Disk free after cleanup: ${DISK_MB} MB"
+
+sed -i.bak '/swap/d' /etc/fstab 2>/dev/null || true
 echo "$SWAPFILE none swap sw 0 0" >> /etc/fstab
 
 # --- Tune system ---
