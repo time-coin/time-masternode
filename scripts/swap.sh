@@ -30,8 +30,12 @@ if swapon --show | grep -q "^"; then
     if [ "$SWAP_USED_MB" -gt "$RAM_FREE_MB" ]; then
         echo "[!] Swap in use exceeds free RAM — will activate new swap first, then remove old."
         SKIP_SWAPOFF=1
-        # Use a temp name so we can create the new file while old is still active
-        SWAPFILE="/swapfile.new"
+        # Pick a name that isn't the currently-active swap file
+        if [ "$OLD_SWAP_FILE" = "/swapfile" ]; then
+            SWAPFILE="/swapfile.new"
+        else
+            SWAPFILE="/swapfile"
+        fi
     else
         swapoff -a
         if [ -f "$OLD_SWAP_FILE" ]; then
