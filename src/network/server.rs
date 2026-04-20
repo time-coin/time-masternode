@@ -1466,17 +1466,35 @@ async fn handle_peer(
                                             let local_masternodes = masternode_registry.get_all().await;
                                             if let Some(our_mn) = local_masternodes.iter().find(|mn| mn.masternode.address == our_address) {
                                                 let cert = masternode_registry.get_local_certificate().await;
-                                                let announcement = NetworkMessage::MasternodeAnnouncementV3 {
-                                                    address: our_mn.masternode.address.clone(),
-                                                    reward_address: our_mn.reward_address.clone(),
-                                                    tier: our_mn.masternode.tier,
-                                                    public_key: our_mn.masternode.public_key,
-                                                    collateral_outpoint: our_mn.masternode.collateral_outpoint.clone(),
-                                                    certificate: cert.to_vec(),
-                                                    started_at: masternode_registry.get_started_at(),
+                                                // Use V4 if a collateral-claim proof has been submitted via RPC
+                                                let proof = our_mn.masternode.collateral_outpoint.as_ref()
+                                                    .and_then(|op| masternode_registry.get_v4_proof(op))
+                                                    .unwrap_or_default();
+                                                let announcement = if !proof.is_empty() {
+                                                    NetworkMessage::MasternodeAnnouncementV4 {
+                                                        address: our_mn.masternode.address.clone(),
+                                                        reward_address: our_mn.reward_address.clone(),
+                                                        tier: our_mn.masternode.tier,
+                                                        public_key: our_mn.masternode.public_key,
+                                                        collateral_outpoint: our_mn.masternode.collateral_outpoint.clone(),
+                                                        certificate: cert.to_vec(),
+                                                        started_at: masternode_registry.get_started_at(),
+                                                        collateral_proof: proof.clone(),
+                                                    }
+                                                } else {
+                                                    NetworkMessage::MasternodeAnnouncementV3 {
+                                                        address: our_mn.masternode.address.clone(),
+                                                        reward_address: our_mn.reward_address.clone(),
+                                                        tier: our_mn.masternode.tier,
+                                                        public_key: our_mn.masternode.public_key,
+                                                        collateral_outpoint: our_mn.masternode.collateral_outpoint.clone(),
+                                                        certificate: cert.to_vec(),
+                                                        started_at: masternode_registry.get_started_at(),
+                                                    }
                                                 };
+                                                let version = if proof.is_empty() { "V3" } else { "V4 (with collateral proof)" };
                                                 let _ = peer_registry.send_to_peer(&ip_str, announcement).await;
-                                                tracing::info!("📢 Sent masternode announcement (V3) to peer {}", ip_str);
+                                                tracing::info!("📢 Sent masternode announcement ({}) to peer {}", version, ip_str);
                                             }
                                         }
 

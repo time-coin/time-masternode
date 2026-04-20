@@ -4184,6 +4184,23 @@ impl MasternodeRegistry {
             .and_then(|info| info.operator_pubkey.clone())
     }
 
+    /// Persist a V4 collateral-claim proof (64-byte Ed25519 sig) so the daemon can include it
+    /// in future `MasternodeAnnouncementV4` broadcasts after a wallet-initiated claim.
+    pub fn store_v4_proof(&self, outpoint: &OutPoint, proof_bytes: &[u8]) {
+        let key = format!("v4_proof:{}:{}", hex::encode(outpoint.txid), outpoint.vout);
+        let _ = self.db.insert(key.as_bytes(), proof_bytes);
+    }
+
+    /// Retrieve a previously stored V4 collateral-claim proof, if any.
+    pub fn get_v4_proof(&self, outpoint: &OutPoint) -> Option<Vec<u8>> {
+        let key = format!("v4_proof:{}:{}", hex::encode(outpoint.txid), outpoint.vout);
+        self.db
+            .get(key.as_bytes())
+            .ok()
+            .flatten()
+            .map(|v| v.to_vec())
+    }
+
     /// Overwrite the sled anchor for a collateral outpoint (used when a V4 proof evicts a squatter).
     pub fn set_collateral_anchor(&self, outpoint: &OutPoint, ip: &str) {
         let outpoint_key = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);

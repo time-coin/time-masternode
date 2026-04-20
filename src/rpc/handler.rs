@@ -265,6 +265,7 @@ impl RpcHandler {
             "verifymessage" => self.verify_message(&params_array).await,
             "lockunspent" => self.lock_unspent(&params_array).await,
             "listlockunspent" => self.list_lock_unspent().await,
+            "submitcollateralproof" => self.submit_collateral_proof(&params_array).await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -7160,6 +7161,73 @@ impl RpcHandler {
             })
             .collect();
         Ok(json!(result))
+    }
+
+    /// Store a V4 collateral-claim proof submitted by the wallet so the daemon
+    /// can include it in future `MasternodeAnnouncementV4` messages.
+    ///
+    /// Params: `[txid_hex, vout, proof_hex]`
+    /// - `txid_hex`  — collateral UTXO transaction ID (64 hex chars)
+    /// - `vout`      — collateral UTXO output index
+    /// - `proof_hex` — hex-encoded 64-byte Ed25519 signature over
+    ///                 `"TIME_COLLATERAL_CLAIM:{txid_hex}:{vout}"`
+    async fn submit_collateral_proof(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let txid_hex = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing txid".into(),
+            })?;
+        let vout: u32 = params
+            .get(1)
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing vout".into(),
+            })? as u32;
+        let proof_hex = params
+            .get(2)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing proof".into(),
+            })?;
+
+        // Decode txid
+        let mut txid_bytes = [0u8; 32];
+        hex::decode_to_slice(txid_hex, &mut txid_bytes).map_err(|_| RpcError {
+            code: -32602,
+            message: "Invalid txid hex".into(),
+        })?;
+
+        // Decode proof
+        let proof_bytes = hex::decode(proof_hex).map_err(|_| RpcError {
+            code: -32602,
+            message: "Invalid proof hex".into(),
+        })?;
+        if proof_bytes.len() != 64 {
+            return Err(RpcError {
+                code: -32602,
+                message: "Proof must be 64 bytes".into(),
+            });
+        }
+
+        let outpoint = crate::types::OutPoint {
+            txid: txid_bytes,
+            vout,
+        };
+        self.registry.store_v4_proof(&outpoint, &proof_bytes);
+
+        tracing::info!(
+            "🔑 Stored V4 collateral proof for {}:{} — daemon will use it in next announcement",
+            txid_hex,
+            vout
+        );
+
+        Ok(
+            json!({ "success": true, "message": "Proof stored. Daemon will include it in the next MasternodeAnnouncementV4." }),
+        )
     }
 } // end impl RpcHandler
 
