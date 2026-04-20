@@ -40,6 +40,8 @@ pub enum AttackType {
     FinalityInjectionSpam, // TransactionFinalized for unknown TXs to force 49-validator broadcast amplification (AV38)
     NullTransactionFlood, // Transactions with 0 inputs + 0 outputs to exhaust mempool at zero cost (AV39)
     ZeroCollateralPollution, // Register zero-value UTXOs as Free-tier collateral under victim IPs to poison registry (AV40)
+    ConnectionFlood,  // High-rate inbound connections rejected by rate limiter — subnet DoS (AV50)
+    FrameBomb,        // Crafted TCP frame header claiming multi-GB payload to OOM/crash the node (AV51)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +136,12 @@ pub struct AttackDetector {
     /// Per-peer null-TX flood timestamps for NullTransactionFlood detection (AV39).
     /// Key: peer IP, Value: deque of Unix timestamps for null-TX broadcast events.
     null_tx_flood_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
+    /// Per-/24-subnet inbound connection rejection timestamps for ConnectionFlood detection (AV50).
+    /// Key: /24 prefix (e.g. "47.82.254"), Value: deque of rejection Unix timestamps.
+    connection_flood_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
+    /// Per-IP frame bomb timestamps for FrameBomb detection (AV51).
+    /// Key: IP address, Value: deque of oversized-frame Unix timestamps.
+    frame_bomb_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
     /// Fires when a new (non-duplicate) attack is detected so the enforcement
     /// loop can wake up immediately instead of waiting the full 30-second tick.
     ban_notify: Arc<tokio::sync::Notify>,
@@ -156,6 +164,8 @@ impl AttackDetector {
             message_flood_times: Arc::new(RwLock::new(HashMap::new())),
             finality_injection_times: Arc::new(RwLock::new(HashMap::new())),
             null_tx_flood_times: Arc::new(RwLock::new(HashMap::new())),
+            connection_flood_times: Arc::new(RwLock::new(HashMap::new())),
+            frame_bomb_times: Arc::new(RwLock::new(HashMap::new())),
             ban_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
@@ -1004,6 +1014,140 @@ impl AttackDetector {
                 last_seen: now,
                 source_ips: vec![addr.to_string()],
                 recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        }
+    }
+
+    /// Record that an inbound connection from `addr` was rejected by the rate limiter (AV50).
+    ///
+    /// Rate-limit rejections are cheap to generate (attacker just opens TCP sockets) and the
+    /// existing `can_accept_inbound` guard stops connections at the OS level — but the AI has no
+    /// visibility unless we record here.  We track per-/24 subnet to catch distributed floods
+    /// where each individual IP stays under per-IP thresholds.
+    ///
+    /// Thresholds: ≥10 rejections from the same /24 within 60s → `BanSubnet`.
+    /// This is intentionally aggressive: any subnet that generates 10 rate-limit rejections in
+    /// one minute is conducting a coordinated flood, not normal retry behaviour.
+    pub fn record_connection_flood(&self, addr: &str) {
+        let now = Self::now_secs();
+        const CONN_FLOOD_WINDOW_SECS: u64 = 60;
+        const CONN_FLOOD_THRESHOLD: usize = 10;
+
+        let subnet: String = addr.split('.').take(3).collect::<Vec<_>>().join(".");
+        if subnet.len() < 5 || subnet.contains(':') {
+            return;
+        }
+
+        let should_ban = {
+            let mut map = self.connection_flood_times.write();
+            let timestamps = map.entry(subnet.clone()).or_default();
+            while timestamps
+                .front()
+                .map(|t| now.saturating_sub(*t) > CONN_FLOOD_WINDOW_SECS)
+                .unwrap_or(false)
+            {
+                timestamps.pop_front();
+            }
+            timestamps.push_back(now);
+            timestamps.len() >= CONN_FLOOD_THRESHOLD
+        };
+
+        if should_ban {
+            tracing::warn!(
+                "🛡️ Inbound connection flood from {}.x/24 (AV50) — ≥{} rate-limited in {}s — banning subnet",
+                subnet,
+                CONN_FLOOD_THRESHOLD,
+                CONN_FLOOD_WINDOW_SECS
+            );
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::ConnectionFlood,
+                confidence: 0.92,
+                severity: AttackSeverity::High,
+                indicators: vec![
+                    format!(
+                        "≥{} inbound connections from {}.x/24 rejected by rate limiter within {}s (AV50)",
+                        CONN_FLOOD_THRESHOLD, subnet, CONN_FLOOD_WINDOW_SECS
+                    ),
+                    "Coordinated connection flood — subnet rate-limited; distributed botnet pattern".to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::BanSubnet(format!("{}.0/24", subnet)),
+                mitigation_applied_at: None,
+            });
+        }
+    }
+
+    /// Record a crafted oversized-frame attack from `addr` (AV51).
+    ///
+    /// Sending a 4-byte frame-length header claiming a multi-GB body requires only 4 bytes of
+    /// TCP data — the cheapest possible DoS.  A single occurrence from a post-handshake peer is
+    /// unambiguously malicious (no legitimate node sends >100 MB frames).  Pre-handshake probers
+    /// that send an oversized first frame are equally malicious.
+    ///
+    /// Two occurrences within 120s → `BlockPeer` immediately.  A single occurrence records
+    /// `RateLimitPeer` as a gentler first response in case the IP is shared infrastructure.
+    pub fn record_frame_bomb(&self, addr: &str) {
+        let now = Self::now_secs();
+        const FRAME_BOMB_WINDOW_SECS: u64 = 120;
+
+        let count = {
+            let mut map = self.frame_bomb_times.write();
+            let timestamps = map.entry(addr.to_string()).or_default();
+            while timestamps
+                .front()
+                .map(|t| now.saturating_sub(*t) > FRAME_BOMB_WINDOW_SECS)
+                .unwrap_or(false)
+            {
+                timestamps.pop_front();
+            }
+            timestamps.push_back(now);
+            timestamps.len()
+        };
+
+        if count >= 2 {
+            tracing::warn!(
+                "🛡️ Frame bomb detected from {} (AV51) — {} oversized frames in {}s — blocking",
+                addr,
+                count,
+                FRAME_BOMB_WINDOW_SECS
+            );
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::FrameBomb,
+                confidence: 0.97,
+                severity: AttackSeverity::Critical,
+                indicators: vec![
+                    format!(
+                        "{} crafted oversized-frame headers from {} within {}s (AV51)",
+                        count, addr, FRAME_BOMB_WINDOW_SECS
+                    ),
+                    "4-byte TCP header claiming multi-GB payload — trivial OOM attempt; repeat offender"
+                        .to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        } else {
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::FrameBomb,
+                confidence: 0.85,
+                severity: AttackSeverity::High,
+                indicators: vec![
+                    format!(
+                        "Crafted oversized-frame header from {} (AV51) — first occurrence",
+                        addr
+                    ),
+                    "4-byte TCP header claiming multi-GB payload — likely malicious".to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::RateLimitPeer(addr.to_string()),
                 mitigation_applied_at: None,
             });
         }

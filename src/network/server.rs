@@ -596,7 +596,7 @@ impl NetworkServer {
                         MAX_SUBNET_CONNECTS_PER_MIN
                     );
                     if let Some(ai) = &self.ai_system {
-                        ai.attack_detector.record_tls_failure(&ip_str);
+                        ai.attack_detector.record_connection_flood(&ip_str);
                     }
                     drop(stream);
                     continue;
@@ -608,6 +608,9 @@ impl NetworkServer {
                 .can_accept_inbound(&ip_str, is_whitelisted)
             {
                 tracing::warn!("🚫 Rejected inbound connection from {}: {}", ip, reason);
+                if let Some(ai) = &self.ai_system {
+                    ai.attack_detector.record_connection_flood(&ip_str);
+                }
                 drop(stream); // Close immediately
                 continue;
             }
@@ -1333,6 +1336,9 @@ async fn handle_peer(
                                 ip,
                                 &format!("Oversized frame header: {}", e),
                             );
+                            if let Some(ai) = &ai_system {
+                                ai.attack_detector.record_frame_bomb(&ip_str);
+                            }
                         } else if e.contains("Message flood detected") {
                             tracing::warn!("🌊 Message flood from {} — pre-channel gate triggered, recording violation", peer.addr);
                             blacklist.write().await.record_violation(ip, "Message flood: sustained >500 msgs/s");

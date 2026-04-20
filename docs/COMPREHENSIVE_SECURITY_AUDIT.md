@@ -4,8 +4,8 @@
 **Date:** January 23, 2026  
 **Version:** 1.4  
 **Audit Scope:** Full system security analysis against known cryptocurrency vulnerabilities + Bitcoin development insights  
-**Last Verification:** April 19, 2026  
-**Last Updated:** April 19, 2026 — AV47–AV48 added (Section 15.24–15.25); AV49 added (Section 15.26): deregistration spam flood; cross-chain replay protection (AV-REPLAY) implemented in v1.5.0, activating at block 1000
+**Last Verification:** April 20, 2026  
+**Last Updated:** April 20, 2026 — AV50–AV51 added (Section 15.27–15.28): inbound connection flood and frame bomb AI detection; cross-chain replay protection (AV-REPLAY) implemented in v1.5.0, activating at block 1000
 
 ---
 
@@ -19,6 +19,7 @@ This document provides a comprehensive security analysis of TimeCoin against all
 - ✅ **22 attack vectors fully mitigated** (+6 from April 2026 mainnet findings)
 - ✅ **24 attack vectors fully mitigated** (+2 from April 16, 2026: AV40 + AV41)
 - ✅ **32 attack vectors fully mitigated** (+3 from April 19, 2026: AV47–AV49)
+- ✅ **34 attack vectors fully mitigated** (+2 from April 20, 2026: AV50–AV51)
 - ⚠️ **4 attack vectors with recommended enhancements**
 - ❌ **0 critical vulnerabilities**
 - 🟢 **Already 2106-safe** (ahead of Bitcoin's uint32 → uint64 migration)
@@ -1695,6 +1696,56 @@ Applied at all four enforcement points:
 
 ---
 
+### 15.27 ✅ FIXED — Inbound Connection Flood (AV50)
+**Status:** **FIXED in v1.5.x** (April 20, 2026)
+**Severity:** High — connection slot exhaustion, CPU waste on TCP accept loop
+
+**Attack:** A coordinated botnet generates 50–76+ inbound TCP connections per minute from IPs across the same /24 subnet (observed: `47.82.254.82`, `47.82.240.104`, `47.82.227.36`, `47.79.35.65` on April 20, 2026). The `can_accept_inbound()` rate limiter correctly rejected each connection, but the AI layer had **zero visibility** — no detection record, no violation, no subnet ban escalation. The attacker could sustain this indefinitely at no cost.
+
+**Observed (live log, April 20, 2026):**
+```
+🚫 Rejected inbound connection from 47.82.254.82: Connection rate limit exceeded: 55 connections in last minute
+🚫 Rejected inbound connection from 47.82.240.104: Connection rate limit exceeded: 73 connections in last minute
+🚫 Rejected inbound connection from 47.82.227.36: Connection rate limit exceeded: 76 connections in last minute
+```
+
+**Root Cause:** `can_accept_inbound()` rejection path logged a warning and dropped the connection, but did not call any AI recording method. The existing subnet rate-limiter (`subnet_accept_rate` / `MAX_SUBNET_CONNECTS_PER_MIN`) also misattributed rejections to `record_tls_failure()` rather than a connection-flood-specific detector.
+
+**Fix Applied:**
+- ✅ **`record_connection_flood()` method** added to `AttackDetector` with per-/24 sliding window: ≥10 rate-limited rejections within 60s → `BanSubnet(/24)` — aggressive threshold since no legitimate traffic generates 10 rate-limit rejections per minute
+- ✅ **Wired at `can_accept_inbound` rejection** in `server.rs` accept loop
+- ✅ **Wired at subnet accept rate** rejection (replacing the misattributed `record_tls_failure` call)
+
+**Code References:**
+- `src/ai/attack_detector.rs` — `ConnectionFlood` attack type; `record_connection_flood()`; `connection_flood_times` sliding window
+- `src/network/server.rs` — `record_connection_flood()` at `can_accept_inbound` Err path and `subnet_accept_rate` reject path
+
+---
+
+### 15.28 ✅ FIXED — Frame Bomb Attack (AV51)
+**Status:** **FIXED in v1.5.x** (April 20, 2026)
+**Severity:** Critical — 4 bytes of TCP data trigger a multi-GB OOM attempt
+
+**Attack:** A peer sends a TCP frame with a 4-byte length header claiming a body of `4,083,387,062 bytes` (~3.8 GB), observed twice from `64.91.224.76` within the same 10-second window (April 20, 2026). Only 4 bytes need to be transmitted — the node reads the length prefix, attempts to allocate the buffer, and is killed by the OS OOM killer or panics. The existing 8 MB frame size cap in `wire.rs` correctly disconnects the peer, and the blacklist recorded a violation — but the AI had no record, so it could not correlate repeated attempts or escalate to a permanent ban.
+
+**Observed (live log, April 20, 2026):**
+```
+Connection from 64.91.224.76:36020 ended: Frame too large: 4083387062 bytes (max: 8388608)
+Connection from 64.91.224.76:36048 ended: Frame too large: 4083387062 bytes (max: 8388608)
+```
+
+**Root Cause:** The `is_large_frame && clearly_malicious` branch in `server.rs` called `blacklist.record_violation()` but did not call any AI method. A single peer sending the same frame bomb twice (identical 4083387062-byte header) had no AI visibility, so the detector could not escalate to `BlockPeer`.
+
+**Fix Applied:**
+- ✅ **`record_frame_bomb()` method** added to `AttackDetector` with per-IP sliding window: 1st frame → `RateLimitPeer` (gentle, in case IP is shared); 2nd frame within 120s → `BlockPeer` (clearly deliberate repeat)
+- ✅ **Wired after `blacklist.record_violation()`** in the `is_large_frame && clearly_malicious` branch in `server.rs`
+
+**Code References:**
+- `src/ai/attack_detector.rs` — `FrameBomb` attack type; `record_frame_bomb()`; `frame_bomb_times` sliding window
+- `src/network/server.rs` — `record_frame_bomb()` in `Err(e)` branch after oversized frame violation
+
+---
+
 ## SUMMARY TABLE — Additional Vectors (Section 15)
 
 | ID | Name | Severity | Status |
@@ -1725,6 +1776,8 @@ Applied at all four enforcement points:
 | AV47 | Ghost TX mempool sync injection (MempoolSyncResponse bypass) | High | ✅ Fixed |
 | AV48 | Ghost TX fresh-keypair address-binding bypass (Phase 3) | High | ✅ Fixed |
 | AV49 | Deregistration spam flood — multiple dereg TXs for same slot in one block | High | ✅ Fixed |
+| AV50 | Inbound connection flood — subnet rate-limit rejections with no AI visibility | High | ✅ Fixed |
+| AV51 | Frame bomb — 4-byte TCP header claiming multi-GB payload, repeated OOM attempt | Critical | ✅ Fixed |
 
 ### 15.26 ✅ FIXED — Deregistration Spam Flood (AV49)
 
@@ -1849,6 +1902,8 @@ Applied at all four enforcement points:
 | **Watchdog False-Restart via RPC Timeout** | ✅ Fixed | 🟢 Low | `daemon_recently_active()` check added; watchdog v1.1 (Apr 2026) |
 | **Ping Flood (no escalation)** | ✅ Fixed | 🟢 Low | `ping_excess_streak` → `record_ping_flood()` → blacklist (22e056a) |
 | **Pre-channel Message Flood** | ✅ Fixed | 🟢 Low | Soft 200/s + hard 500/s gate in TLS and plaintext I/O bridge tasks (22e056a) |
+| **Inbound Connection Flood (AV50)** | ✅ Fixed | 🟢 Low | `record_connection_flood()` → `BanSubnet(/24)` after ≥10 rate-limited rejections/60s (Apr 2026) |
+| **Frame Bomb (AV51)** | ✅ Fixed | 🟢 Low | `record_frame_bomb()` → `RateLimitPeer` on first; `BlockPeer` on second within 120s (Apr 2026) |
 
 ---
 
