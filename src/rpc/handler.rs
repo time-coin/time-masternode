@@ -510,6 +510,53 @@ impl RpcHandler {
         }))
     }
 
+    /// Serialize `special_data` for RPC / explorer responses.
+    /// Returns `null` for regular transactions so the field is always present
+    /// and clients can distinguish special TXs from ghost TXs.
+    fn special_data_to_json(tx: &crate::types::Transaction) -> Value {
+        use crate::types::SpecialTransactionData;
+        match &tx.special_data {
+            None => Value::Null,
+            Some(SpecialTransactionData::MasternodeRegistration {
+                node_address,
+                wallet_address,
+                reward_address,
+                collateral_outpoint,
+                pubkey,
+                ..
+            }) => json!({
+                "type": "MasternodeRegistration",
+                "node_address": node_address,
+                "wallet_address": wallet_address,
+                "reward_address": reward_address,
+                "collateral_outpoint": collateral_outpoint,
+                "pubkey": pubkey,
+            }),
+            Some(SpecialTransactionData::MasternodeDeregistration {
+                node_address,
+                slot_id,
+                pubkey,
+                ..
+            }) => json!({
+                "type": "MasternodeDeregistration",
+                "node_address": node_address,
+                "slot_id": slot_id,
+                "pubkey": pubkey,
+            }),
+            Some(SpecialTransactionData::MasternodePayoutUpdate {
+                node_address,
+                new_reward_address,
+                pubkey,
+                ..
+            }) => json!({
+                "type": "MasternodePayoutUpdate",
+                "node_address": node_address,
+                "new_reward_address": new_reward_address,
+                "pubkey": pubkey,
+            }),
+        }
+    }
+
     async fn get_transaction(&self, params: &[Value]) -> Result<Value, RpcError> {
         let txid_str = params
             .first()
@@ -653,7 +700,8 @@ impl RpcHandler {
                             "time": tx.timestamp,
                             "blocktime": block.header.timestamp,
                             "blockhash": hex::encode(block.hash()),
-                            "height": location.block_height
+                            "height": location.block_height,
+                            "special_data": Self::special_data_to_json(tx),
                         });
 
                         if let Some(tp) = timeproof_json {
@@ -758,7 +806,8 @@ impl RpcHandler {
                 "confirmations": 0,
                 "finalized": is_finalized,
                 "time": tx.timestamp,
-                "blocktime": tx.timestamp
+                "blocktime": tx.timestamp,
+                "special_data": Self::special_data_to_json(&tx),
             });
 
             if let Some(tp) = timeproof_json {
@@ -819,7 +868,8 @@ impl RpcHandler {
                                 "time": tx.timestamp,
                                 "blocktime": block.header.timestamp,
                                 "blockhash": hex::encode(block.hash()),
-                                "height": height
+                                "height": height,
+                                "special_data": Self::special_data_to_json(tx),
                             }));
                         }
                     }

@@ -222,6 +222,8 @@ struct TxDetail {
     vin: Vec<TxVin>,
     #[serde(default)]
     vout: Vec<TxVout>,
+    #[serde(default)]
+    special_data: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -248,6 +250,8 @@ struct MempoolTx {
     vin: Vec<TxVin>,
     #[serde(default)]
     vout: Vec<TxVout>,
+    #[serde(default)]
+    special_data: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1444,6 +1448,15 @@ fn render_mempool(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(table, chunks[1]);
 }
 
+/// Returns a short label like "MasternodeRegistration (node: 1.2.3.4:24000)"
+/// from the `special_data` JSON, or `None` for regular transactions.
+fn special_data_label(sd: &Option<serde_json::Value>) -> Option<String> {
+    let sd = sd.as_ref()?;
+    let ty = sd.get("type")?.as_str()?;
+    let node = sd.get("node_address").and_then(|v| v.as_str()).unwrap_or("");
+    Some(format!("{} ({})", ty, node))
+}
+
 fn render_mempool_detail(f: &mut Frame, area: Rect, tx: &MempoolTx) {
     let status_color = if tx.status == "finalized" {
         Color::Green
@@ -1523,10 +1536,12 @@ fn render_mempool_detail(f: &mut Frame, area: Rect, tx: &MempoolTx) {
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
     );
+    let special_label = special_data_label(&tx.special_data);
     let input_rows: Vec<Row> = if tx.vin.is_empty() {
+        let label = special_label.as_deref().unwrap_or("(coinbase)");
         vec![Row::new(vec![
             Cell::from(""),
-            Cell::from("(coinbase)"),
+            Cell::from(label).style(Style::default().fg(Color::Magenta)),
             Cell::from(""),
         ])]
     } else {
@@ -1575,9 +1590,10 @@ fn render_mempool_detail(f: &mut Frame, area: Rect, tx: &MempoolTx) {
             .add_modifier(Modifier::BOLD),
     );
     let output_rows: Vec<Row> = if tx.vout.is_empty() {
+        let label = if special_label.is_some() { "(masternode op — no outputs)" } else { "(no outputs)" };
         vec![Row::new(vec![
             Cell::from(""),
-            Cell::from("(no outputs)"),
+            Cell::from(label).style(Style::default().fg(Color::DarkGray)),
             Cell::from(""),
         ])]
     } else {
@@ -1931,10 +1947,12 @@ fn render_tx_detail(f: &mut Frame, area: Rect, tx: &TxDetail) {
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
     );
+    let special_label = special_data_label(&tx.special_data);
     let input_rows: Vec<Row> = if tx.vin.is_empty() {
+        let label = special_label.as_deref().unwrap_or("(coinbase)");
         vec![Row::new(vec![
             Cell::from(""),
-            Cell::from("(coinbase)"),
+            Cell::from(label).style(Style::default().fg(Color::Magenta)),
             Cell::from(""),
         ])]
     } else {
@@ -1983,9 +2001,10 @@ fn render_tx_detail(f: &mut Frame, area: Rect, tx: &TxDetail) {
             .add_modifier(Modifier::BOLD),
     );
     let output_rows: Vec<Row> = if tx.vout.is_empty() {
+        let label = if special_label.is_some() { "(masternode op — no outputs)" } else { "(no outputs)" };
         vec![Row::new(vec![
             Cell::from(""),
-            Cell::from("(no outputs)"),
+            Cell::from(label).style(Style::default().fg(Color::DarkGray)),
             Cell::from(""),
         ])]
     } else {
