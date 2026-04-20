@@ -1859,6 +1859,18 @@ impl MessageHandler {
             .timevote
             .accumulate_prepare_vote(block_hash, voter_id.clone(), voter_weight);
 
+        // Gossip the prepare vote to all peers so it reaches the producer even when
+        // the originating free node is not directly connected to the producer.
+        // The accumulator's "first vote wins" rule makes duplicate receipt harmless.
+        if let Some(broadcast_tx) = &context.broadcast_tx {
+            let relay = NetworkMessage::TimeVotePrepare {
+                block_hash,
+                voter_id: voter_id.clone(),
+                signature: signature.clone(),
+            };
+            let _ = broadcast_tx.send(relay);
+        }
+
         // Check if prepare consensus reached (>50% majority timevote)
         if consensus.timevote.check_prepare_consensus(block_hash) {
             info!(
@@ -1965,6 +1977,16 @@ impl MessageHandler {
             voter_weight,
             signature.clone(),
         );
+
+        // Gossip the precommit vote to all peers for the same reason as prepare votes.
+        if let Some(broadcast_tx) = &context.broadcast_tx {
+            let relay = NetworkMessage::TimeVotePrecommit {
+                block_hash,
+                voter_id: voter_id.clone(),
+                signature: signature.clone(),
+            };
+            let _ = broadcast_tx.send(relay);
+        }
 
         // Check if precommit consensus reached (>50% majority timevote)
         if consensus.timevote.check_precommit_consensus(block_hash) {
