@@ -1118,10 +1118,11 @@ impl PeerConnection {
                     }
                 } => {
                     if let Ok(msg) = result {
-                        // Forward broadcast to this peer
+                        // Forward broadcast to this peer; writer closed means peer is dead
                         if let Err(e) = Self::send_message(&self.writer_tx, &msg) {
-                            warn!("⚠️ [{:?}] Failed to forward broadcast to {}: {}",
+                            debug!("⚠️ [{:?}] Broadcast to {} failed ({}), closing connection",
                                   self.direction, self.peer_ip, e);
+                            break;
                         }
                     }
                 }
