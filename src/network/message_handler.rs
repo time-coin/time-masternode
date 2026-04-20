@@ -2478,19 +2478,39 @@ impl MessageHandler {
                     );
                     let current_height = context.blockchain.get_height();
 
-                    // Request blocks going back far enough to find common ancestor
-                    let request_from = current_height.saturating_sub(20).max(1);
-                    info!(
-                        "📥 [{}] Requesting blocks {}-{} from {} for fork resolution",
-                        self.direction, request_from, block_height, self.peer_ip
-                    );
-                    let sync_msg = NetworkMessage::GetBlocks(request_from, block_height);
-                    if let Err(send_err) = context
-                        .peer_registry
-                        .send_to_peer(&self.peer_ip, sync_msg)
-                        .await
-                    {
-                        warn!("Failed to request blocks for fork resolution: {}", send_err);
+                    // Rate-limit: don't hammer the same peer with repeated fork-resolution
+                    // requests. One request per 30 seconds per peer is sufficient.
+                    let now_instant = std::time::Instant::now();
+                    let recently_requested = context
+                        .blockchain
+                        .fork_resolution_last_request
+                        .get(&self.peer_ip)
+                        .map(|t| now_instant.duration_since(*t) < std::time::Duration::from_secs(30))
+                        .unwrap_or(false);
+                    if recently_requested {
+                        debug!(
+                            "⏭️  [{}] Fork resolution cooldown for {} — skipping repeat request",
+                            self.direction, self.peer_ip
+                        );
+                    } else {
+                        context.blockchain.fork_resolution_last_request.insert(
+                            self.peer_ip.clone(),
+                            now_instant,
+                        );
+                        // Request blocks going back far enough to find common ancestor
+                        let request_from = current_height.saturating_sub(20).max(1);
+                        info!(
+                            "📥 [{}] Requesting blocks {}-{} from {} for fork resolution",
+                            self.direction, request_from, block_height, self.peer_ip
+                        );
+                        let sync_msg = NetworkMessage::GetBlocks(request_from, block_height);
+                        if let Err(send_err) = context
+                            .peer_registry
+                            .send_to_peer(&self.peer_ip, sync_msg)
+                            .await
+                        {
+                            warn!("Failed to request blocks for fork resolution: {}", send_err);
+                        }
                     }
                 } else if e.contains("unique reward recipient")
                     || e.contains("reward-hijacking")
@@ -5673,7 +5693,25 @@ impl MessageHandler {
                     }
                 }
 
-                // Request blocks for fork resolution
+                // Rate-limit: one fork resolution request per peer per 30 seconds.
+                let now_instant = std::time::Instant::now();
+                let recently_requested = context
+                    .blockchain
+                    .fork_resolution_last_request
+                    .get(&self.peer_ip)
+                    .map(|t| now_instant.duration_since(*t) < std::time::Duration::from_secs(30))
+                    .unwrap_or(false);
+                if recently_requested {
+                    debug!(
+                        "⏭️  [{}] Fork resolution cooldown for {} — skipping repeat request",
+                        self.direction, self.peer_ip
+                    );
+                    return Ok(None);
+                }
+                context.blockchain.fork_resolution_last_request.insert(
+                    self.peer_ip.clone(),
+                    now_instant,
+                );
                 let request_from = peer_height.saturating_sub(10);
                 info!(
                     "🔄 [{}] Requesting blocks {}-{} from {} for fork resolution",

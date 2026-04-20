@@ -255,6 +255,9 @@ pub struct Blockchain {
     /// immediately re-triggering the deep-fetch/finality-lock cycle.  Checked by
     /// both `handle_fork` and the ping handler in message_handler.rs.
     pub fork_resolution_blocked_until: Arc<AtomicU64>,
+    /// Per-peer cooldown for fork-resolution GetBlocks requests.
+    /// Prevents the same peer from triggering repeated requests within 30 seconds.
+    pub fork_resolution_last_request: Arc<dashmap::DashMap<String, std::time::Instant>>,
 }
 
 impl Blockchain {
@@ -395,6 +398,7 @@ impl Blockchain {
             last_locally_confirmed_height: Arc::new(AtomicU64::new(loaded_height)),
             finality_lock_blocked_since: Arc::new(RwLock::new(None)),
             fork_resolution_blocked_until: Arc::new(AtomicU64::new(0)),
+            fork_resolution_last_request: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -11117,6 +11121,7 @@ impl Clone for Blockchain {
             last_locally_confirmed_height: self.last_locally_confirmed_height.clone(),
             finality_lock_blocked_since: self.finality_lock_blocked_since.clone(),
             fork_resolution_blocked_until: self.fork_resolution_blocked_until.clone(),
+            fork_resolution_last_request: self.fork_resolution_last_request.clone(),
         }
     }
 }

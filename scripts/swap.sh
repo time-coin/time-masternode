@@ -50,8 +50,8 @@ if [ "$SWAP_MB" -gt "$MAX_SWAP_MB" ]; then
 fi
 
 # Minimum floor
-if [ "$SWAP_MB" -lt 2253 ]; then
-    SWAP_MB=2253
+if [ "$SWAP_MB" -lt 4096 ]; then
+    SWAP_MB=4096
 fi
 
 echo "[*] Creating new swap: ${SWAP_MB} MB"

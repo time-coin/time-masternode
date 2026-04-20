@@ -500,7 +500,27 @@ impl NetworkClient {
                         } else {
                             false
                         };
-                        if !(mn_is_whitelisted || priority_wake && is_paid_tier) {
+                        if mn_is_whitelisted {
+                            // Whitelisted peers bypass the AI cooldown entirely, but still
+                            // apply a simple exponential back-off when they keep failing.
+                            // Without this the loop reconnects every 30s to a misbehaving
+                            // own node (e.g. one sending frame bombs due to old software).
+                            // Delay: 60s after 1 failure, doubling each time, capped at 300s.
+                            let failures = res.reconnection_ai.consecutive_failures_for(mn_ip);
+                            if failures > 0 {
+                                let min_delay_secs = (60u64 * 2u64.pow(failures.saturating_sub(1).min(3))).min(300);
+                                let elapsed = connection_manager
+                                    .time_since_disconnect(mn_ip)
+                                    .unwrap_or(Duration::MAX);
+                                if elapsed < Duration::from_secs(min_delay_secs) {
+                                    tracing::debug!(
+                                        "⏸️  [PHASE3-MN] Whitelisted {} cooling down ({} failures, {}s/{min_delay_secs}s elapsed)",
+                                        mn_ip, failures, elapsed.as_secs()
+                                    );
+                                    continue;
+                                }
+                            }
+                        } else if !(priority_wake && is_paid_tier) {
                             let advice = res.reconnection_ai.get_reconnection_advice(mn_ip, true);
                             if !advice.should_attempt {
                                 tracing::debug!(

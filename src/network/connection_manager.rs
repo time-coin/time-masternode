@@ -554,6 +554,14 @@ impl ConnectionManager {
         cleaned
     }
 
+    /// How long ago this peer disconnected. Returns None if no disconnect time is recorded.
+    pub fn time_since_disconnect(&self, peer_ip: &str) -> Option<Duration> {
+        self.connections
+            .get(peer_ip)
+            .and_then(|info| info.disconnected_at)
+            .map(|t| t.elapsed())
+    }
+
     /// Phase 2.1: Update activity timestamp for a peer (for detecting slow/unresponsive)
     pub fn record_activity(&self, peer_ip: &str) {
         if let Some(mut entry) = self.connections.get_mut(peer_ip) {
