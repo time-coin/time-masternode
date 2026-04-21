@@ -5,8 +5,10 @@
 //! in main() for handling all P2P network communication.
 
 use crate::consensus::ConsensusEngine;
+use crate::network::attack_log::AttackLog;
 use crate::network::blacklist::IPBlacklist;
 use crate::network::block_cache::BlockCache;
+use crate::network::ddos_guard::DDoSGuard;
 use crate::network::dedup_filter::DeduplicationFilter;
 use crate::network::message::{NetworkMessage, Subscription, UTXOStateChange};
 use crate::network::message_handler::{ConnectionDirection, MessageContext, MessageHandler};
@@ -15,7 +17,7 @@ use crate::network::rate_limiter::RateLimiter;
 use crate::types::{OutPoint, UTXOState};
 use crate::utxo_manager::UTXOStateManager;
 use dashmap::DashMap;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::net::IpAddr;
 
 use std::sync::Arc;
@@ -71,6 +73,8 @@ pub struct NetworkServer {
     pub ai_system: Option<Arc<crate::ai::AISystem>>, // AI attack detection & mitigation
     pub tls_config: Option<Arc<crate::network::tls::TlsConfig>>, // TLS for encrypted connections
     pub network_type: crate::network_type::NetworkType,
+    pub ddos_guard: Arc<DDoSGuard>, // Integrated DDoS coordinator (subnet rate tracking)
+    pub attack_log: Option<Arc<AttackLog>>, // Separate file log for AI-detected attacks
 }
 
 #[allow(dead_code)] // Used by binary, not visible to library check
@@ -189,12 +193,19 @@ impl NetworkServer {
             ai_system: None,
             tls_config: None,
             network_type,
+            ddos_guard: Arc::new(DDoSGuard::new()),
+            attack_log: None,
         })
     }
 
     /// Set the AI system for attack detection and mitigation enforcement
     pub fn set_ai_system(&mut self, ai_system: Arc<crate::ai::AISystem>) {
         self.ai_system = Some(ai_system);
+    }
+
+    /// Set the separate attack log file (writes a line per AI-detected attack).
+    pub fn set_attack_log(&mut self, log: Arc<AttackLog>) {
+        self.attack_log = Some(log);
     }
 
     /// Attach a sled database for blacklist persistence across restarts.
@@ -275,14 +286,35 @@ impl NetworkServer {
 
     #[allow(dead_code)] // Used by binary (main.rs)
     pub async fn run(&mut self) -> Result<(), std::io::Error> {
-        // Spawn cleanup task for blacklist
+        // Spawn cleanup task for blacklist + DDoS subnet rate buckets + periodic DDoS stats log
         let blacklist_cleanup = self.blacklist.clone();
+        let ddos_cleanup = self.ddos_guard.clone();
+        let stats_blacklist = self.blacklist.clone();
+        let stats_conn_mgr = self.connection_manager.clone();
+        let stats_rate_limiter = self.rate_limiter.clone();
+        let stats_subnet_rates = self.ddos_guard.subnet_rates.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(300)).await; // Every 5 minutes
                 blacklist_cleanup.write().await.cleanup();
+                ddos_cleanup.cleanup_subnet_rates();
+
+                // DDoS health snapshot
+                let (perm, temp, subnets, violations) =
+                    stats_blacklist.read().await.list_bans();
+                let whitelist_count = stats_blacklist.read().await.whitelist_count();
+                let active = stats_conn_mgr.connected_count();
+                let inbound = stats_conn_mgr.inbound_count();
+                let rl_entries = stats_rate_limiter.read().await.entry_count();
+                let subnet_buckets = stats_subnet_rates.len();
+                tracing::info!(
+                    "🛡️ DDoS guard — bans: {}P/{}T/{}S | violations: {} | whitelist: {} | conns: {}/{} inbound | rl_entries: {} | subnet_buckets: {}",
+                    perm.len(), temp.len(), subnets.len(), violations.len(),
+                    whitelist_count, inbound, active, rl_entries, subnet_buckets,
+                );
             }
         });
+        tracing::info!("🛡️ DDoS guard started (5-min stats log + subnet rate cleanup)");
 
         // Spawn cleanup task for block cache
         let block_cache_cleanup = self.block_cache.clone();
@@ -310,6 +342,7 @@ impl NetworkServer {
             let enforce_blacklist = self.blacklist.clone();
             let enforce_registry = self.peer_registry.clone();
             let enforce_mn_registry = self.masternode_registry.clone();
+            let enforce_attack_log = self.attack_log.clone();
             // Grab the notifier before entering the task so we don't hold an Arc<AISystem>
             // reference just for the notifier.
             let enforce_notify = enforce_ai.attack_detector.ban_notifier();
@@ -330,6 +363,11 @@ impl NetworkServer {
 
                     if attacks.is_empty() {
                         continue;
+                    }
+
+                    // Log to the separate attacks.log file before applying mitigations.
+                    if let Some(ref log) = enforce_attack_log {
+                        log.log_all(&attacks).await;
                     }
 
                     // Collect peers to kick *before* dropping the blacklist lock.
@@ -515,12 +553,6 @@ impl NetworkServer {
 
         // Note: Deduplication filter handles its own cleanup with automatic rotation
 
-        // Per-/24 subnet connection rate limiter: throttles inbound floods before TLS.
-        // Key: first-three-octet prefix (e.g. "50.28.104"), Value: accept timestamps.
-        // Caps any single /24 at MAX_SUBNET_CONNECTS_PER_MIN new connections per minute,
-        // preventing distributed SNI floods and botnet cycling attacks.
-        let subnet_accept_rate: Arc<DashMap<String, VecDeque<Instant>>> = Arc::new(DashMap::new());
-
         loop {
             let (stream, addr) = self.listener.accept().await?;
             let addr_str = addr.to_string();
@@ -563,44 +595,18 @@ impl NetworkServer {
                 blacklist.is_whitelisted(ip)
             };
 
-            // Phase 2.1: Check connection limits BEFORE accepting
-            // Phase 3: Whitelisted masternodes bypass regular connection limits
-            // Phase 4: Per-/24 subnet rate limit (non-whitelisted only)
-            if !is_whitelisted {
-                const MAX_SUBNET_CONNECTS_PER_MIN: usize = 20;
-                let subnet = {
-                    let parts: Vec<&str> = ip_str.splitn(4, '.').collect();
-                    if parts.len() >= 3 {
-                        format!("{}.{}.{}", parts[0], parts[1], parts[2])
-                    } else {
-                        ip_str.clone()
-                    }
-                };
-                let now_instant = Instant::now();
-                let reject = {
-                    let mut entry = subnet_accept_rate.entry(subnet.clone()).or_default();
-                    while entry
-                        .front()
-                        .map(|t: &Instant| now_instant.duration_since(*t).as_secs() >= 60)
-                        .unwrap_or(false)
-                    {
-                        entry.pop_front();
-                    }
-                    entry.push_back(now_instant);
-                    entry.len() > MAX_SUBNET_CONNECTS_PER_MIN
-                };
-                if reject {
-                    tracing::debug!(
-                        "🚫 Subnet rate limit: {}/24 exceeded {} conn/min, dropping",
-                        subnet,
-                        MAX_SUBNET_CONNECTS_PER_MIN
-                    );
-                    if let Some(ai) = &self.ai_system {
-                        ai.attack_detector.record_connection_flood(&ip_str);
-                    }
-                    drop(stream);
-                    continue;
+            // DDoS guard: per-/24 subnet rate limit (non-whitelisted only)
+            if !is_whitelisted && self.ddos_guard.check_and_record_subnet_rate(ip) {
+                tracing::debug!(
+                    "🚫 DDoS guard: {}/24 exceeded {} conn/min, dropping",
+                    ip_str,
+                    crate::network::ddos_guard::MAX_SUBNET_CONNECTS_PER_MIN
+                );
+                if let Some(ai) = &self.ai_system {
+                    ai.attack_detector.record_connection_flood(&ip_str);
                 }
+                drop(stream);
+                continue;
             }
 
             if let Err(reason) = self
@@ -1188,6 +1194,12 @@ async fn handle_peer(
                         .write()
                         .await
                         .record_tls_violation(ip, &format!("TLS handshake failed: {}", e));
+                    // Also feed into the AI detector — it tracks distributed TLS floods
+                    // from multiple IPs in the same /24 that each stay below the per-IP
+                    // blacklist threshold (AV13 subnet variant).
+                    if let Some(ref ai) = ai_system {
+                        ai.attack_detector.record_tls_failure(&ip_str);
+                    }
                 } else {
                     tracing::debug!(
                         "🔄 Ignoring TLS failure from own IP {} (self-connection)",
@@ -3275,6 +3287,11 @@ async fn handle_peer(
                     ip,
                     "Pre-handshake timeout: no handshake message within 10s",
                 );
+                // Feed into AI: coordinated slow-loris patterns (many IPs holding
+                // slots open without sending) accumulate here and trigger BanSubnet.
+                if let Some(ref ai) = ai_system {
+                    ai.attack_detector.record_pre_handshake_violation(&ip_str);
+                }
                 break;
             }
         }

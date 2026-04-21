@@ -4909,6 +4909,18 @@ async fn main() {
             // Wire up AI system for attack detection enforcement
             server.set_ai_system(ai_system.clone());
 
+            // Enable separate attack log — one line per AI-detected attack event
+            {
+                let attack_log = Arc::new(crate::network::attack_log::AttackLog::new(
+                    std::path::Path::new(&config.storage.data_dir),
+                ));
+                server.set_attack_log(attack_log);
+                tracing::info!(
+                    "🛡️ Attack log enabled: {}/attacks.log",
+                    config.storage.data_dir
+                );
+            }
+
             // Enable blacklist persistence — bans now survive daemon restarts
             server
                 .enable_blacklist_persistence(&blacklist_storage)
