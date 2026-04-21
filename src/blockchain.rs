@@ -2334,6 +2334,13 @@ impl Blockchain {
             let starting_height = current;
             let batch_size = constants::network::MAX_BLOCKS_PER_RESPONSE; // 50 blocks per response
 
+            // Peers that failed to deliver within this sync session — never reselect
+            // them as fallbacks, so a single stalled peer can't block the whole sync.
+            let mut failed_peers: HashSet<String> = HashSet::new();
+            // Max alternative peers to engage on each retry — keeps the pipeline
+            // parallel instead of collapsing to a single peer that may also stall.
+            const RETRY_FANOUT: usize = 4;
+
             tracing::info!(
                 "📍 Starting parallel sync loop: current={}, target={}, peers={}, timeout={}s",
                 current,
@@ -2511,10 +2518,13 @@ impl Blockchain {
                 if !made_progress {
                     for peer in &sync_peers {
                         self.peer_scoring.record_failure(peer).await;
+                        // Mark session-failed so these peers aren't retried below.
+                        failed_peers.insert(peer.clone());
                     }
 
                     tracing::warn!(
-                        "⚠️  No progress after parallel sync request (timeout after 30s)"
+                        "⚠️  No progress after parallel sync request (timeout after 30s) — {} peer(s) marked failed this session",
+                        failed_peers.len()
                     );
 
                     // Determine the actual missing range.  Other peers may have already
@@ -2550,7 +2560,7 @@ impl Blockchain {
                     // Also exclude peers whose known chain tip is at or below next_needed —
                     // they cannot serve the missing blocks and will just waste timeout budget.
                     let retry_peers: Vec<String> = {
-                        let excluded: HashSet<String> = if has_gap {
+                        let mut excluded: HashSet<String> = if has_gap {
                             let gap_chunks = first_buffered
                                 .map(|f| ((f - next_needed) as usize).div_ceil(batch_size as usize))
                                 .unwrap_or(1)
@@ -2559,6 +2569,8 @@ impl Blockchain {
                         } else {
                             sync_peers.iter().cloned().collect()
                         };
+                        // Also exclude every peer that failed earlier in this sync session.
+                        excluded.extend(failed_peers.iter().cloned());
                         // Snapshot the blacklist once for the whole loop.
                         let bl_snap = self.blacklist.read().await.as_ref().cloned();
                         let mut candidates = Vec::new();
@@ -2591,34 +2603,52 @@ impl Blockchain {
                     };
 
                     if !retry_peers.is_empty() {
-                        if let Some(alt_peer) =
-                            self.peer_scoring.select_best_peer(&retry_peers).await
-                        {
+                        // Pick up to RETRY_FANOUT distinct peers so a single slow
+                        // fallback can't stall the sync again. Best-scored first,
+                        // then fill with the rest of retry_peers.
+                        let mut alt_peers: Vec<String> = Vec::new();
+                        if let Some(best) = self.peer_scoring.select_best_peer(&retry_peers).await {
+                            alt_peers.push(best);
+                        }
+                        for p in &retry_peers {
+                            if alt_peers.len() >= RETRY_FANOUT {
+                                break;
+                            }
+                            if !alt_peers.contains(p) {
+                                alt_peers.push(p.clone());
+                            }
+                        }
+
+                        if !alt_peers.is_empty() {
                             let missing_end = first_buffered
                                 .map(|f| (f - 1).min(next_needed + batch_size - 1))
                                 .unwrap_or(next_needed + batch_size - 1)
                                 .min(target);
                             tracing::info!(
-                                "🤖 [AI] Requesting missing range {}-{} from fallback peer: {}",
+                                "🔄 Rotating to {} fallback peer(s) for range {}-{}: {:?}",
+                                alt_peers.len(),
                                 next_needed,
                                 missing_end,
-                                alt_peer
+                                alt_peers
                             );
-                            // Switch to the single fallback peer for the missing range.
+                            // Switch to the fallback peers for the missing range.
                             // Do NOT clear pending blocks — valid buffered blocks above
                             // the gap are preserved and will drain once the gap is filled.
-                            sync_peers = vec![alt_peer];
+                            sync_peers = alt_peers;
                             continue;
                         }
                     }
 
-                    // No progress and no fallback peers
-                    if current == starting_height {
-                        tracing::warn!(
-                            "⚠️  No progress after trying all peers - blocks may not exist yet"
-                        );
-                        break;
-                    }
+                    // No progress and no usable fallback peers. Rather than
+                    // loop forever re-requesting from the same failed peers,
+                    // abort this sync cycle — the coordinator will retry later
+                    // once peer chain tips are refreshed or new peers connect.
+                    tracing::warn!(
+                        "⚠️  No fallback peers available (all {} tried this session have failed). \
+                         Aborting this sync cycle — will retry on next coordinator tick.",
+                        failed_peers.len()
+                    );
+                    break;
                 }
 
                 // Update current height for next iteration
