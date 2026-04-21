@@ -7584,27 +7584,37 @@ impl Blockchain {
             }
         }
 
-        // 4.5. Ghost TX validation (AV41/AV48 — block-receipt path).
+        // 4.5. Ghost TX validation (AV41/AV48 — block-receipt path, tip-only).
         // The ghost TX guard in assemble_block() prevents THIS node from producing
-        // ghost TXs, but a malicious or outdated block producer could include them in
-        // a block it sends to us.  validate_block() is the only chokepoint that runs
-        // on every received block before it is stored.
+        // ghost TXs, and consensus.rs rejects them on the mempool path.  The check
+        // here is a belt-and-braces guard against a malicious block producer.
+        //
+        // We apply it only to blocks at or near the chain tip.  Historical blocks
+        // (e.g., early mainnet blocks produced before this rule existed) have
+        // already been accepted by the network and re-validating them here would
+        // brick syncing nodes — exactly what happened with block 10 on mainnet.
         //
         // Rule: any 0-input/0-output TX must carry cryptographically valid special_data.
         // Skip the coinbase (first TX) — it legitimately has no inputs.
-        for tx in block.transactions.iter().skip(1) {
-            if tx.inputs.is_empty() && tx.outputs.is_empty() {
-                let ok = tx.special_data.as_ref().is_some_and(|sd| {
-                    sd.validate_fields().is_ok()
-                        && sd.verify_signature().is_ok()
-                        && sd.verify_address_binding().is_ok()
-                });
-                if !ok {
-                    return Err(format!(
-                        "Block {} contains ghost/forged TX {} (0 inputs, 0 outputs, no valid special_data) — rejected (AV41)",
-                        block.header.height,
-                        hex::encode(&tx.txid()[..8])
-                    ));
+        const GHOST_TX_ENFORCEMENT_WINDOW: u64 = 10;
+        let expected_height = self.calculate_expected_height();
+        let is_tip_block = block.header.height + GHOST_TX_ENFORCEMENT_WINDOW >= expected_height;
+
+        if is_tip_block {
+            for tx in block.transactions.iter().skip(1) {
+                if tx.inputs.is_empty() && tx.outputs.is_empty() {
+                    let ok = tx.special_data.as_ref().is_some_and(|sd| {
+                        sd.validate_fields().is_ok()
+                            && sd.verify_signature().is_ok()
+                            && sd.verify_address_binding().is_ok()
+                    });
+                    if !ok {
+                        return Err(format!(
+                            "Block {} contains ghost/forged TX {} (0 inputs, 0 outputs, no valid special_data) — rejected (AV41)",
+                            block.header.height,
+                            hex::encode(&tx.txid()[..8])
+                        ));
+                    }
                 }
             }
         }
