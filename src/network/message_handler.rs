@@ -193,16 +193,17 @@ fn spawn_fork_resolution(
                         peer_ip, e
                     );
                 } else {
-                    error!(
-                        "🚨 Reorg revealed REWARD-HIJACKING chain from {} — PERMANENTLY BANNING: {}",
+                    warn!(
+                        "⚠️ Reorg from {} had invalid reward distribution — temp-banning 6h: {}",
                         peer_ip, e
                     );
                     if let Some(bl) = &blacklist {
                         let bare = peer_ip.split(':').next().unwrap_or(&peer_ip);
                         if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-                            bl.write().await.add_permanent_ban(
+                            bl.write().await.add_temp_ban(
                                 ip,
-                                &format!("Reward-hijacking reorg chain: {}", e),
+                                std::time::Duration::from_secs(6 * 3600),
+                                &format!("Invalid reorg reward: {}", e),
                             );
                         }
                     }
@@ -210,7 +211,7 @@ fn spawn_fork_resolution(
                         .mark_incompatible(
                             &peer_ip,
                             &format!("Reward-hijacking reorg chain: {}", e),
-                            true,
+                            false, // not permanent
                         )
                         .await;
                 }
@@ -2562,36 +2563,37 @@ impl MessageHandler {
                             self.peer_ip, block_height
                         ));
                     }
-                    // The peer sent a block that violates the reward distribution
-                    // rules (e.g. single-payout block 1, pool manipulation, ghost
-                    // masternodes in bitmap).  This is a permanent protocol violation
-                    // — ban the peer immediately so it cannot stall our chain-building.
-                    error!(
-                        "🚨 [{}] Reward-hijacking block {} from {} — PERMANENTLY BANNING: {}",
+                    // The peer sent a block with an invalid reward distribution.
+                    // Use a 6-hour temporary ban rather than permanent — the root cause
+                    // can be a software bug (e.g. empty bitmap edge case) rather than
+                    // intentional manipulation.  Repeat offenders will remain banned
+                    // for the duration while legitimate nodes with fixed software can
+                    // reconnect after upgrading.
+                    warn!(
+                        "⚠️ [{}] Invalid reward distribution in block {} from {} — temp-banning 6h: {}",
                         self.direction, block_height, self.peer_ip, e
                     );
-                    self.permanent_ban_ip(
-                        context,
-                        &format!("Reward-hijacking block {}: {}", block_height, e),
-                    )
-                    .await;
-                    error!(
-                        "🚫 [AI] Permanently banned {} — sent invalid reward-distribution block",
-                        self.peer_ip
-                    );
-                    // Mark peer incompatible so sync_from_peers / get_compatible_peers
-                    // stops selecting them even before the next blacklist check.
+                    if let Some(blacklist) = &context.blacklist {
+                        if let Ok(ip) = self.peer_ip.parse::<std::net::IpAddr>() {
+                            blacklist.write().await.add_temp_ban(
+                                ip,
+                                std::time::Duration::from_secs(6 * 3600),
+                                &format!("Invalid reward block {}: {}", block_height, e),
+                            );
+                        }
+                    }
+                    // Mark peer incompatible for the current session so sync_from_peers
+                    // stops selecting them, but allow reconnect after the ban expires.
                     context
                         .peer_registry
                         .mark_incompatible(
                             &self.peer_ip,
                             &format!("Reward-hijacking block {}: {}", block_height, e),
-                            true, // permanent
+                            false, // not permanent
                         )
                         .await;
-                    // Disconnect by returning an error
                     return Err(format!(
-                        "Peer {} permanently banned: sent reward-hijacking block {}",
+                        "Peer {} temp-banned 6h: sent invalid reward block {}",
                         self.peer_ip, block_height
                     ));
                 } else if e.contains("exceeds maximum expected height")

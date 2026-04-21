@@ -87,10 +87,13 @@ pub async fn compute(
     // Fairness bonus is the raw blocks_without_reward counter (v2 formula, always active).
     let bonus_for = |blocks_without: u64| -> u64 { blocks_without };
 
-    // Whether any non-producer paid-tier node is active (determines distribution mode).
+    // Whether ANY paid-tier node is active (determines distribution mode).
+    // Includes the producer — without this, a Silver/Bronze producer with only Free
+    // peers in the bitmap enters All-Free mode, gets filtered out (wrong tier), and
+    // produces 0 recipients, blocking block production entirely.
     let has_paid_tier_nodes = active_nodes
         .iter()
-        .any(|mn| mn.masternode.tier != MasternodeTier::Free && payout_addr(mn) != producer_wallet);
+        .any(|mn| mn.masternode.tier != MasternodeTier::Free);
 
     // All Free-tier nodes must be on-chain registered — always apply the filter.
     let apply_onchain_filter = !input.free_tier_registered.is_empty();
