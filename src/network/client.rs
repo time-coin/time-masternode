@@ -530,7 +530,7 @@ impl NetworkClient {
                                     continue;
                                 }
                             }
-                        } else if !(priority_wake && is_paid_tier) && !startup_pass {
+                        } else if !(startup_pass || priority_wake && is_paid_tier) {
                             let advice = res.reconnection_ai.get_reconnection_advice(mn_ip, true);
                             if !advice.should_attempt {
                                 tracing::debug!(

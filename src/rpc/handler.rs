@@ -7220,7 +7220,7 @@ impl RpcHandler {
     /// - `txid_hex`  — collateral UTXO transaction ID (64 hex chars)
     /// - `vout`      — collateral UTXO output index
     /// - `proof_hex` — hex-encoded 64-byte Ed25519 signature over
-    ///                 `"TIME_COLLATERAL_CLAIM:{txid_hex}:{vout}"`
+    ///   `"TIME_COLLATERAL_CLAIM:{txid_hex}:{vout}"`
     async fn submit_collateral_proof(&self, params: &[Value]) -> Result<Value, RpcError> {
         let txid_hex = params
             .first()
