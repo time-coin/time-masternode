@@ -256,6 +256,8 @@ pub struct MessageContext {
     pub ai_system: Option<Arc<crate::ai::AISystem>>,
     // WebSocket transaction event sender for real-time wallet notifications
     pub tx_event_sender: Option<broadcast::Sender<crate::rpc::websocket::TransactionEvent>>,
+    // Per-peer clock drift tracker
+    pub drift_tracker: Option<Arc<tokio::sync::Mutex<crate::time_sync::PeerDriftTracker>>>,
 }
 
 impl MessageContext {
@@ -280,6 +282,7 @@ impl MessageContext {
             blacklist: None,
             ai_system: None,
             tx_event_sender: None,
+            drift_tracker: None,
         }
     }
 
@@ -308,6 +311,7 @@ impl MessageContext {
             blacklist: None,
             ai_system: None,
             tx_event_sender: None,
+            drift_tracker: None,
         }
     }
 
@@ -347,6 +351,7 @@ impl MessageContext {
             blacklist: None,
             ai_system,
             tx_event_sender,
+            drift_tracker: None,
         }
     }
 
@@ -1405,7 +1410,7 @@ impl MessageHandler {
     async fn handle_ping(
         &self,
         nonce: u64,
-        _timestamp: i64,
+        timestamp: i64,
         peer_height: Option<u64>,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
@@ -1413,6 +1418,25 @@ impl MessageHandler {
             "📨 [{}] Received ping from {} (nonce: {})",
             self.direction, self.peer_ip, nonce
         );
+
+        // Record per-peer clock drift from the timestamp the peer embedded in
+        // the Ping.  A non-zero timestamp is required — zero means the peer
+        // didn't include one.
+        if timestamp != 0 {
+            let drift = timestamp - chrono::Utc::now().timestamp();
+            if let Some(tracker) = &context.drift_tracker {
+                let mut t = tracker.lock().await;
+                t.record(&self.peer_ip, drift);
+                if t.is_drifted(&self.peer_ip) {
+                    warn!(
+                        "⚠️ [{}] Peer {} has persistent clock drift (avg >{:.0}s)",
+                        self.direction,
+                        self.peer_ip,
+                        crate::time_sync::DRIFT_PENALTY_THRESHOLD_SECS
+                    );
+                }
+            }
+        }
 
         // Update peer height if provided
         if let Some(h) = peer_height {

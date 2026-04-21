@@ -28,6 +28,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Maximum governance voting weight per masternode, regardless of tier.
+/// Caps Gold nodes (100) at Silver level (10) so no single operator can dominate
+/// governance by running many Gold masternodes.
+const MAX_GOVERNANCE_VOTE_WEIGHT: u64 = 10;
 use tokio::sync::RwLock;
 
 /// Custom serde module for `[u8; 64]` Ed25519 signatures.
@@ -543,7 +548,7 @@ impl GovernanceState {
             .map(|mn| {
                 (
                     mn.masternode.address.clone(),
-                    mn.masternode.tier.voting_power().0,
+                    mn.masternode.tier.voting_power().0.min(MAX_GOVERNANCE_VOTE_WEIGHT),
                 )
             })
             .collect();
@@ -566,7 +571,7 @@ impl GovernanceState {
             .get_active_masternodes()
             .await
             .iter()
-            .map(|mn| mn.masternode.tier.voting_power().0)
+            .map(|mn| mn.masternode.tier.voting_power().0.min(MAX_GOVERNANCE_VOTE_WEIGHT))
             .sum()
     }
 

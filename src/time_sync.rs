@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 use chrono::Utc;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
@@ -201,6 +202,63 @@ impl TimeSync {
 }
 
 impl Default for TimeSync {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Maximum number of drift samples to retain per peer.
+const DRIFT_HISTORY_LEN: usize = 100;
+/// Average drift (seconds) above which a peer is considered persistently drifted.
+pub const DRIFT_PENALTY_THRESHOLD_SECS: f64 = 3.0;
+
+/// Tracks per-peer clock drift over time so persistently skewed peers can be
+/// penalised before they cause slot-timing ambiguities.
+pub struct PeerDriftTracker {
+    history: HashMap<String, VecDeque<i64>>,
+}
+
+impl PeerDriftTracker {
+    pub fn new() -> Self {
+        Self {
+            history: HashMap::new(),
+        }
+    }
+
+    /// Record a clock drift observation (seconds) for `peer_id`.
+    /// `drift` = peer_reported_time − our_local_time.
+    pub fn record(&mut self, peer_id: &str, drift_secs: i64) {
+        let entry = self.history.entry(peer_id.to_string()).or_default();
+        entry.push_back(drift_secs);
+        if entry.len() > DRIFT_HISTORY_LEN {
+            entry.pop_front();
+        }
+    }
+
+    /// Returns the rolling average drift (seconds) for `peer_id`, or `None`
+    /// if fewer than 2 samples have been recorded.
+    pub fn average_drift(&self, peer_id: &str) -> Option<f64> {
+        let history = self.history.get(peer_id)?;
+        if history.len() < 2 {
+            return None;
+        }
+        Some(history.iter().sum::<i64>() as f64 / history.len() as f64)
+    }
+
+    /// Returns `true` if the peer's average drift exceeds the penalty threshold.
+    pub fn is_drifted(&self, peer_id: &str) -> bool {
+        self.average_drift(peer_id)
+            .map(|avg| avg.abs() > DRIFT_PENALTY_THRESHOLD_SECS)
+            .unwrap_or(false)
+    }
+
+    /// Forget all history for a peer (e.g. after disconnect / ban).
+    pub fn remove(&mut self, peer_id: &str) {
+        self.history.remove(peer_id);
+    }
+}
+
+impl Default for PeerDriftTracker {
     fn default() -> Self {
         Self::new()
     }
