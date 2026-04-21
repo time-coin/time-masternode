@@ -171,6 +171,17 @@ impl PeerConnectionRegistry {
         false
     }
 
+    /// True when at least one IP is on the whitelist. Used by the IBD guard
+    /// to skip the check entirely when neither time-coin.io nor any `addnode`
+    /// entry yielded a valid IP — otherwise a brand-new node with no
+    /// whitelist would be unable to sync at all.
+    pub async fn has_whitelist(&self) -> bool {
+        if let Some(blacklist) = self.blacklist.read().await.as_ref() {
+            return blacklist.read().await.whitelist_count() > 0;
+        }
+        false
+    }
+
     /// Duration after which incompatible peers are re-checked (5 minutes)
     /// Note: Genesis mismatch is PERMANENT and never rechecked
     const INCOMPATIBLE_RECHECK_SECS: u64 = 300;
