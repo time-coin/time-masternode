@@ -416,12 +416,21 @@ impl NetworkClient {
             // of waiting up to 30 s for the next scheduled tick.
             let peer_discovery_interval = Duration::from_secs(30);
             let priority_notify = masternode_registry.priority_reconnect_notify();
+            // On startup, fire one immediate pass (after Phase 1/2 settle) that bypasses
+            // AI cooldowns so registered masternodes reconnect within seconds of restart.
+            let mut startup_pass = true;
             loop {
                 // Either wait for the regular 30-second interval OR wake immediately
                 // on a paid-tier disconnect signal from the registry.
-                let priority_wake = tokio::select! {
-                    _ = sleep(peer_discovery_interval) => false,
-                    _ = priority_notify.notified() => true,
+                let priority_wake = if startup_pass {
+                    // Give Phase 1/2 a moment to establish connections, then go immediately.
+                    sleep(Duration::from_secs(3)).await;
+                    true
+                } else {
+                    tokio::select! {
+                        _ = sleep(peer_discovery_interval) => false,
+                        _ = priority_notify.notified() => true,
+                    }
                 };
 
                 // Clean up stale Connecting states (stuck >30s)
@@ -520,7 +529,7 @@ impl NetworkClient {
                                     continue;
                                 }
                             }
-                        } else if !(priority_wake && is_paid_tier) {
+                        } else if !(priority_wake && is_paid_tier) && !startup_pass {
                             let advice = res.reconnection_ai.get_reconnection_advice(mn_ip, true);
                             if !advice.should_attempt {
                                 tracing::debug!(
@@ -591,8 +600,9 @@ impl NetworkClient {
 
                     if reconnected > 0 {
                         tracing::info!(
-                            "🔗 [PHASE3-MN] Initiated {} masternode reconnection(s) ({} registered)",
-                            reconnected, total_mn
+                            "🔗 [PHASE3-MN] Initiated {} masternode reconnection(s) ({} registered){}",
+                            reconnected, total_mn,
+                            if startup_pass { " [startup pass]" } else { "" }
                         );
                     } else if total_mn > 1 {
                         tracing::debug!(
@@ -600,6 +610,7 @@ impl NetworkClient {
                             total_mn
                         );
                     }
+                    startup_pass = false;
                 }
 
                 // Fill remaining slots with regular peers — prefer less-loaded ones
