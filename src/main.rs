@@ -2759,36 +2759,29 @@ async fn main() {
             }
         }
 
-        // SYNC GATE: Now that we have peers, ensure we have fresh chain data before
-        // producing.  If we're significantly behind expected height, sync first.
-        let gate_height = block_blockchain.get_height();
-        let gate_expected = block_blockchain.calculate_expected_height();
-        let gate_behind = gate_expected.saturating_sub(gate_height);
+        // CATCH-UP GATE: A freshly-started (or long-offline) node must finish catching
+        // up to the network BEFORE producing any blocks or participating in consensus.
+        // Producing while hundreds of blocks behind creates a fork — we cannot validate
+        // recent votes (registry is stale), we cannot select the correct leader, and
+        // the blocks we produce would be rejected by the rest of the network.
+        //
+        // This gate blocks here (re-requesting missing blocks every REQUEST_INTERVAL
+        // seconds) until we are within CATCHUP_THRESHOLD blocks of both the time-based
+        // expected height AND the highest height reported by connected peers.
+        const CATCHUP_THRESHOLD: u64 = 3;
+        const CATCHUP_LOG_INTERVAL_SECS: u64 = 15;
+        const CATCHUP_REQUEST_INTERVAL_SECS: u64 = 10;
+        const MIN_CONFIRMED_PEERS: usize = 1;
 
-        if gate_behind > 2 {
-            tracing::info!(
-                "🔒 Sync gate: {} blocks behind expected height ({} vs {}) - waiting for fresh peer data before block production",
-                gate_behind, gate_height, gate_expected
-            );
-
-            // Wait for at least one peer to report a chain tip (confirms fresh data, not stale cache)
-            let mut gate_wait = 0u64;
-            const MAX_GATE_WAIT_SECS: u64 = 60; // Wait up to 60 seconds for peer data
-            const MIN_CONFIRMED_PEERS: usize = 1;
+        {
+            let mut catchup_wait: u64 = 0;
+            let mut last_request: u64 = 0;
+            let mut announced_gate = false;
 
             loop {
-                if gate_wait >= MAX_GATE_WAIT_SECS {
-                    tracing::warn!(
-                        "⚠️ Sync gate timeout after {}s - proceeding with caution",
-                        gate_wait
-                    );
-                    break;
-                }
+                let current = block_blockchain.get_height();
+                let expected = block_blockchain.calculate_expected_height();
 
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                gate_wait += 2;
-
-                // Check if any peer has reported a height via pong or chain tip
                 let peers = block_peer_registry.get_compatible_peers().await;
                 let mut peers_with_data = 0usize;
                 let mut max_reported_height = 0u64;
@@ -2808,42 +2801,64 @@ async fn main() {
                     }
                 }
 
-                if peers_with_data >= MIN_CONFIRMED_PEERS {
-                    tracing::info!(
-                        "🔓 Sync gate passed: {} peer(s) reporting data, max height {} (waited {}s)",
-                        peers_with_data, max_reported_height, gate_wait
-                    );
+                let target = expected.max(max_reported_height);
+                let behind = target.saturating_sub(current);
 
-                    // If peers have a longer chain, request sync before proceeding
-                    if max_reported_height > block_blockchain.get_height() {
-                        tracing::info!(
-                            "📥 Sync gate: peers ahead at height {} - requesting sync before production",
-                            max_reported_height
-                        );
-                        for peer_ip in &peers {
-                            let current = block_blockchain.get_height();
-                            let msg = crate::network::message::NetworkMessage::GetBlocks(
-                                current + 1,
-                                max_reported_height.min(current + 50),
-                            );
-                            let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
-                        }
-                        // Give sync some time to process incoming blocks
-                        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                    }
+                if peers_with_data >= MIN_CONFIRMED_PEERS && behind <= CATCHUP_THRESHOLD {
+                    tracing::info!(
+                        "🔓 Catch-up gate passed: height {} (network tip {}, expected {}, waited {}s)",
+                        current, max_reported_height, expected, catchup_wait
+                    );
                     break;
                 }
 
-                if gate_wait % 10 == 0 {
+                if !announced_gate {
+                    announced_gate = true;
                     tracing::info!(
-                        "⏳ Sync gate: waiting for peer data ({}/{}s, {} peers connected, {} with data)",
-                        gate_wait, MAX_GATE_WAIT_SECS, peers.len(), peers_with_data
+                        "🔒 Catch-up gate: {} blocks behind (current {}, network {}, expected {}) — \
+                         suspending block production and consensus participation until synced",
+                        behind, current, max_reported_height, expected
                     );
                 }
+
+                if peers_with_data < MIN_CONFIRMED_PEERS {
+                    if catchup_wait % CATCHUP_LOG_INTERVAL_SECS == 0 && catchup_wait > 0 {
+                        tracing::info!(
+                            "⏳ Catch-up gate: waiting for peer chain data ({}s elapsed, {} peers connected)",
+                            catchup_wait, peers.len()
+                        );
+                    }
+                } else {
+                    if catchup_wait % CATCHUP_LOG_INTERVAL_SECS == 0 && catchup_wait > 0 {
+                        tracing::info!(
+                            "⏳ Catch-up gate: {} blocks behind (current {} / network {}), waited {}s",
+                            behind, current, max_reported_height, catchup_wait
+                        );
+                    }
+
+                    // Periodically nudge peers for missing blocks — sync_from_peers
+                    // runs on its own coordinator schedule, but explicit GetBlocks
+                    // requests here accelerate catch-up when it's idle.
+                    if catchup_wait.saturating_sub(last_request) >= CATCHUP_REQUEST_INTERVAL_SECS
+                        && !block_blockchain.is_syncing()
+                    {
+                        last_request = catchup_wait;
+                        let requested_end = max_reported_height.min(current + 50);
+                        if requested_end > current {
+                            for peer_ip in &peers {
+                                let msg = crate::network::message::NetworkMessage::GetBlocks(
+                                    current + 1,
+                                    requested_end,
+                                );
+                                let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
+                            }
+                        }
+                    }
+                }
+
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                catchup_wait += 2;
             }
-        } else {
-            // Not far behind - short delay for sync to settle
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         }
 
         // Time-based production trigger: Check if we're behind schedule
@@ -2951,6 +2966,50 @@ async fn main() {
             // Skip block production entirely while syncing — focus on catching up
             if block_blockchain.is_syncing() {
                 continue;
+            }
+
+            // Runtime catch-up safety: if we've fallen significantly behind the network
+            // mid-run (e.g., sustained network outage, big reorg), pause production and
+            // let sync catch us back up.  Same CATCHUP_THRESHOLD as the startup gate.
+            {
+                let cur = block_blockchain.get_height();
+                let exp = block_blockchain.calculate_expected_height();
+                let peers = block_peer_registry.get_compatible_peers().await;
+                let mut peer_max = 0u64;
+                for p in &peers {
+                    if let Some(h) = block_peer_registry.get_peer_height(p).await {
+                        peer_max = peer_max.max(h);
+                    } else if let Some((h, _)) = block_peer_registry.get_peer_chain_tip(p).await {
+                        peer_max = peer_max.max(h);
+                    }
+                }
+                let target = exp.max(peer_max);
+                let behind = target.saturating_sub(cur);
+                if behind > CATCHUP_THRESHOLD {
+                    static LAST_BEHIND_LOG: std::sync::atomic::AtomicI64 =
+                        std::sync::atomic::AtomicI64::new(0);
+                    let now_secs = chrono::Utc::now().timestamp();
+                    let last = LAST_BEHIND_LOG.load(Ordering::Relaxed);
+                    if now_secs - last >= 30 {
+                        LAST_BEHIND_LOG.store(now_secs, Ordering::Relaxed);
+                        tracing::info!(
+                            "⏸️  Pausing production: {} blocks behind (current {}, network {}, expected {}) — waiting for sync",
+                            behind, cur, peer_max, exp
+                        );
+                    }
+                    // Request more blocks from peers to accelerate sync
+                    if !peers.is_empty() && peer_max > cur {
+                        let requested_end = peer_max.min(cur + 50);
+                        for peer_ip in &peers {
+                            let msg = crate::network::message::NetworkMessage::GetBlocks(
+                                cur + 1,
+                                requested_end,
+                            );
+                            let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
+                        }
+                    }
+                    continue;
+                }
             }
 
             // CRITICAL BOOTSTRAP FIX: Periodically request chain tips from peers
