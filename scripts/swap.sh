@@ -50,7 +50,9 @@ swapon "$SWAPFILE_NEW"
 echo "[*] Removing old swap..."
 swapoff "$SWAPFILE" 2>/dev/null || true
 rm -f "$SWAPFILE" 2>/dev/null || true
+swapoff "$SWAPFILE_NEW"
 mv "$SWAPFILE_NEW" "$SWAPFILE"
+swapon "$SWAPFILE"
 
 DISK_MB=$(df -m / | awk 'NR==2 {print $4}')
 echo "Disk free after cleanup: ${DISK_MB} MB"
