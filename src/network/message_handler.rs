@@ -412,6 +412,19 @@ impl MessageHandler {
         }
     }
 
+    /// Gap (in blocks) below which we no longer treat the node as "in IBD".
+    /// While syncing, we restrict block sources to the official time-coin.io
+    /// peer list to prevent latching onto a forged fork from a rogue peer.
+    const IBD_GAP_THRESHOLD: u64 = 10;
+
+    /// True when the local chain is far enough behind the expected tip that we
+    /// should treat incoming blocks as initial-block-download traffic.
+    fn is_initial_block_download(&self, context: &MessageContext) -> bool {
+        let current = context.blockchain.get_height();
+        let expected = context.blockchain.calculate_expected_height();
+        expected.saturating_sub(current) > Self::IBD_GAP_THRESHOLD
+    }
+
     /// Trim a block list so that it serializes within the wire frame limit.
     /// When blocks contain many transactions, even 50 blocks can exceed 8MB.
     /// We binary-search for the largest prefix that fits.
@@ -2412,6 +2425,19 @@ impl MessageHandler {
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         let block_height = block.header.height;
+
+        // IBD guard: while far behind the expected tip, only accept blocks from
+        // peers on the official time-coin.io peer list. This prevents a fresh
+        // node from latching onto a forged fork served by a non-canonical peer.
+        if self.is_initial_block_download(context)
+            && !context.peer_registry.is_whitelisted(&self.peer_ip).await
+        {
+            warn!(
+                "🚫 [{}] Dropping block {} from non-canonical peer {} during initial block download (only time-coin.io peers may serve historical blocks)",
+                self.direction, block_height, self.peer_ip
+            );
+            return Ok(None);
+        }
 
         // Check for duplicates using dedup filter if available
         if let Some(seen_blocks) = &context.seen_blocks {
@@ -5958,6 +5984,17 @@ impl MessageHandler {
 
         // Check if peer is whitelisted
         let is_whitelisted = context.peer_registry.is_whitelisted(&self.peer_ip).await;
+
+        // IBD guard: while far behind the expected tip, only accept block batches
+        // from peers on the official time-coin.io peer list. Prevents a fresh
+        // node from syncing a forged fork from a non-canonical peer.
+        if self.is_initial_block_download(context) && !is_whitelisted {
+            warn!(
+                "🚫 [{}] Dropping {} blocks (height {}-{}) from non-canonical peer {} during initial block download (only time-coin.io peers may serve historical blocks)",
+                self.direction, block_count, start_height, end_height, self.peer_ip
+            );
+            return Ok(None);
+        }
 
         info!(
             "📥 [{}] Received {} blocks (height {}-{}) from {} {}",
