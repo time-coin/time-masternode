@@ -40,8 +40,8 @@ pub enum AttackType {
     FinalityInjectionSpam, // TransactionFinalized for unknown TXs to force 49-validator broadcast amplification (AV38)
     NullTransactionFlood, // Transactions with 0 inputs + 0 outputs to exhaust mempool at zero cost (AV39)
     ZeroCollateralPollution, // Register zero-value UTXOs as Free-tier collateral under victim IPs to poison registry (AV40)
-    ConnectionFlood,  // High-rate inbound connections rejected by rate limiter — subnet DoS (AV50)
-    FrameBomb,        // Crafted TCP frame header claiming multi-GB payload to OOM/crash the node (AV51)
+    ConnectionFlood, // High-rate inbound connections rejected by rate limiter — subnet DoS (AV50)
+    FrameBomb, // Crafted TCP frame header claiming multi-GB payload to OOM/crash the node (AV51)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

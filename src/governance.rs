@@ -548,7 +548,11 @@ impl GovernanceState {
             .map(|mn| {
                 (
                     mn.masternode.address.clone(),
-                    mn.masternode.tier.voting_power().0.min(MAX_GOVERNANCE_VOTE_WEIGHT),
+                    mn.masternode
+                        .tier
+                        .voting_power()
+                        .0
+                        .min(MAX_GOVERNANCE_VOTE_WEIGHT),
                 )
             })
             .collect();
@@ -571,7 +575,13 @@ impl GovernanceState {
             .get_active_masternodes()
             .await
             .iter()
-            .map(|mn| mn.masternode.tier.voting_power().0.min(MAX_GOVERNANCE_VOTE_WEIGHT))
+            .map(|mn| {
+                mn.masternode
+                    .tier
+                    .voting_power()
+                    .0
+                    .min(MAX_GOVERNANCE_VOTE_WEIGHT)
+            })
             .sum()
     }
 

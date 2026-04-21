@@ -517,7 +517,8 @@ impl NetworkClient {
                             // Delay: 60s after 1 failure, doubling each time, capped at 300s.
                             let failures = res.reconnection_ai.consecutive_failures_for(mn_ip);
                             if failures > 0 {
-                                let min_delay_secs = (60u64 * 2u64.pow(failures.saturating_sub(1).min(3))).min(300);
+                                let min_delay_secs =
+                                    (60u64 * 2u64.pow(failures.saturating_sub(1).min(3))).min(300);
                                 let elapsed = connection_manager
                                     .time_since_disconnect(mn_ip)
                                     .unwrap_or(Duration::MAX);
@@ -784,12 +785,23 @@ impl ConnectionResources {
                     // kick.  Count as a failure so the reconnect backoff applies and we don't
                     // hammer a peer that can't stay connected at the current protocol version.
                     if elapsed < std::time::Duration::from_secs(10) {
-                        res.reconnection_ai
-                            .record_connection_failure(&ip, is_masternode, "short-lived session");
-                        tracing::info!("{} Connection to {} ended quickly ({:.1}s)", tag, ip, elapsed.as_secs_f64());
+                        res.reconnection_ai.record_connection_failure(
+                            &ip,
+                            is_masternode,
+                            "short-lived session",
+                        );
+                        tracing::info!(
+                            "{} Connection to {} ended quickly ({:.1}s)",
+                            tag,
+                            ip,
+                            elapsed.as_secs_f64()
+                        );
                     } else {
-                        res.reconnection_ai
-                            .record_connection_success(&ip, is_masternode, connect_time);
+                        res.reconnection_ai.record_connection_success(
+                            &ip,
+                            is_masternode,
+                            connect_time,
+                        );
                         tracing::info!("{} Connection to {} ended gracefully", tag, ip);
                     }
                     true

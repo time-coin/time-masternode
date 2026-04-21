@@ -1093,6 +1093,7 @@ async fn handle_peer(
                 tracing::info!("🔌 New peer connection from: {}", peer.addr);
                 tracing::debug!("🔒 TLS established for inbound {}", peer.addr);
                 let peer_addr = peer.addr.clone();
+                let gate_is_whitelisted = is_whitelisted;
                 // Spawn a single I/O bridge task that owns the TLS stream
                 tokio::spawn(async move {
                     use tokio::io::AsyncWriteExt;
@@ -1101,10 +1102,14 @@ async fn handle_peer(
                     // Refills at GATE_RATE tokens/s; burst up to GATE_BURST.
                     // Soft-drops messages while tokens are exhausted; after
                     // GATE_HARD_DROPS consecutive soft-drops the peer is disconnected.
-                    const GATE_RATE: f64 = 200.0; // sustained msgs/s allowed
-                    const GATE_BURST: f64 = 300.0; // burst allowance
+                    // Whitelisted peers get elevated limits AND never hard-kick — a
+                    // friendly node that briefly exceeds rate (e.g. mempool replay after
+                    // reconnect, fork-resolution bursts) must stay connected so block
+                    // production doesn't lose consensus quorum.
+                    let gate_rate: f64 = if gate_is_whitelisted { 5000.0 } else { 200.0 };
+                    let gate_burst: f64 = if gate_is_whitelisted { 10000.0 } else { 300.0 };
                     const GATE_HARD_DROPS: u32 = 300; // consecutive drops → hard kick
-                    let mut gate_tokens: f64 = GATE_BURST;
+                    let mut gate_tokens: f64 = gate_burst;
                     let mut gate_last = std::time::Instant::now();
                     let mut gate_drop_streak: u32 = 0;
                     loop {
@@ -1116,13 +1121,13 @@ async fn handle_peer(
                                 let gate_now = std::time::Instant::now();
                                 let elapsed = gate_now.duration_since(gate_last).as_secs_f64();
                                 gate_last = gate_now;
-                                gate_tokens = (gate_tokens + elapsed * GATE_RATE).min(GATE_BURST);
+                                gate_tokens = (gate_tokens + elapsed * gate_rate).min(gate_burst);
                                 if gate_tokens >= 1.0 {
                                     gate_tokens -= 1.0;
                                     gate_drop_streak = 0;
                                 } else {
                                     gate_drop_streak += 1;
-                                    if gate_drop_streak > GATE_HARD_DROPS {
+                                    if !gate_is_whitelisted && gate_drop_streak > GATE_HARD_DROPS {
                                         let _ = msg_read_tx.send(Err("Message flood detected: pre-channel gate triggered".to_string())).await;
                                         break;
                                     }
@@ -1197,16 +1202,21 @@ async fn handle_peer(
         let (r, w) = stream.into_split();
         // Spawn reader task for non-TLS
         let peer_addr = peer.addr.clone();
+        let gate_is_whitelisted = is_whitelisted;
         tokio::spawn(async move {
             let mut reader = r;
             // Token-bucket flood gate: event-driven, no 1-second timer polling.
-            // Refills at GATE_RATE tokens/s; burst up to GATE_BURST.
+            // Refills at gate_rate tokens/s; burst up to gate_burst.
             // Soft-drops messages while tokens are exhausted; after
             // GATE_HARD_DROPS consecutive soft-drops the peer is disconnected.
-            const GATE_RATE: f64 = 200.0; // sustained msgs/s allowed
-            const GATE_BURST: f64 = 300.0; // burst allowance
+            // Whitelisted peers get elevated limits AND never hard-kick — a
+            // friendly node that briefly exceeds rate (e.g. mempool replay after
+            // reconnect, fork-resolution bursts) must stay connected so block
+            // production doesn't lose consensus quorum.
+            let gate_rate: f64 = if gate_is_whitelisted { 5000.0 } else { 200.0 };
+            let gate_burst: f64 = if gate_is_whitelisted { 10000.0 } else { 300.0 };
             const GATE_HARD_DROPS: u32 = 300; // consecutive drops → hard kick
-            let mut gate_tokens: f64 = GATE_BURST;
+            let mut gate_tokens: f64 = gate_burst;
             let mut gate_last = std::time::Instant::now();
             let mut gate_drop_streak: u32 = 0;
             loop {
@@ -1217,13 +1227,13 @@ async fn handle_peer(
                 let gate_now = std::time::Instant::now();
                 let elapsed = gate_now.duration_since(gate_last).as_secs_f64();
                 gate_last = gate_now;
-                gate_tokens = (gate_tokens + elapsed * GATE_RATE).min(GATE_BURST);
+                gate_tokens = (gate_tokens + elapsed * gate_rate).min(gate_burst);
                 if gate_tokens >= 1.0 {
                     gate_tokens -= 1.0;
                     gate_drop_streak = 0;
                 } else {
                     gate_drop_streak += 1;
-                    if gate_drop_streak > GATE_HARD_DROPS {
+                    if !gate_is_whitelisted && gate_drop_streak > GATE_HARD_DROPS {
                         let _ = msg_read_tx
                             .send(Err(
                                 "Message flood detected: pre-channel gate triggered".to_string()

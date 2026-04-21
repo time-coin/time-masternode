@@ -2510,7 +2510,9 @@ impl MessageHandler {
                         .blockchain
                         .fork_resolution_last_request
                         .get(&self.peer_ip)
-                        .map(|t| now_instant.duration_since(*t) < std::time::Duration::from_secs(30))
+                        .map(|t| {
+                            now_instant.duration_since(*t) < std::time::Duration::from_secs(30)
+                        })
                         .unwrap_or(false);
                     if recently_requested {
                         debug!(
@@ -2518,10 +2520,10 @@ impl MessageHandler {
                             self.direction, self.peer_ip
                         );
                     } else {
-                        context.blockchain.fork_resolution_last_request.insert(
-                            self.peer_ip.clone(),
-                            now_instant,
-                        );
+                        context
+                            .blockchain
+                            .fork_resolution_last_request
+                            .insert(self.peer_ip.clone(), now_instant);
                         // Request blocks going back far enough to find common ancestor
                         let request_from = current_height.saturating_sub(20).max(1);
                         info!(
@@ -5734,10 +5736,10 @@ impl MessageHandler {
                     );
                     return Ok(None);
                 }
-                context.blockchain.fork_resolution_last_request.insert(
-                    self.peer_ip.clone(),
-                    now_instant,
-                );
+                context
+                    .blockchain
+                    .fork_resolution_last_request
+                    .insert(self.peer_ip.clone(), now_instant);
                 let request_from = peer_height.saturating_sub(10);
                 info!(
                     "🔄 [{}] Requesting blocks {}-{} from {} for fork resolution",

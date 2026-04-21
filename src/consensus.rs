@@ -3053,7 +3053,9 @@ impl ConsensusEngine {
                     && sd.verify_address_binding().is_ok()
             });
             if !valid {
-                return Err("Ghost TX rejected: no inputs/outputs and no valid special_data".to_string());
+                return Err(
+                    "Ghost TX rejected: no inputs/outputs and no valid special_data".to_string(),
+                );
             }
         } else {
             if tx.inputs.is_empty() && tx.special_data.is_none() {
