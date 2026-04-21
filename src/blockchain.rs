@@ -7630,33 +7630,47 @@ impl Blockchain {
             );
         }
 
-        // REWARD-HIJACK GUARD: non-genesis blocks must have ≥3 unique addresses with
-        // a POSITIVE (non-zero) payout.  Zero-amount entries in masternode_rewards are
-        // padding and must not count toward the quorum floor — an attacker can otherwise
-        // pad [(attacker, 95T), (dummy1, 0), (dummy2, 0)] to bypass the ≥3 check while
-        // redirecting the full block reward to a single address.
+        // REWARD-HIJACK GUARD: non-genesis blocks must have ≥ bitmap_eligible unique
+        // addresses with POSITIVE (non-zero) payouts (min 1, max 3).
+        // Zero-amount entries in masternode_rewards are padding and must not count toward
+        // the quorum floor — an attacker can otherwise pad [(attacker, 95T), (dummy1, 0),
+        // (dummy2, 0)] to bypass the check while routing the full reward to one address.
+        // During network-contraction events (bitmap < 3 nodes active) we lower the floor
+        // to match the actual eligible pool so legitimate low-participation blocks are not
+        // permanently rejected, causing a reorg deadlock.
         if block.header.height >= 1 {
-            const MIN_PAID_RECIPIENTS: usize = 3;
+            let bitmap_eligible: usize = block
+                .header
+                .active_masternodes_bitmap
+                .iter()
+                .map(|b| b.count_ones() as usize)
+                .sum();
+            let min_paid_recipients = if bitmap_eligible >= 3 {
+                3
+            } else {
+                bitmap_eligible.max(1)
+            };
             let paid: std::collections::HashSet<&str> = block
                 .masternode_rewards
                 .iter()
                 .filter(|(_, amt)| *amt > 0)
                 .map(|(a, _)| a.as_str())
                 .collect();
-            if paid.len() < MIN_PAID_RECIPIENTS {
+            if paid.len() < min_paid_recipients {
                 tracing::warn!(
-                    "🛡️ Block {} rejected: only {} paid reward recipient(s) (need ≥{}) — \
-                     possible reward-hijack via zero-padding",
+                    "🛡️ Block {} rejected: only {} paid reward recipient(s) (need ≥{}, \
+                     bitmap_eligible={}) — possible reward-hijack via zero-padding",
                     block.header.height,
                     paid.len(),
-                    MIN_PAID_RECIPIENTS
+                    min_paid_recipients,
+                    bitmap_eligible,
                 );
                 return Err(format!(
                     "Block {} rejected: only {} unique reward recipient(s), need ≥{}. \
                      Zero-amount padding entries do not count.",
                     block.header.height,
                     paid.len(),
-                    MIN_PAID_RECIPIENTS
+                    min_paid_recipients,
                 ));
             }
         }
@@ -10425,8 +10439,12 @@ impl Blockchain {
         // BEFORE touching our current chain.  The per-block guard (below) runs after
         // rollback — if it trips we are left at the ancestor with no local chain.
         // By running this check now we abort without modifying storage at all.
+        //
+        // Mirror the same bitmap-aware threshold used in add_block: require ≥3 recipients
+        // only when ≥3 nodes are set in the bitmap; for sparse participation (bitmap < 3)
+        // require ≥bitmap_eligible (min 1).  A hardcoded 3 would reject legitimate blocks
+        // produced during network-contraction events, causing a permanent reorg deadlock.
         {
-            const MIN_PREFLIGHT_RECIPIENTS: usize = 3;
             for blk in alternate_blocks.iter() {
                 if blk.header.height >= 1 {
                     // CRITICAL: filter amt > 0 so zero-amount padding entries don't count.
@@ -10434,26 +10452,39 @@ impl Blockchain {
                     // a naive unique-address count while routing the full reward to one address.
                     // Without this filter the pre-flight passes, rollback fires, then add_block
                     // rejects it — leaving the node stranded at the ancestor height.
+                    let bitmap_eligible: usize = blk
+                        .header
+                        .active_masternodes_bitmap
+                        .iter()
+                        .map(|b| b.count_ones() as usize)
+                        .sum();
+                    let min_preflight_recipients = if bitmap_eligible >= 3 {
+                        3
+                    } else {
+                        bitmap_eligible.max(1)
+                    };
                     let paid: std::collections::HashSet<&str> = blk
                         .masternode_rewards
                         .iter()
                         .filter(|(_, amt)| *amt > 0)
                         .map(|(a, _)| a.as_str())
                         .collect();
-                    if paid.len() < MIN_PREFLIGHT_RECIPIENTS {
+                    if paid.len() < min_preflight_recipients {
                         tracing::warn!(
                             "🛡️ Reorg pre-flight: block {} has only {} paid reward recipient(s) \
-                             (need ≥{}) — zero-amount padding detected, aborting reorg without \
-                             touching current chain",
+                             (need ≥{}, bitmap_eligible={}) — aborting reorg without touching \
+                             current chain",
                             blk.header.height,
                             paid.len(),
-                            MIN_PREFLIGHT_RECIPIENTS
+                            min_preflight_recipients,
+                            bitmap_eligible,
                         );
                         return Err(format!(
                             "Block {} rejected: only {} unique reward recipient(s), need \
-                             ≥{MIN_PREFLIGHT_RECIPIENTS}. Zero-amount padding does not count.",
+                             ≥{}. Zero-amount padding does not count.",
                             blk.header.height,
-                            paid.len()
+                            paid.len(),
+                            min_preflight_recipients,
                         ));
                     }
                 }
