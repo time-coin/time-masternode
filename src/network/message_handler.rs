@@ -5683,8 +5683,11 @@ impl MessageHandler {
                     }
                 }
 
-                // If we have consensus and peer is on minority fork, send alert
-                if our_chain_count > peer_chain_count && our_chain_count >= 3 {
+                // If we have consensus and peer is on minority fork, send alert.
+                // Threshold lowered from 3 to 2: with small networks the canonical
+                // chain may only have 2 visible supporters (us + 1 peer) yet the
+                // minority node needs to know so it can reconcile.
+                if our_chain_count > peer_chain_count && our_chain_count >= 2 {
                     info!(
                         "📢 [{}] We have consensus ({} vs {} peers) at height {} - sending fork alert to {}",
                         self.direction, our_chain_count, peer_chain_count, peer_height, self.peer_ip

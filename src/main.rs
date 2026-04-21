@@ -2968,6 +2968,50 @@ async fn main() {
                 continue;
             }
 
+            // Periodically broadcast GetChainTip so peer heights stay fresh.
+            // This MUST run before the catch-up `continue` below so that nodes
+            // which are behind still discover peer heights and can request blocks.
+            if last_chain_tip_request.elapsed() >= CHAIN_TIP_REQUEST_INTERVAL {
+                let connected = block_peer_registry.get_connected_peers().await;
+                if !connected.is_empty() {
+                    tracing::debug!(
+                        "📡 Periodic chain tip refresh: requesting from {} peer(s)",
+                        connected.len()
+                    );
+                    block_peer_registry
+                        .broadcast(crate::network::message::NetworkMessage::GetChainTip)
+                        .await;
+                    last_chain_tip_request = std::time::Instant::now();
+                }
+            }
+
+            // Fork-state watchdog: if handle_fork() entered FetchingChain and the
+            // triggering peer then disconnected, no new blocks arrive to trigger
+            // the in-function stall detector.  Clear the state here after 90 s so
+            // the next chain-tip comparison can start a fresh resolution attempt.
+            {
+                use crate::blockchain::ForkResolutionState;
+                let stale = {
+                    let fs = block_blockchain.fork_state.read().await;
+                    match &*fs {
+                        ForkResolutionState::FetchingChain { started_at, .. } => {
+                            started_at.elapsed() > std::time::Duration::from_secs(90)
+                        }
+                        ForkResolutionState::Reorging { started_at, .. } => {
+                            started_at.elapsed() > std::time::Duration::from_secs(30)
+                        }
+                        _ => false,
+                    }
+                };
+                if stale {
+                    tracing::warn!(
+                        "⚠️  Fork state watchdog: clearing stale fork resolution state \
+                         (peer likely disconnected mid-resolution)"
+                    );
+                    *block_blockchain.fork_state.write().await = ForkResolutionState::None;
+                }
+            }
+
             // Runtime catch-up safety: if we've fallen significantly behind the network
             // mid-run (e.g., sustained network outage, big reorg), pause production and
             // let sync catch us back up.  Same CATCHUP_THRESHOLD as the startup gate.
@@ -3009,24 +3053,6 @@ async fn main() {
                         }
                     }
                     continue;
-                }
-            }
-
-            // CRITICAL BOOTSTRAP FIX: Periodically request chain tips from peers
-            // This keeps peer_chain_tips cache fresh so block production can verify consensus
-            // Without this, nodes get stuck at bootstrap because check_2_3_consensus_for_production()
-            // has no peer data to work with
-            if last_chain_tip_request.elapsed() >= CHAIN_TIP_REQUEST_INTERVAL {
-                let connected = block_peer_registry.get_connected_peers().await;
-                if !connected.is_empty() {
-                    tracing::debug!(
-                        "📡 Periodic chain tip refresh: requesting from {} peer(s)",
-                        connected.len()
-                    );
-                    block_peer_registry
-                        .broadcast(crate::network::message::NetworkMessage::GetChainTip)
-                        .await;
-                    last_chain_tip_request = std::time::Instant::now();
                 }
             }
 
