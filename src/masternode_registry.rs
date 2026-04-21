@@ -203,28 +203,32 @@ pub struct MasternodeRegistry {
     /// Prevents rapid flip-flop when two peers gossip the same collateral with different IPs.
     /// Key: "<txid>:<vout>", Value: Unix timestamp of the last accepted migration.
     collateral_migration_times: Arc<DashMap<String, u64>>,
-    /// Per-outpoint: the source IP of the most recent accepted migration.
-    /// Used to detect back-and-forth IP cycling attacks (AV3).
+    /// Per-outpoint: source IP of the most recent accepted collateral migration.
+    /// Used to enforce the back-and-forth migration policy (same IP that migrated away cannot
+    /// immediately migrate back to the same outpoint within the cycling lockout window).
     /// Key: "<txid>:<vout>", Value: the IP the collateral migrated FROM last time.
     collateral_migration_from: Arc<DashMap<String, String>>,
-    /// Per-outpoint timestamp of the most recent V4-proof eviction.
-    /// Any free-tier IP migration targeting the same outpoint is blocked for
-    /// POST_EVICTION_LOCKOUT_SECS (600 s) after a V4 eviction, closing the
-    /// re-squatting oscillation loop (Attack Vector 14).
+    /// Per-outpoint reuse cooldown after a V4-proof eviction.
+    /// Free-tier migrations targeting the same outpoint are blocked for
+    /// POST_EVICTION_LOCKOUT_SECS (600 s) after a V4 eviction so the
+    /// legitimate owner can reclaim without a concurrent free-tier squatter racing in.
     /// Key: "<txid>:<vout>", Value: Unix timestamp of the eviction.
     post_eviction_lockout: Arc<DashMap<String, u64>>,
-    /// Per-outpoint migration history within a sliding window (AV26 pool rotation defense).
-    /// Key: "<txid>:<vout>", Value: (migration_count, window_start_unix_secs)
-    /// Rejects outpoints that migrate more than MAX_MIGRATIONS_PER_WINDOW times in 30 minutes.
+    /// Per-outpoint migration rate limit within a sliding window.
+    /// Key: "<txid>:<vout>", Value: (migration_count, window_start_unix_secs).
+    /// Enforces the registry policy that a collateral outpoint may migrate at most
+    /// MAX_MIGRATIONS_PER_WINDOW times per 30-minute window.
     collateral_migration_counts: Arc<DashMap<String, (u32, u64)>>,
-    /// Per-/24-subnet count of currently registered Free-tier masternodes (AV25 flooding defense).
+    /// Per-/24-subnet cap on registered Free-tier masternodes.
     /// Key: "A.B.C" (first three octets of the IP), Value: current registered count.
-    /// Limits attacker subnets from flooding the registry with many Free-tier nodes.
+    /// Enforces the registry policy that no single /24 subnet may exceed
+    /// the Free-tier slot cap; prevents any single subnet from dominating the Free pool.
     free_tier_subnet_counts: Arc<DashMap<String, u32>>,
-    /// Per-IP Unix timestamp of the most recent Free-tier removal on disconnect (AV3 cycling defense).
+    /// Per-IP reconnect cooldown for Free-tier nodes after a disconnect-triggered removal.
     /// Key: IP string, Value: Unix timestamp of removal.
-    /// Prevents rapid re-registration within FREE_TIER_RECONNECT_COOLDOWN_SECS of removal.
-    /// Also doubles as a dedup guard: concurrent disconnect tasks for the same IP skip the second one.
+    /// Enforces the registry policy that a Free-tier node must wait
+    /// FREE_TIER_RECONNECT_COOLDOWN_SECS before re-registering after a disconnect.
+    /// Also functions as a dedup guard so concurrent disconnect tasks skip duplicate removals.
     free_tier_reconnect_cooldown: Arc<DashMap<String, u64>>,
     /// Wakeup signal for the PHASE3 reconnection loop.  Fired when a paid-tier node
     /// disconnects so PHASE3 reconnects in milliseconds instead of waiting up to 30s.
@@ -237,6 +241,20 @@ pub struct MasternodeRegistry {
     cached_active: parking_lot::RwLock<Vec<MasternodeInfo>>,
     /// Sync-readable snapshot of all masternodes.
     cached_all: parking_lot::RwLock<Vec<MasternodeInfo>>,
+}
+
+/// A squatter eviction produced by `MasternodeRegistry::audit_squatters()`.
+///
+/// Carries everything the network layer needs to ban the IP and close the TCP
+/// connection without touching registry internals directly.
+#[derive(Debug, Clone)]
+pub struct SquatterEviction {
+    /// The IP (and optional port) that was evicted.
+    pub ip: String,
+    /// Human-readable reason, suitable for passing to `IPBlacklist::add_temp_ban()`.
+    pub reason: String,
+    /// Recommended temporary-ban duration (2 hours for audit-detected squatters).
+    pub ban_duration: std::time::Duration,
 }
 
 impl MasternodeRegistry {
@@ -4439,6 +4457,229 @@ impl MasternodeRegistry {
         pubkey
             .verify(message, &signature)
             .map_err(|_| RegistryError::InvalidSignature)
+    }
+
+    // ── Collateral audit ─────────────────────────────────────────────────────
+
+    /// Audit every paid-tier registered masternode for collateral ownership.
+    ///
+    /// Four passes are executed in order:
+    ///  - **Pass 0** — on-chain anchor mismatch (registry IP ≠ confirmed on-chain IP)
+    ///  - **Pass 1** — reward_address ≠ UTXO output address
+    ///  - **Pass 2** — duplicate outpoint: two nodes claim the same collateral
+    ///  - **Pass 3** — zero-value or sub-minimum collateral UTXO
+    ///
+    /// For each confirmed squatter the registry is immediately updated
+    /// (`unregister` + `unlock_collateral`) and a `SquatterEviction` is returned.
+    /// The **network layer** is responsible for banning the IP and closing the
+    /// TCP connection — no blacklist logic lives in this method.
+    ///
+    /// `local_ip` and `whitelist_ips` are exempted from eviction so the local
+    /// node can never self-evict and operator-trusted peers are preserved.
+    pub async fn audit_squatters(
+        &self,
+        utxo_manager: &Arc<crate::utxo_manager::UTXOStateManager>,
+        local_ip: &str,
+        whitelist_ips: &std::collections::HashSet<std::net::IpAddr>,
+    ) -> Vec<SquatterEviction> {
+        let all_nodes = self.get_all().await;
+        let mut evictions: Vec<SquatterEviction> = Vec::new();
+
+        let is_exempt = |ip: &str| -> bool {
+            let bare = ip.split(':').next().unwrap_or(ip);
+            if !local_ip.is_empty()
+                && bare == local_ip.split(':').next().unwrap_or(local_ip)
+            {
+                return true;
+            }
+            bare.parse::<std::net::IpAddr>()
+                .map(|a| whitelist_ips.contains(&a))
+                .unwrap_or(false)
+        };
+
+        // Check helper — can't be a closure because we also need `evictions` mutably later.
+        fn already_evicted(evictions: &[SquatterEviction], ip: &str) -> bool {
+            evictions.iter().any(|e| e.ip == ip)
+        }
+
+        const SQUATTER_BAN: std::time::Duration = std::time::Duration::from_secs(7200); // 2 hours
+
+        // ── Pass 0: on-chain anchor mismatch ────────────────────────────────
+        for info in &all_nodes {
+            if info.masternode.tier == crate::types::MasternodeTier::Free {
+                continue;
+            }
+            let outpoint = match &info.masternode.collateral_outpoint {
+                Some(op) => op.clone(),
+                None => continue,
+            };
+            let ip = info.masternode.address.clone();
+            if is_exempt(&ip) || already_evicted(&evictions, &ip) {
+                continue;
+            }
+            if let Some(anchored_ip) = self.get_collateral_anchor(&outpoint) {
+                if anchored_ip != ip {
+                    warn!(
+                        "🚨 [COLLATERAL AUDIT] On-chain anchor mismatch: registry has {} for \
+                         outpoint {} but anchor points to {} — evicting",
+                        ip, outpoint, anchored_ip
+                    );
+                    let _ = self.unregister(&ip).await;
+                    let _ = utxo_manager.unlock_collateral(&outpoint);
+                    evictions.push(SquatterEviction {
+                        ip,
+                        reason: "collateral squatter: registry IP ≠ on-chain anchor IP"
+                            .to_string(),
+                        ban_duration: SQUATTER_BAN,
+                    });
+                }
+            }
+        }
+
+        // ── Pass 1: reward_address ≠ UTXO owner ─────────────────────────────
+        for info in &all_nodes {
+            if info.masternode.tier == crate::types::MasternodeTier::Free {
+                continue;
+            }
+            let outpoint = match &info.masternode.collateral_outpoint {
+                Some(op) => op.clone(),
+                None => continue,
+            };
+            let utxo = match utxo_manager.get_utxo(&outpoint).await {
+                Ok(u) if !u.address.is_empty() => u,
+                _ => continue,
+            };
+            let ip = info.masternode.address.clone();
+            if is_exempt(&ip) || already_evicted(&evictions, &ip) {
+                continue;
+            }
+            if info.reward_address != utxo.address {
+                warn!(
+                    "🚨 [COLLATERAL AUDIT] Squatter: {} registered {:?} with outpoint {} \
+                     but reward_address {} ≠ UTXO owner {} — evicting",
+                    ip, info.masternode.tier, outpoint, info.reward_address, utxo.address,
+                );
+                let _ = self.unregister(&ip).await;
+                let _ = utxo_manager.unlock_collateral(&outpoint);
+                evictions.push(SquatterEviction {
+                    ip,
+                    reason: "collateral squatter: reward_address ≠ UTXO owner".to_string(),
+                    ban_duration: SQUATTER_BAN,
+                });
+            }
+        }
+
+        // ── Pass 2: duplicate outpoint claim ────────────────────────────────
+        let mut outpoint_map: HashMap<String, Vec<MasternodeInfo>> = HashMap::new();
+        for info in &all_nodes {
+            if info.masternode.tier == crate::types::MasternodeTier::Free {
+                continue;
+            }
+            if let Some(ref op) = info.masternode.collateral_outpoint {
+                let key = format!("{}:{}", hex::encode(op.txid), op.vout);
+                outpoint_map.entry(key).or_default().push(info.clone());
+            }
+        }
+        for (outpoint_str, claimants) in &outpoint_map {
+            if claimants.len() < 2 {
+                continue;
+            }
+            let outpoint = match claimants
+                .first()
+                .and_then(|c| c.masternode.collateral_outpoint.clone())
+            {
+                Some(op) => op,
+                None => continue,
+            };
+            let utxo_addr = match utxo_manager.get_utxo(&outpoint).await {
+                Ok(u) if !u.address.is_empty() => u.address,
+                _ => continue,
+            };
+            let mut owner: Option<String> = None;
+            let mut squatters: Vec<String> = Vec::new();
+            for c in claimants {
+                if c.reward_address == utxo_addr {
+                    if owner.is_none() {
+                        owner = Some(c.masternode.address.clone());
+                    } else {
+                        squatters.clear(); // stalemate — V4 proof needed
+                        warn!(
+                            "⚠️ [COLLATERAL AUDIT] Outpoint {} claimed by {} nodes all matching \
+                             UTXO address — V4 proof required to resolve",
+                            outpoint_str,
+                            claimants.len()
+                        );
+                        break;
+                    }
+                } else {
+                    squatters.push(c.masternode.address.clone());
+                }
+            }
+            if owner.is_some() {
+                for sq_ip in squatters {
+                    if is_exempt(&sq_ip) || already_evicted(&evictions, &sq_ip) {
+                        continue;
+                    }
+                    warn!(
+                        "🚨 [COLLATERAL AUDIT] Duplicate outpoint {}: owner={:?}, squatter={}",
+                        outpoint_str, owner, sq_ip
+                    );
+                    let _ = self.unregister(&sq_ip).await;
+                    let _ = utxo_manager.unlock_collateral(&outpoint);
+                    evictions.push(SquatterEviction {
+                        ip: sq_ip,
+                        reason: "collateral squatter: duplicate outpoint claim".to_string(),
+                        ban_duration: SQUATTER_BAN,
+                    });
+                }
+            }
+        }
+
+        // ── Pass 3: zero-value / sub-minimum collateral ──────────────────────
+        const BRONZE_MIN: u64 = 1_000_000_000_000; // 1,000 TIME in satoshis
+        for info in &all_nodes {
+            let outpoint = match &info.masternode.collateral_outpoint {
+                Some(op) => op.clone(),
+                None => continue,
+            };
+            let ip = info.masternode.address.clone();
+            if is_exempt(&ip) || already_evicted(&evictions, &ip) {
+                continue;
+            }
+            let utxo = match utxo_manager.get_utxo(&outpoint).await {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            let is_zero_value =
+                info.masternode.tier == crate::types::MasternodeTier::Free
+                    || utxo.value < BRONZE_MIN;
+            if is_zero_value {
+                warn!(
+                    "🚨 [COLLATERAL AUDIT] Sub-minimum collateral: {} outpoint {} value {} \
+                     satoshis (tier: {:?}) — evicting",
+                    ip, outpoint, utxo.value, info.masternode.tier,
+                );
+                let _ = self.unregister(&ip).await;
+                let _ = utxo_manager.unlock_collateral(&outpoint);
+                evictions.push(SquatterEviction {
+                    ip,
+                    reason: format!(
+                        "sub-minimum collateral: {} satoshis (tier: {:?})",
+                        utxo.value, info.masternode.tier
+                    ),
+                    ban_duration: SQUATTER_BAN,
+                });
+            }
+        }
+
+        if !evictions.is_empty() {
+            warn!(
+                "🔍 [COLLATERAL AUDIT] Sweep complete — evicted {} squatter(s): {:?}",
+                evictions.len(),
+                evictions.iter().map(|e| e.ip.as_str()).collect::<Vec<_>>(),
+            );
+        }
+        evictions
     }
 }
 
