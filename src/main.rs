@@ -2789,11 +2789,11 @@ async fn main() {
         // This gate blocks here (re-requesting missing blocks every REQUEST_INTERVAL
         // seconds) until we are within CATCHUP_THRESHOLD blocks of both the time-based
         // expected height AND the highest height reported by connected peers.
-        // Tightened from 3 → 1: a fresh-sync node at height N where peers are at N+2
-        // would pass the old gate and try to produce a block that already exists on the
-        // network (creating a fork). With threshold=1 we only allow production once
-        // we are at most 1 block behind the network tip (normal network-latency tolerance).
-        const CATCHUP_THRESHOLD: u64 = 1;
+        // With 10-minute block times there is no "latency tolerance" — if a peer is
+        // 1 block ahead it has a 10-minute-old block we simply do not have.  A node
+        // must be at exactly the network tip before producing.  Threshold=0 enforces
+        // this: production is gated until behind==0 (we match every connected peer).
+        const CATCHUP_THRESHOLD: u64 = 0;
         const CATCHUP_LOG_INTERVAL_SECS: u64 = 15;
         const CATCHUP_REQUEST_INTERVAL_SECS: u64 = 10;
         const MIN_CONFIRMED_PEERS: usize = 3;
