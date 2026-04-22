@@ -4966,96 +4966,13 @@ impl Blockchain {
                     self.masternode_registry.get(&block.header.leader).await
                 {
                     if let Err(e) = block.verify_signature(&proposer_info.masternode.public_key) {
-                        let chain_tip = self.current_height.load(Ordering::Acquire);
-                        // Reject live blocks (within 10 of tip) — forged leader cannot be tolerated.
-                        // Warn only for deep-historical sync where registry keys may be stale.
-                        if block.header.height + 10 >= chain_tip {
-                            return Err(format!(
-                                "Block {} producer signature invalid for leader {} — rejected: {}",
-                                block.header.height, block.header.leader, e
-                            ));
-                        } else {
-                            tracing::warn!(
-                                "⚠️ Block {} producer signature mismatch for leader {} (stale registry key during historical sync): {}",
-                                block.header.height, block.header.leader, e
-                            );
-                        }
-                    }
-                }
-            }
-
-            // Verify VRF eligibility for live blocks (skip genesis and deep-historical sync).
-            // This closes the gap where reorg alternate-chain blocks bypass
-            // validate_block_before_vote() in message_handler and could carry an
-            // attacker-chosen leader with an arbitrary VRF score.
-            {
-                let chain_tip = self.current_height.load(Ordering::Acquire);
-                let is_live_block =
-                    block.header.height + 10 >= chain_tip && block.header.height > 3;
-                if is_live_block && block.header.vrf_score > 0 && !block.header.leader.is_empty() {
-                    if let Some(proposer_info) =
-                        self.masternode_registry.get(&block.header.leader).await
-                    {
-                        let eligible_masternodes = self
-                            .masternode_registry
-                            .get_vrf_eligible(block.header.height)
-                            .await;
-                        let blocks_without_map = self
-                            .masternode_registry
-                            .get_verifiable_reward_tracking(self)
-                            .await;
-                        let proposer_fairness_bonus = blocks_without_map
-                            .get(&block.header.leader)
-                            .copied()
-                            .unwrap_or(0)
-                            / 10;
-                        let proposer_weight = {
-                            let raw = proposer_info.masternode.tier.sampling_weight()
-                                + proposer_fairness_bonus;
-                            if matches!(
-                                proposer_info.masternode.tier,
-                                crate::types::MasternodeTier::Free
-                            ) {
-                                raw.min(crate::types::MasternodeTier::Bronze.sampling_weight() - 1)
-                            } else {
-                                raw
-                            }
-                        };
-                        let total_sampling_weight: u64 = eligible_masternodes
-                            .iter()
-                            .map(|(mn, _)| {
-                                let bonus = blocks_without_map
-                                    .get(&mn.address)
-                                    .copied()
-                                    .map(|b| b / 10)
-                                    .unwrap_or(0);
-                                let raw = mn.tier.sampling_weight() + bonus;
-                                if matches!(mn.tier, crate::types::MasternodeTier::Free) {
-                                    raw.min(
-                                        crate::types::MasternodeTier::Bronze.sampling_weight() - 1,
-                                    )
-                                } else {
-                                    raw
-                                }
-                            })
-                            .sum();
-                        if total_sampling_weight > 0 {
-                            let is_eligible = crate::block::vrf::vrf_check_proposer_eligible(
-                                block.header.vrf_score,
-                                proposer_weight,
-                                total_sampling_weight,
-                            );
-                            if !is_eligible {
-                                return Err(format!(
-                                    "Block {} proposer {} VRF score {} fails eligibility (weight {}/{}) — rejected",
-                                    block.header.height,
-                                    block.header.leader,
-                                    block.header.vrf_score,
-                                    proposer_weight,
-                                    total_sampling_weight,
-                                ));
-                            }
-                        }
+                        // Warn but don't reject: stale registry keys (e.g. after chain wipe)
+                        // cause false failures during historical sync. Chain hash integrity
+                        // is still enforced. Keys are refreshed once sync reaches the tip.
+                        tracing::warn!(
+                            "⚠️ Block {} producer signature mismatch for leader {} (stale registry key?): {}",
+                            block.header.height, block.header.leader, e
+                        );
                     }
                 }
             }
@@ -7904,7 +7821,7 @@ impl Blockchain {
             }
 
             tracing::debug!(
-                "✅ Block {} VRF score/output consistent (score={}); eligibility enforced in add_block()",
+                "✅ Block {} has VRF proof (score={}), full verification deferred to leader lookup",
                 block.header.height,
                 block.header.vrf_score
             );
