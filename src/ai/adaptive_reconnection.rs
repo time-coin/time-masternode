@@ -231,8 +231,7 @@ impl AdaptiveReconnectionAI {
         // Without this, peers accumulate failures that push the max 24-hour cooldown
         // clock forward on every retry, locking them out indefinitely.
         if profile.consecutive_failures >= self.config.max_consecutive_failures {
-            let extra_cycles =
-                profile.consecutive_failures - self.config.max_consecutive_failures;
+            let extra_cycles = profile.consecutive_failures - self.config.max_consecutive_failures;
             let effective_cooldown = (self.config.cooldown_period_secs as f64
                 * 2_f64.powi(extra_cycles.min(8) as i32))
             .min(86_400.0) as u64;

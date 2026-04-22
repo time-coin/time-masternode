@@ -300,8 +300,7 @@ impl NetworkServer {
                 ddos_cleanup.cleanup_subnet_rates();
 
                 // DDoS health snapshot
-                let (perm, temp, subnets, violations) =
-                    stats_blacklist.read().await.list_bans();
+                let (perm, temp, subnets, violations) = stats_blacklist.read().await.list_bans();
                 let whitelist_count = stats_blacklist.read().await.whitelist_count();
                 let active = stats_conn_mgr.connected_count();
                 let inbound = stats_conn_mgr.inbound_count();
@@ -531,10 +530,11 @@ impl NetworkServer {
                     for eviction in &evictions {
                         let bare = eviction.ip.split(':').next().unwrap_or(&eviction.ip);
                         if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-                            audit_blacklist
-                                .write()
-                                .await
-                                .add_temp_ban(ip, eviction.ban_duration, &eviction.reason);
+                            audit_blacklist.write().await.add_temp_ban(
+                                ip,
+                                eviction.ban_duration,
+                                &eviction.reason,
+                            );
                         }
                         audit_peer_registry.kick_peer(&eviction.ip).await;
                     }
@@ -737,7 +737,6 @@ const MAX_TX_SIZE: usize = 100_000;
 const MAX_VOTE_SIZE: usize = 1_000;
 #[allow(dead_code)]
 const MAX_GENERAL_SIZE: usize = 50_000;
-
 
 #[allow(clippy::too_many_arguments)]
 #[allow(dead_code)] // Called by NetworkServer::run which is used by binary

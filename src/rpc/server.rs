@@ -272,9 +272,7 @@ impl RpcServer {
         blockchain: Arc<crate::blockchain::Blockchain>,
         blacklist: Arc<tokio::sync::RwLock<crate::network::blacklist::IPBlacklist>>,
         tx_event_sender: Option<tokio::sync::broadcast::Sender<super::websocket::TransactionEvent>>,
-        reconnection_ai: Option<
-            Arc<crate::ai::adaptive_reconnection::AdaptiveReconnectionAI>,
-        >,
+        reconnection_ai: Option<Arc<crate::ai::adaptive_reconnection::AdaptiveReconnectionAI>>,
         rpcuser: String,
         rpcpassword: String,
         rpcauth: Vec<String>,

@@ -4502,9 +4502,7 @@ impl MasternodeRegistry {
 
         let is_exempt = |ip: &str| -> bool {
             let bare = ip.split(':').next().unwrap_or(ip);
-            if !local_ip.is_empty()
-                && bare == local_ip.split(':').next().unwrap_or(local_ip)
-            {
+            if !local_ip.is_empty() && bare == local_ip.split(':').next().unwrap_or(local_ip) {
                 return true;
             }
             bare.parse::<std::net::IpAddr>()
@@ -4543,8 +4541,7 @@ impl MasternodeRegistry {
                     let _ = utxo_manager.unlock_collateral(&outpoint);
                     evictions.push(SquatterEviction {
                         ip,
-                        reason: "collateral squatter: registry IP ≠ on-chain anchor IP"
-                            .to_string(),
+                        reason: "collateral squatter: registry IP ≠ on-chain anchor IP".to_string(),
                         ban_duration: SQUATTER_BAN,
                     });
                 }
@@ -4665,9 +4662,8 @@ impl MasternodeRegistry {
                 Ok(u) => u,
                 Err(_) => continue,
             };
-            let is_zero_value =
-                info.masternode.tier == crate::types::MasternodeTier::Free
-                    || utxo.value < BRONZE_MIN;
+            let is_zero_value = info.masternode.tier == crate::types::MasternodeTier::Free
+                || utxo.value < BRONZE_MIN;
             if is_zero_value {
                 warn!(
                     "🚨 [COLLATERAL AUDIT] Sub-minimum collateral: {} outpoint {} value {} \

@@ -60,11 +60,7 @@ impl AttackLog {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "⚠️ Attack log open failed ({}) — {}",
-                        path.display(),
-                        e
-                    );
+                    tracing::warn!("⚠️ Attack log open failed ({}) — {}", path.display(), e);
                 }
             }
         })
