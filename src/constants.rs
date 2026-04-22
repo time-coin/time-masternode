@@ -159,6 +159,22 @@ pub mod fork_heights {
     /// slot exhaustion (AV-NEW / AV37).
     pub const SLOT_UNIQUENESS_FORK_HEIGHT: u64 = 200;
 
+    /// Height at which collateral ownership validation activates (AV-COLHIJACK).
+    ///
+    /// Before this height: a MasternodeRegistration TX for a paid-tier node is
+    /// accepted even if the `wallet_address` does not match the collateral UTXO's
+    /// address, allowing an attacker to claim someone else's collateral and receive
+    /// tier-weighted rewards at their own address.
+    ///
+    /// From this height onward: the UTXO's `address` field MUST equal the
+    /// `wallet_address` in the registration TX. This proves the registrant
+    /// controls the collateral, removing any financial incentive to hijack.
+    ///
+    /// IMPORTANT: Set this to a block height sufficiently in the future (at least
+    /// 2 weeks / ~2016 blocks) so all node operators can upgrade before it activates.
+    /// Verify the current mainnet height before deploying.
+    pub const COLLATERAL_OWNERSHIP_FORK_HEIGHT: u64 = 10_000;
+
     /// Height at which cross-chain replay protection activates (AV-REPLAY).
     ///
     /// From this height onward all transaction inputs MUST be signed using

@@ -3953,6 +3953,21 @@ impl MasternodeRegistry {
                 .get_utxo(&outpoint)
                 .await
                 .map_err(|e| format!("UTXO lookup failed: {}", e))?;
+            // AV-COLHIJACK: from the fork height onward, reject registrations where
+            // the wallet_address doesn't match the collateral UTXO's owner address.
+            // This removes the financial incentive for collateral hijacking: without
+            // this check an attacker can claim any UTXO they don't own and collect
+            // tier-weighted block rewards at their own address.
+            if registration_height
+                >= crate::constants::fork_heights::COLLATERAL_OWNERSHIP_FORK_HEIGHT
+                && utxo.address != wallet_address
+            {
+                return Err(format!(
+                    "AV-COLHIJACK: collateral UTXO {} is owned by {} but \
+                     registration wallet_address is {} — must match",
+                    collateral_outpoint, utxo.address, wallet_address
+                ));
+            }
             let tier = MasternodeTier::from_collateral_value(utxo.value)
                 .unwrap_or(crate::types::MasternodeTier::Free);
             (tier, utxo.value, Some(outpoint))

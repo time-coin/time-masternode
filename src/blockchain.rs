@@ -5990,6 +5990,12 @@ impl Blockchain {
         // for the same slot would otherwise waste processing and could be used to
         // manipulate registry state across a reorg.
         let mut seen_dereg_slots: HashSet<u32> = HashSet::new();
+        // AV-COLHIJACK companion: per-block dedup for registrations.
+        // At/above COLLATERAL_OWNERSHIP_FORK_HEIGHT, only the first registration TX
+        // for each node_address in a block is applied; subsequent ones are dropped.
+        // This prevents an attacker from flooding a block with multiple registrations
+        // to race against the legitimate owner's re-registration in the same block.
+        let mut seen_reg_ips: HashSet<String> = HashSet::new();
 
         for tx in &block.transactions {
             let special = match &tx.special_data {
@@ -6008,6 +6014,21 @@ impl Blockchain {
                     pubkey,
                     signature,
                 } => {
+                    // AV-COLHIJACK: drop duplicate registrations for the same IP
+                    // within a single block once the fork height is active.
+                    if block.header.height
+                        >= crate::constants::fork_heights::COLLATERAL_OWNERSHIP_FORK_HEIGHT
+                        && !seen_reg_ips.insert(node_address.clone())
+                    {
+                        tracing::warn!(
+                            "⚠️ [AV-COLHIJACK] Duplicate MasternodeRegistration for {} \
+                             in block {} — skipped (tx {})",
+                            node_address,
+                            block.header.height,
+                            &txid_hex[..16]
+                        );
+                        continue;
+                    }
                     match self
                         .masternode_registry
                         .apply_masternode_registration(

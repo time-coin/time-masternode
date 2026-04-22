@@ -1949,6 +1949,7 @@ async fn main() {
                 // on-chain paid-tier registration with a Free-tier one.
                 if mn_for_sync.tier == types::MasternodeTier::Free
                     && conf_outpoint.is_none()
+                    && !collateral_sync_blockchain.is_syncing()
                     && !collateral_sync_blockchain.is_masternode_registered(ip)
                 {
                     tracing::info!(

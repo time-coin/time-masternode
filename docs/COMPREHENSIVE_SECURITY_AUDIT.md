@@ -1827,6 +1827,47 @@ Connection from 64.91.224.76:36048 ended: Frame too large: 4083387062 bytes (max
 
 ---
 
+### 15.29 ✅ FIXED (fork@10000) — Collateral Hijacking / Registration Tug-of-War (AV52)
+
+**Observed:** April 2026 — multiple IPs (e.g. `64.91.241.10`, `50.28.104.50`, `188.166.243.108`) registering dozens of times in the same block, slot numbers in the 4000s by block height 41. Operators reported continuous re-registration cycles ("tug-of-war") where their masternodes were repeatedly displaced and had to re-register.
+
+**Root Cause (two parts):**
+
+1. **Missing collateral ownership check (primary):** `apply_masternode_registration` looked up the collateral UTXO to determine the tier but never verified that the UTXO's `address` matches the `wallet_address` in the registration TX. Any node could craft a registration TX claiming any UTXO they don't own:
+   - Set `collateral_outpoint` = victim's UTXO (visible on-chain)
+   - Set `wallet_address` = attacker's address
+   - Set `pubkey` = attacker's key
+   - Sign the message with attacker's key (valid signature — just not the UTXO owner's key)
+   - Block processes: UTXO exists → tier assigned → registration accepted
+   - Attacker now receives tier-weighted (Bronze/Silver/Gold) block rewards at their own address
+   - Victim's node detects displacement, re-registers, attacker re-registers → infinite tug-of-war
+
+2. **IBD registration churn (secondary):** Free-tier nodes checked `is_masternode_registered()` before auto-submitting a startup registration TX. This check queries the sled DB, which is not populated during Initial Block Download. A node restarted during IBD would submit a new registration TX even though its registration was already on-chain in the blocks being synced — adding another slot (before height 200) or causing churn (at/after height 200).
+
+**Impact:**
+- Paid-tier rewards stolen at above-Free-tier rates (Bronze=10×, Silver=100×, Gold=1000× weight)
+- Legitimate masternodes repeatedly displaced from their slot
+- Continuous registration churn inflates block sizes and wastes slot IDs
+- Visible as slot numbers growing rapidly (4000+ by block 41) and log floods of duplicate registrations
+
+**Fix Applied:**
+
+1. **Collateral ownership check** (`masternode_registry.rs`, `apply_masternode_registration`): At heights >= `COLLATERAL_OWNERSHIP_FORK_HEIGHT` (10,000), registration transactions for paid-tier nodes are rejected if `utxo.address != wallet_address`. This makes collateral hijacking financially worthless — the attacker cannot redirect rewards away from the UTXO owner.
+
+2. **Per-block duplicate-IP guard** (`blockchain.rs`, `process_special_transactions`): At/above the fork height, a `seen_reg_ips: HashSet<String>` deduplicates registration transactions within a single block. Only the first registration per IP per block is applied; duplicates are logged as AV-COLHIJACK and skipped. Mirrors the existing `seen_dereg_slots` guard for deregistrations (AV49).
+
+3. **IBD registration guard** (`main.rs`): Added `!blockchain.is_syncing()` guard to the Free-tier auto-registration startup check. Nodes in IBD no longer submit registration TXs they don't need — their on-chain registration will be applied naturally as blocks are synced.
+
+**Code References:**
+- `src/constants.rs` — `COLLATERAL_OWNERSHIP_FORK_HEIGHT = 10_000`
+- `src/masternode_registry.rs` — AV-COLHIJACK ownership check after UTXO lookup
+- `src/blockchain.rs` — `seen_reg_ips` per-block dedup guard
+- `src/main.rs` — `is_syncing()` guard on Free-tier auto-registration
+
+**OPERATOR ACTION REQUIRED:** `COLLATERAL_OWNERSHIP_FORK_HEIGHT` is set to block 10,000. Verify the current mainnet height and adjust this constant in `src/constants.rs` to a block at least 2 weeks (≈2,016 blocks) in the future before deploying. All nodes must upgrade before this height or they will reject valid registrations that the new code accepts, causing a chain split.
+
+---
+
 ### 14.12 ✅ FIXED — Watchdog False-Restart on RPC Timeout
 **Status:** **FIXED in watchdog v1.1** (April 8, 2026)
 
@@ -1867,6 +1908,7 @@ Connection from 64.91.224.76:36048 ended: Frame too large: 4083387062 bytes (max
 | **Double-Spend** | ✅ Strong | 🟢 Low | Atomic UTXO locking |
 | **TX Malleability** | ✅ N/A | 🟢 Low | Ed25519 prevents malleability |
 | **Fee Sniping/RBF** | ✅ N/A | 🟢 Low | No RBF support, UTXO locking |
+| **Collateral Hijacking** | ✅ Fixed (AV52, fork@10000) | 🟡 Medium pre-fork | UTXO ownership check enforced at COLLATERAL_OWNERSHIP_FORK_HEIGHT |
 | **Dust Attacks** | ✅ Mitigated | 🟢 Low | 546 satoshi minimum + proportional fees |
 | **Front-Running** | ⚠️ Limited | 🟡 Medium | Transparent mempool allows MEV |
 | **Signature Forgery** | ✅ Impossible | 🟢 Low | Ed25519 cryptographically secure |

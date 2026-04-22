@@ -42,6 +42,7 @@ pub enum AttackType {
     ZeroCollateralPollution, // Register zero-value UTXOs as Free-tier collateral under victim IPs to poison registry (AV40)
     ConnectionFlood, // High-rate inbound connections rejected by rate limiter — subnet DoS (AV50)
     FrameBomb, // Crafted TCP frame header claiming multi-GB payload to OOM/crash the node (AV51)
+    CollateralHijack, // MasternodeRegistration claiming a UTXO not owned by the registrant (AV52)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
