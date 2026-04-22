@@ -2829,7 +2829,7 @@ async fn main() {
                 let target = expected.max(max_reported_height);
                 let behind = target.saturating_sub(current);
 
-                if peers_with_data >= MIN_CONFIRMED_PEERS && behind <= CATCHUP_THRESHOLD {
+                if peers_with_data >= MIN_CONFIRMED_PEERS && behind == CATCHUP_THRESHOLD {
                     tracing::info!(
                         "🔓 Catch-up gate passed: height {} (network tip {}, expected {}, waited {}s)",
                         current, max_reported_height, expected, catchup_wait
@@ -2969,6 +2969,11 @@ async fn main() {
         let mut sync_attempt_count: u32 = 0;
         let mut last_sync_attempt_time = std::time::Instant::now();
 
+        // Minority-chain check: compare our tip hash against peers even when at same height.
+        // Run every 30 s to detect same-height forks without hammering compare_chain_with_peers().
+        let mut last_minority_check =
+            std::time::Instant::now() - std::time::Duration::from_secs(30); // fire immediately on first loop
+
         loop {
             tokio::select! {
                 _ = shutdown_token_block.cancelled() => {
@@ -3037,6 +3042,48 @@ async fn main() {
                 }
             }
 
+            // FORK STATE GUARD: If the fork resolution state machine is active
+            // (FetchingChain, ReadyToReorg, Reorging), halt production until it completes.
+            // Producing blocks while a reorg is in progress would extend the wrong chain.
+            {
+                use crate::blockchain::ForkResolutionState;
+                let in_fork_resolution = !matches!(
+                    *block_blockchain.fork_state.read().await,
+                    ForkResolutionState::None
+                );
+                if in_fork_resolution {
+                    tracing::debug!("⏸️  Production paused: fork resolution in progress");
+                    continue;
+                }
+            }
+
+            // MINORITY CHAIN GUARD: Even when at exactly the same height as peers, we may
+            // be on a minority fork (same height, different tip hash).  The runtime
+            // catch-up check above only fires when we are *behind* — it cannot catch this
+            // case.  Periodically compare our tip hash against the majority.  If the
+            // majority is on a different chain, stop producing and trigger a sync/reorg.
+            if last_minority_check.elapsed() >= std::time::Duration::from_secs(30) {
+                last_minority_check = std::time::Instant::now();
+                if let Some((consensus_height, _)) =
+                    block_blockchain.compare_chain_with_peers().await
+                {
+                    let cur = block_blockchain.get_height();
+                    tracing::warn!(
+                        "🔀 Minority chain detected (our height {}, consensus height {}) \
+                         — pausing production, requesting sync to canonical chain",
+                        cur,
+                        consensus_height
+                    );
+                    if let Err(e) = block_blockchain
+                        .sync_from_peers(Some(consensus_height))
+                        .await
+                    {
+                        tracing::warn!("⚠️  Fork sync failed: {}", e);
+                    }
+                    continue;
+                }
+            }
+
             // Runtime catch-up safety: if we've fallen significantly behind the network
             // mid-run (e.g., sustained network outage, big reorg), pause production and
             // let sync catch us back up.  Same CATCHUP_THRESHOLD as the startup gate.
@@ -3054,7 +3101,7 @@ async fn main() {
                 }
                 let target = exp.max(peer_max);
                 let behind = target.saturating_sub(cur);
-                if behind > CATCHUP_THRESHOLD {
+                if behind > 0 {
                     static LAST_BEHIND_LOG: std::sync::atomic::AtomicI64 =
                         std::sync::atomic::AtomicI64::new(0);
                     let now_secs = chrono::Utc::now().timestamp();
