@@ -6979,7 +6979,11 @@ impl MessageHandler {
                         let timeout_attempts = elapsed / 10;
 
                         if timeout_attempts > 0 {
-                            let multiplier = 1u64 << timeout_attempts.min(20);
+                            // Cap relaxation at 2x (one doubling after 10s stall) to limit
+                            // the window for non-elected nodes to produce blocks.
+                            // Beyond 2x, the deterministic select_leader_for_height fallback
+                            // picks up liveness via the outer timeout loop in main.rs.
+                            let multiplier = 2u64;
                             let relaxed_weight = proposer_weight
                                 .saturating_mul(multiplier)
                                 .min(total_sampling_weight);
@@ -6990,13 +6994,13 @@ impl MessageHandler {
                             );
                             if !eligible_relaxed {
                                 return Err(format!(
-                                    "Proposer {} VRF score {} exceeds threshold (even with {}x relaxation)",
-                                    proposer, block.header.vrf_score, multiplier
+                                    "Proposer {} VRF score {} exceeds threshold (even with {}x relaxation after {}s)",
+                                    proposer, block.header.vrf_score, multiplier, elapsed
                                 ));
                             }
                             debug!(
-                                "🎲 [{}] Block {} proposer {} accepted with relaxed VRF threshold (attempt {})",
-                                self.direction, block.header.height, proposer, timeout_attempts
+                                "🎲 [{}] Block {} proposer {} accepted with 2x relaxed VRF threshold (stall {}s)",
+                                self.direction, block.header.height, proposer, elapsed
                             );
                         } else {
                             return Err(format!(
