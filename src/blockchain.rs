@@ -8949,13 +8949,15 @@ impl Blockchain {
         };
 
         // Case 1: Longest chain is longer than us - sync to it.
-        // Guard: require ≥2 peers to agree before triggering fork prevention.
-        // A single peer claiming a higher height may be on a minority fork; their
+        // Guard: require ≥3 peers to agree before triggering fork prevention.
+        // Fewer than 3 peers claiming a higher height may be on a minority fork; their
         // blocks won't connect to our chain, causing the production loop to spin
         // endlessly in fork-prevention mode. Legitimate new blocks propagate to
         // multiple peers within seconds, so a 1-cycle delay is acceptable.
+        // NOTE: Must match MIN_PEERS_FOR_FORK_SWITCH (3) — using 2 allowed two
+        // attacker-controlled peers to force a chain switch and create a fork.
         if consensus_height > our_height {
-            const MIN_PEERS_FOR_HEIGHT_SYNC: usize = 2;
+            const MIN_PEERS_FOR_HEIGHT_SYNC: usize = 3;
             if consensus_peers.len() < MIN_PEERS_FOR_HEIGHT_SYNC {
                 tracing::debug!(
                     "🔀 Only {} peer(s) at height {} (our: {}) — need {} to trigger fork prevention (may be minority fork)",
