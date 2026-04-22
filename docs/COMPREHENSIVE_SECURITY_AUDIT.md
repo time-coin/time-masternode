@@ -1859,12 +1859,12 @@ Connection from 64.91.224.76:36048 ended: Frame too large: 4083387062 bytes (max
 3. **IBD registration guard** (`main.rs`): Added `!blockchain.is_syncing()` guard to the Free-tier auto-registration startup check. Nodes in IBD no longer submit registration TXs they don't need — their on-chain registration will be applied naturally as blocks are synced.
 
 **Code References:**
-- `src/constants.rs` — `COLLATERAL_OWNERSHIP_FORK_HEIGHT = 10_000`
+- `src/constants.rs` — `COLLATERAL_OWNERSHIP_FORK_HEIGHT = 1_200`
 - `src/masternode_registry.rs` — AV-COLHIJACK ownership check after UTXO lookup
 - `src/blockchain.rs` — `seen_reg_ips` per-block dedup guard
 - `src/main.rs` — `is_syncing()` guard on Free-tier auto-registration
 
-**OPERATOR ACTION REQUIRED:** `COLLATERAL_OWNERSHIP_FORK_HEIGHT` is set to block 10,000. Verify the current mainnet height and adjust this constant in `src/constants.rs` to a block at least 2 weeks (≈2,016 blocks) in the future before deploying. All nodes must upgrade before this height or they will reject valid registrations that the new code accepts, causing a chain split.
+**OPERATOR ACTION REQUIRED:** `COLLATERAL_OWNERSHIP_FORK_HEIGHT` is set to block 1,200. All nodes must upgrade before the chain reaches this height or they will diverge from nodes running the new code, causing a chain split.
 
 ---
 
@@ -1908,7 +1908,7 @@ Connection from 64.91.224.76:36048 ended: Frame too large: 4083387062 bytes (max
 | **Double-Spend** | ✅ Strong | 🟢 Low | Atomic UTXO locking |
 | **TX Malleability** | ✅ N/A | 🟢 Low | Ed25519 prevents malleability |
 | **Fee Sniping/RBF** | ✅ N/A | 🟢 Low | No RBF support, UTXO locking |
-| **Collateral Hijacking** | ✅ Fixed (AV52, fork@10000) | 🟡 Medium pre-fork | UTXO ownership check enforced at COLLATERAL_OWNERSHIP_FORK_HEIGHT |
+| **Collateral Hijacking** | ✅ Fixed (AV52, fork@1200) | 🟡 Medium pre-fork | UTXO ownership check enforced at COLLATERAL_OWNERSHIP_FORK_HEIGHT |
 | **Dust Attacks** | ✅ Mitigated | 🟢 Low | 546 satoshi minimum + proportional fees |
 | **Front-Running** | ⚠️ Limited | 🟡 Medium | Transparent mempool allows MEV |
 | **Signature Forgery** | ✅ Impossible | 🟢 Low | Ed25519 cryptographically secure |

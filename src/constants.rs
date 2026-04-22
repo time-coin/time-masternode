@@ -173,7 +173,7 @@ pub mod fork_heights {
     /// IMPORTANT: Set this to a block height sufficiently in the future (at least
     /// 2 weeks / ~2016 blocks) so all node operators can upgrade before it activates.
     /// Verify the current mainnet height before deploying.
-    pub const COLLATERAL_OWNERSHIP_FORK_HEIGHT: u64 = 10_000;
+    pub const COLLATERAL_OWNERSHIP_FORK_HEIGHT: u64 = 1_200;
 
     /// Height at which cross-chain replay protection activates (AV-REPLAY).
     ///
