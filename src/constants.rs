@@ -21,6 +21,20 @@ pub mod genesis {
 /// fail fast with a clear error message instead of silently corrupting state.
 pub const STORAGE_VERSION: u32 = 2;
 
+/// Minimum commit count a remote peer must report during the Handshake to be
+/// accepted as part of the network quorum.  Peers below this version are
+/// running software that pre-dates critical fork-recovery and peer-threshold
+/// fixes and must be hard-rejected (not merely warned) so they cannot
+/// contaminate the consensus set.
+///
+/// Bump this value whenever a backward-incompatible network rule change is
+/// deployed and old nodes must be ejected from the quorum.
+///
+/// Current fence: commit 2062 — first commit incorporating the fork-state
+/// guard + minority-chain guard (5a505c2 / git commit count ≥ 2062).
+/// Old nodes at commit 2057 are rejected by this check.
+pub const MIN_PEER_COMMIT_VERSION: u32 = 2062;
+
 /// Chain identifier included in v2 transaction signing messages.
 /// Mainnet = 1.  Any future intentional hard fork must be assigned a distinct
 /// chain_id BEFORE the fork diverges so that transactions cannot be replayed

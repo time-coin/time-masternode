@@ -1134,14 +1134,17 @@ async fn handle_peer(
                                             break;
                                         }
                                         let our_commits = env!("GIT_COMMIT_COUNT").parse::<u32>().unwrap_or(0);
-                                        if *commit_count < our_commits {
+                                        // Hard-reject peers below the minimum quorum version.
+                                        // Nodes running old code cannot participate in consensus
+                                        // and must not be counted toward our peer quorum.
+                                        if *commit_count < crate::constants::MIN_PEER_COMMIT_VERSION {
                                             tracing::warn!(
-                                                "⚠️ Peer {} is running outdated software \
-                                                (commit {}, we are at commit {}). \
+                                                "🚫 Rejecting {} — running obsolete software \
+                                                (commit {}, minimum required: {}). \
                                                 Please upgrade: https://github.com/time-coin/time-masternode",
-                                                peer.addr, commit_count, our_commits
+                                                peer.addr, commit_count, crate::constants::MIN_PEER_COMMIT_VERSION
                                             );
-                                            // Notify the peer directly so they see it in their own logs.
+                                            // Notify the peer so it can see the reason in its own logs.
                                             let upgrade_msg = crate::network::message::NetworkMessage::ForkAlert {
                                                 your_height: 0,
                                                 your_hash: [0u8; 32],
@@ -1149,14 +1152,28 @@ async fn handle_peer(
                                                 consensus_hash: [0u8; 32],
                                                 consensus_peer_count: 0,
                                                 message: format!(
-                                                    "Your node is running outdated software \
-                                                    (commit {commit_count}, current is {our_commits}). \
-                                                    Please upgrade: https://github.com/time-coin/time-masternode"
+                                                    "Your node (commit {commit_count}) is below the minimum \
+                                                    required version ({min}). \
+                                                    Please upgrade: https://github.com/time-coin/time-masternode",
+                                                    min = crate::constants::MIN_PEER_COMMIT_VERSION
                                                 ),
                                             };
                                             if let Ok(frame) = crate::network::wire::serialize_frame(&upgrade_msg) {
                                                 let _ = writer_tx.send(frame);
                                             }
+                                            blacklist.write().await.record_violation(
+                                                ip,
+                                                &format!("Obsolete software: commit {} below minimum {}", commit_count, crate::constants::MIN_PEER_COMMIT_VERSION)
+                                            );
+                                            break;
+                                        }
+                                        if *commit_count < our_commits {
+                                            tracing::warn!(
+                                                "⚠️ Peer {} is running outdated software \
+                                                (commit {}, we are at commit {}). \
+                                                Please upgrade: https://github.com/time-coin/time-masternode",
+                                                peer.addr, commit_count, our_commits
+                                            );
                                         }
                                         // Check if the peer is ahead of us — we may be outdated.
                                         if *commit_count > our_commits && our_commits > 0 {
