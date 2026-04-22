@@ -1977,10 +1977,11 @@ impl Blockchain {
                         }
                     }
                 }
-                // If we have peers at height 0 and no valid higher chain exists
-                // (peers "ahead" have only bad blocks), allow production.
-                // The node will reject bad blocks anyway; repeatedly syncing is futile.
-                if peers_at_zero >= 2 {
+                // If we have peers at height 0 and NO peers have a higher chain,
+                // allow block production — repeatedly syncing bad blocks is futile.
+                // IMPORTANT: Only bypass when peers_ahead == 0; if any peer claims a
+                // higher height, we must attempt to sync from them rather than skipping.
+                if peers_at_zero >= 2 && peers_ahead == 0 {
                     tracing::info!(
                         "🔄 Chain restart bypass: {} peers at height 0, {} peers claim ahead \
                          (likely bad chain). Skipping sync — allowing block production.",

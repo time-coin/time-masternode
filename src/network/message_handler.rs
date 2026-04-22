@@ -429,8 +429,17 @@ impl MessageHandler {
     /// (time-coin.io API or addnode= fallback). Returns true if the block
     /// should be dropped. If the whitelist is empty (API unreachable AND no
     /// addnode entries), the guard is disabled so the node can still sync.
+    /// Genesis-confirmed peers bypass the whitelist check — a verified genesis
+    /// hash is a stronger same-chain guarantee than the API list alone.
     async fn should_drop_ibd_block(&self, context: &MessageContext) -> bool {
         if !self.is_initial_block_download(context) {
+            return false;
+        }
+        if context
+            .peer_registry
+            .is_genesis_confirmed(&self.peer_ip)
+            .await
+        {
             return false;
         }
         if !context.peer_registry.has_whitelist().await {
