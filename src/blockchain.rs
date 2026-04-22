@@ -10764,6 +10764,14 @@ impl Blockchain {
     /// the correct copy from the network.
     pub async fn validate_chain_integrity(&self) -> Result<Vec<u64>, String> {
         let current_height = self.get_height();
+
+        // Fresh chain: height=0 with no genesis block means there's nothing to validate.
+        // Attempting to load block 0 here would falsely flag it as corrupt and trigger
+        // a peer repair before the network is even initialized.
+        if current_height == 0 && self.get_block(0).is_err() {
+            return Ok(Vec::new());
+        }
+
         let mut corrupt_blocks = Vec::new();
 
         tracing::debug!(

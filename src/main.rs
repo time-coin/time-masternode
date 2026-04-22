@@ -1307,9 +1307,24 @@ async fn main() {
             }
         }
 
+        // When tier auto-detection deferred (UTXO not in local storage, chain not yet
+        // synced), mn.tier is provisionally Free but still carries the collateral outpoint.
+        // AV40 blocks Free+outpoint registrations to prevent registry poisoning. Strip the
+        // outpoint from the local registry entry — mn retains it for mn_for_sync, which
+        // handles on-chain paid-tier registration once the chain is accessible.
+        let mn_to_register = if mn.tier == types::MasternodeTier::Free
+            && mn.collateral_outpoint.is_some()
+        {
+            let mut provisional = mn.clone();
+            provisional.collateral_outpoint = None;
+            provisional
+        } else {
+            mn.clone()
+        };
+
         // Try registration; on squatter conflict, evict and retry once.
         let registration_ok = match registry
-            .register(mn.clone(), mn.wallet_address.clone())
+            .register(mn_to_register.clone(), mn_to_register.wallet_address.clone())
             .await
         {
             Ok(()) => true,
@@ -1331,7 +1346,7 @@ async fn main() {
                 let _ = registry.unregister(&mn.address).await;
 
                 match registry
-                    .register(mn.clone(), mn.wallet_address.clone())
+                    .register(mn_to_register.clone(), mn_to_register.wallet_address.clone())
                     .await
                 {
                     Ok(_) => {
