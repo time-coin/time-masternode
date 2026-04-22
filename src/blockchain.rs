@@ -154,6 +154,22 @@ struct ConsensusCache {
     timestamp: Instant,
 }
 
+/// Result returned by [`Blockchain::resync_from_whitelisted_peers`].
+pub struct ResyncReport {
+    /// Number of connected whitelisted peers found.
+    pub peers_found: usize,
+    /// IP of the peer with the highest cached chain tip.
+    pub best_peer: Option<String>,
+    /// Chain tip height of the best whitelisted peer.
+    pub best_peer_height: Option<u64>,
+    /// Our chain height before the rollback.
+    pub our_height_before: u64,
+    /// Our chain height after the rollback.
+    pub our_height_after: u64,
+    /// Number of peers whose "incompatible" mark was cleared.
+    pub cleared_incompatible: usize,
+}
+
 pub struct Blockchain {
     storage: sled::Db,
     consensus: Arc<ConsensusEngine>,
@@ -7201,9 +7217,128 @@ impl Blockchain {
             .max()
     }
 
-    /// Rollback the chain to a specific height
-    /// This removes all blocks above the target height and reverts UTXO changes
+    /// Operator-initiated deep fork recovery from whitelisted peers.
+    ///
+    /// 1. Gets connected whitelisted peers.
+    /// 2. Picks the one with the highest chain tip.
+    /// 3. Clears "incompatible" marks on all whitelisted peers so sync can resume.
+    /// 4. Resets any active fork-resolution state.
+    /// 5. Rolls back to `target_height` (bypassing `MAX_REORG_DEPTH`); defaults to 0 (genesis reset).
+    ///
+    /// After this returns, the normal periodic sync loop will detect our lower height and
+    /// re-download the chain from the whitelisted peers.
+    pub async fn resync_from_whitelisted_peers(
+        &self,
+        target_height: Option<u64>,
+    ) -> Result<ResyncReport, String> {
+        // 1. Get peer_registry
+        let registry_guard = self.peer_registry.read().await;
+        let peer_registry = registry_guard
+            .as_ref()
+            .ok_or_else(|| "Peer registry not available".to_string())?
+            .clone();
+
+        // 2. Find connected whitelisted peers
+        let whitelist_peers = peer_registry.get_whitelisted_connected_peers().await;
+        if whitelist_peers.is_empty() {
+            return Err("No whitelisted peers are currently connected. \
+                 Add trusted peers first with `addwhitelist <ip>` and ensure they connect."
+                .to_string());
+        }
+
+        // 3. Pick the best peer (highest cached chain tip)
+        let mut best_peer: Option<String> = None;
+        let mut best_height: u64 = 0;
+        for peer_ip in &whitelist_peers {
+            if let Some((h, _hash)) = peer_registry.get_peer_chain_tip(peer_ip).await {
+                if h > best_height {
+                    best_height = h;
+                    best_peer = Some(peer_ip.clone());
+                }
+            }
+        }
+
+        // 4. Clear incompatible marks so syncing can proceed
+        let mut cleared = 0usize;
+        for peer_ip in &whitelist_peers {
+            peer_registry.clear_incompatible(peer_ip).await;
+            cleared += 1;
+        }
+
+        // Drop registry lock before mutating blockchain state
+        drop(registry_guard);
+
+        // 5. Reset fork state machine so a concurrent fork-resolution loop won't block sync
+        *self.fork_state.write().await = ForkResolutionState::None;
+
+        // 6. Cancel pending sync coordinator throttles so sync starts immediately
+        for peer_ip in &whitelist_peers {
+            self.sync_coordinator.cancel_sync(peer_ip).await;
+        }
+
+        let our_height_before = self.get_height();
+        let rollback_to = target_height.unwrap_or(0);
+
+        tracing::warn!(
+            "🔄 resyncfromwhitelist: rolling back from height {} to {} \
+             (whitelisted peers: {}, best peer: {:?} at height {})",
+            our_height_before,
+            rollback_to,
+            whitelist_peers.len(),
+            best_peer,
+            best_height
+        );
+
+        // 7. Perform the rollback
+        let our_height_after = self.rollback_to_height_trusted(rollback_to).await?;
+
+        tracing::info!(
+            "✅ resyncfromwhitelist: chain rolled back to height {}. \
+             Normal sync will re-download from whitelisted peers.",
+            our_height_after
+        );
+
+        Ok(ResyncReport {
+            peers_found: whitelist_peers.len(),
+            best_peer,
+            best_peer_height: if best_height > 0 {
+                Some(best_height)
+            } else {
+                None
+            },
+            our_height_before,
+            our_height_after,
+            cleared_incompatible: cleared,
+        })
+    }
+
+    /// Rollback the chain to a specific height.
+    /// Refuses rollbacks deeper than MAX_REORG_DEPTH. Use `rollback_to_height_trusted`
+    /// for operator-initiated deep fork recovery.
     pub async fn rollback_to_height(&self, target_height: u64) -> Result<u64, String> {
+        self.rollback_to_height_impl(target_height, false).await
+    }
+
+    /// Operator-trusted rollback — same as `rollback_to_height` but bypasses
+    /// the `MAX_REORG_DEPTH` guard. Only call from explicit operator commands
+    /// (`resyncfromwhitelist`). Still respects checkpoints.
+    /// Pass `target_height = 0` for a full genesis reset.
+    pub async fn rollback_to_height_trusted(&self, target_height: u64) -> Result<u64, String> {
+        if target_height == 0 {
+            if self.get_height() == 0 {
+                return Ok(0);
+            }
+            self.revert_to_after_genesis().await;
+            return Ok(0);
+        }
+        self.rollback_to_height_impl(target_height, true).await
+    }
+
+    async fn rollback_to_height_impl(
+        &self,
+        target_height: u64,
+        bypass_depth: bool,
+    ) -> Result<u64, String> {
         let current = self.current_height.load(Ordering::Acquire);
 
         if target_height >= current {
@@ -7222,10 +7357,10 @@ impl Blockchain {
             }
         }
 
-        // Safety check: don't allow massive rollbacks
-        if blocks_to_remove > MAX_REORG_DEPTH {
+        // Safety check: don't allow massive rollbacks (unless operator-trusted)
+        if !bypass_depth && blocks_to_remove > MAX_REORG_DEPTH {
             return Err(format!(
-                "Rollback too deep: {} blocks (max: {}). Manual intervention required.",
+                "Rollback too deep: {} blocks (max: {}). Use `resyncfromwhitelist` for deep fork recovery, or `rollbacktoblock0` for full reset.",
                 blocks_to_remove, MAX_REORG_DEPTH
             ));
         }

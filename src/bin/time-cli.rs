@@ -112,6 +112,7 @@ Commands:
     reindex                Full reindex: rebuild UTXOs + tx index from block 0
     rollbacktoblock0       [DANGER] Delete all blocks above genesis and reset chain
     rollbacktoheight       [DANGER] Roll back chain to a specific block height
+    resyncfromwhitelist    [DANGER] Roll back and resync chain from trusted whitelisted peers (bypasses depth limit)
     resetfinalitylock      [DANGER] Reset BFT finality lock to recover a stuck fork node
 
     help                   Print this message or the help of the given subcommand(s)
@@ -798,6 +799,14 @@ enum Commands {
         height: u64,
     },
 
+    /// Deep fork recovery: roll back and resync from whitelisted peers (bypasses MAX_REORG_DEPTH)
+    #[command(next_help_heading = "Utility")]
+    ResyncFromWhitelist {
+        /// Target height to roll back to (omit or use 0 for full genesis reset)
+        #[arg(default_value = "0")]
+        target_height: u64,
+    },
+
     /// Reset the BFT finality lock to a lower height (DANGER: only use to recover a stuck fork node)
     #[command(next_help_heading = "Utility")]
     ResetFinalityLock {
@@ -1385,6 +1394,9 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Reindex => ("reindex", json!([])),
         Commands::RollbackToBlock0 => ("rollbacktoblock0", json!([])),
         Commands::RollbackToHeight { height } => ("rollbacktoheight", json!([height])),
+        Commands::ResyncFromWhitelist { target_height } => {
+            ("resyncfromwhitelist", json!([target_height]))
+        }
         Commands::ResetFinalityLock { height } => ("resetfinalitylock", json!([height])),
         Commands::CleanupLockedUTXOs => ("cleanuplockedutxos", json!([])),
         Commands::ListLockedUTXOs => ("listlockedutxos", json!([])),

@@ -131,8 +131,7 @@ pub struct RpcHandler {
     /// Broadcast channel for notifying WebSocket clients of new transactions
     tx_event_sender:
         Option<tokio::sync::broadcast::Sender<crate::rpc::websocket::TransactionEvent>>,
-    reconnection_ai:
-        Option<Arc<crate::ai::adaptive_reconnection::AdaptiveReconnectionAI>>,
+    reconnection_ai: Option<Arc<crate::ai::adaptive_reconnection::AdaptiveReconnectionAI>>,
 }
 
 impl RpcHandler {
@@ -235,6 +234,7 @@ impl RpcHandler {
             "reindex" => self.reindex_full().await,
             "rollbacktoblock0" => self.rollback_to_block0().await,
             "rollbacktoheight" => self.rollback_to_height_rpc(&params_array).await,
+            "resyncfromwhitelist" => self.resync_from_whitelist_rpc(&params_array).await,
             "resetfinalitylock" => self.reset_finality_lock_rpc(&params_array).await,
             "gettxindexstatus" => self.get_tx_index_status().await,
             "cleanuplockedutxos" => self.cleanup_locked_utxos().await,
@@ -4572,6 +4572,47 @@ impl RpcHandler {
                 "height_before": height_before,
                 "height_after": new_height,
                 "blocks_removed": height_before - new_height,
+            })),
+            Err(e) => Err(RpcError {
+                code: -32000,
+                message: e,
+            }),
+        }
+    }
+
+    /// Deep fork recovery: roll back to a trusted peer's chain.
+    /// Optional parameter: target height (u64). Defaults to 0 (full genesis reset).
+    /// Requires at least one whitelisted peer to be connected.
+    async fn resync_from_whitelist_rpc(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let target_height: Option<u64> = params.first().and_then(|v| v.as_u64());
+        // Treat explicit 0 as "genesis reset" (same as omitting the argument)
+        let target_height = target_height.and_then(|h| if h == 0 { None } else { Some(h) });
+
+        let height_before = self.blockchain.get_height();
+
+        tracing::warn!(
+            "⚠️  RPC resyncfromwhitelist: deep fork recovery from height {} (target: {})",
+            height_before,
+            target_height
+                .map(|h| h.to_string())
+                .unwrap_or_else(|| "genesis".to_string())
+        );
+
+        match self
+            .blockchain
+            .resync_from_whitelisted_peers(target_height)
+            .await
+        {
+            Ok(report) => Ok(json!({
+                "result": "success",
+                "height_before": report.our_height_before,
+                "height_after": report.our_height_after,
+                "blocks_removed": report.our_height_before.saturating_sub(report.our_height_after),
+                "whitelisted_peers_used": report.peers_found,
+                "best_peer": report.best_peer,
+                "best_peer_height": report.best_peer_height,
+                "cleared_incompatible": report.cleared_incompatible,
+                "note": "Chain rolled back. Normal sync will now re-download from whitelisted peers."
             })),
             Err(e) => Err(RpcError {
                 code: -32000,
