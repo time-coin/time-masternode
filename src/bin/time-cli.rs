@@ -32,6 +32,7 @@ Commands:
     ban                    Permanently ban an IP address
     unban                  Remove an IP from the ban list
     clearbanlist           Remove ALL bans
+    resetpeerprofiles      Clear AI reconnection backoff so nodes retry peers immediately
     auditcollateral        Scan for collateral squatters and evict them
     aggregateblacklists    Collect and merge ban lists from multiple nodes
   Wallet
@@ -241,6 +242,10 @@ enum Commands {
     /// Remove ALL bans and violation counts (whitelisted peers are unaffected)
     #[command(next_help_heading = "Network")]
     ClearBanList,
+
+    /// Reset AI reconnection profiles for all peers (clears backoff state so nodes retry immediately)
+    #[command(next_help_heading = "Network")]
+    ResetPeerProfiles,
 
     /// Add an IP to the whitelist (exempt from bans and rate limits; must be a registered network peer)
     #[command(next_help_heading = "Network")]
@@ -1291,6 +1296,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         ),
         Commands::Unban { ip } => ("unban", json!([ip])),
         Commands::ClearBanList => ("clearbanlist", json!([])),
+        Commands::ResetPeerProfiles => ("resetpeerprofiles", json!([])),
         Commands::AddWhitelist { ip } => ("addwhitelist", json!([ip])),
         Commands::GetTxOutSetInfo => ("gettxoutsetinfo", json!([])),
         Commands::GetTxOut { txid, vout } => ("gettxout", json!([txid, vout])),
@@ -1961,6 +1967,7 @@ fn print_human_readable(
         Commands::Ban { .. }
         | Commands::Unban { .. }
         | Commands::ClearBanList
+        | Commands::ResetPeerProfiles
         | Commands::AddWhitelist { .. } => {
             let msg = result
                 .get("message")

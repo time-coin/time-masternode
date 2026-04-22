@@ -272,6 +272,9 @@ impl RpcServer {
         blockchain: Arc<crate::blockchain::Blockchain>,
         blacklist: Arc<tokio::sync::RwLock<crate::network::blacklist::IPBlacklist>>,
         tx_event_sender: Option<tokio::sync::broadcast::Sender<super::websocket::TransactionEvent>>,
+        reconnection_ai: Option<
+            Arc<crate::ai::adaptive_reconnection::AdaptiveReconnectionAI>,
+        >,
         rpcuser: String,
         rpcpassword: String,
         rpcauth: Vec<String>,
@@ -287,6 +290,9 @@ impl RpcServer {
         );
         if let Some(sender) = tx_event_sender {
             handler.set_tx_event_sender(sender);
+        }
+        if let Some(ai) = reconnection_ai {
+            handler.set_reconnection_ai(ai);
         }
 
         let auth = RpcAuthenticator::new(&rpcuser, &rpcpassword, &rpcauth);

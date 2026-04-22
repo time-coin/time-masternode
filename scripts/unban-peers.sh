@@ -68,6 +68,14 @@ for entry in data:
     done <<< "$IPS"
 
     echo "Done: $COUNT unbanned, $FAILED skipped."
+
+    # Reset AI reconnection profiles so peers with accumulated backoff state
+    # are retried immediately rather than waiting for their exponential cooldown.
+    if "$CLI" $TESTNET_FLAG resetpeerprofiles >/dev/null 2>&1; then
+        echo "  AI reconnection profiles cleared — peers will retry immediately."
+    else
+        echo "  (Could not reset peer profiles — node may be offline or old version)"
+    fi
 }
 
 if [[ $INTERVAL -gt 0 ]]; then

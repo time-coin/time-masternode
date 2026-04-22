@@ -131,6 +131,8 @@ pub struct RpcHandler {
     /// Broadcast channel for notifying WebSocket clients of new transactions
     tx_event_sender:
         Option<tokio::sync::broadcast::Sender<crate::rpc::websocket::TransactionEvent>>,
+    reconnection_ai:
+        Option<Arc<crate::ai::adaptive_reconnection::AdaptiveReconnectionAI>>,
 }
 
 impl RpcHandler {
@@ -151,6 +153,7 @@ impl RpcHandler {
             start_time: SystemTime::now(),
             network,
             tx_event_sender: None,
+            reconnection_ai: None,
         }
     }
 
@@ -160,6 +163,13 @@ impl RpcHandler {
         sender: tokio::sync::broadcast::Sender<crate::rpc::websocket::TransactionEvent>,
     ) {
         self.tx_event_sender = Some(sender);
+    }
+
+    pub fn set_reconnection_ai(
+        &mut self,
+        ai: Arc<crate::ai::adaptive_reconnection::AdaptiveReconnectionAI>,
+    ) {
+        self.reconnection_ai = Some(ai);
     }
     pub async fn handle_request(&self, request: RpcRequest) -> RpcResponse {
         // Convert params Value to array
@@ -216,6 +226,7 @@ impl RpcHandler {
             "ban" => self.ban_ip(&params_array).await,
             "unban" => self.unban(&params_array).await,
             "clearbanlist" => self.clear_ban_list().await,
+            "resetpeerprofiles" => self.reset_peer_profiles().await,
             "auditcollateral" => self.audit_collateral().await,
             "listreceivedbyaddress" => self.list_received_by_address(&params_array).await,
             "listtransactions" => self.list_transactions(&params_array).await,
@@ -4487,6 +4498,24 @@ impl RpcHandler {
             "temporary_cleared": temp_count,
             "violations_cleared": viol_count,
         }))
+    }
+
+    async fn reset_peer_profiles(&self) -> Result<Value, RpcError> {
+        match &self.reconnection_ai {
+            Some(ai) => {
+                let count = ai.reset_all_profiles();
+                tracing::info!("🔄 RPC: reset {} AI reconnection profile(s)", count);
+                Ok(json!({
+                    "result": "success",
+                    "profiles_cleared": count,
+                    "message": "All peer reconnection profiles cleared — peers will be retried immediately"
+                }))
+            }
+            None => Err(RpcError {
+                code: -32603,
+                message: "Reconnection AI not available".to_string(),
+            }),
+        }
     }
 
     /// Delete all blocks above height 0, reset chain height to 0, and clear UTXOs.

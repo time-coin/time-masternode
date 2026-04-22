@@ -225,8 +225,23 @@ impl AdaptiveReconnectionAI {
 
         profile.total_connections += 1;
         profile.failed_connections += 1;
+        let now = now_secs();
+        // Auto-decay: if we were in deep backoff and the cooldown has already elapsed,
+        // treat this as a fresh failure episode rather than continuing to grow the count.
+        // Without this, peers accumulate failures that push the max 24-hour cooldown
+        // clock forward on every retry, locking them out indefinitely.
+        if profile.consecutive_failures >= self.config.max_consecutive_failures {
+            let extra_cycles =
+                profile.consecutive_failures - self.config.max_consecutive_failures;
+            let effective_cooldown = (self.config.cooldown_period_secs as f64
+                * 2_f64.powi(extra_cycles.min(8) as i32))
+            .min(86_400.0) as u64;
+            if now.saturating_sub(profile.last_failure_time) >= effective_cooldown {
+                profile.consecutive_failures = 0;
+            }
+        }
         profile.consecutive_failures += 1;
-        profile.last_failure_time = now_secs();
+        profile.last_failure_time = now;
         profile.is_masternode = is_masternode;
 
         // Track failure reasons
@@ -346,6 +361,27 @@ impl AdaptiveReconnectionAI {
     pub fn forget_peer(&self, ip: &str) {
         self.profiles.write().remove(ip);
         self.remove_profile_from_db(ip);
+    }
+
+    /// Reset all peer profiles — clears every failure count and backoff from memory
+    /// and from sled. Lets the reconnection loop retry all peers immediately.
+    pub fn reset_all_profiles(&self) -> usize {
+        let count = {
+            let mut guard = self.profiles.write();
+            let n = guard.len();
+            guard.clear();
+            n
+        };
+        let keys: Vec<_> = self
+            .db
+            .scan_prefix(DB_PREFIX)
+            .flatten()
+            .map(|(k, _)| k)
+            .collect();
+        for key in keys {
+            let _ = self.db.remove(key);
+        }
+        count
     }
 
     /// Update network health factor (called from consensus health monitor)
