@@ -2829,11 +2829,27 @@ async fn main() {
                 let target = expected.max(max_reported_height);
                 let behind = target.saturating_sub(current);
 
-                if peers_with_data >= MIN_CONFIRMED_PEERS && behind == CATCHUP_THRESHOLD {
-                    tracing::info!(
-                        "🔓 Catch-up gate passed: height {} (network tip {}, expected {}, waited {}s)",
-                        current, max_reported_height, expected, catchup_wait
-                    );
+                // No peer has blocks beyond our height — the whole network is stalled.
+                // We cannot obtain missing blocks from anyone; we must produce to advance.
+                let no_peer_ahead = max_reported_height <= current;
+
+                if peers_with_data >= MIN_CONFIRMED_PEERS
+                    && (behind == CATCHUP_THRESHOLD || no_peer_ahead)
+                {
+                    if no_peer_ahead && behind > 0 {
+                        tracing::warn!(
+                            "⚠️  Catch-up gate: no peer has blocks beyond height {} \
+                             (time-based expected {}). Network stall detected — \
+                             releasing gate to allow local production.",
+                            current,
+                            expected
+                        );
+                    } else {
+                        tracing::info!(
+                            "🔓 Catch-up gate passed: height {} (network tip {}, expected {}, waited {}s)",
+                            current, max_reported_height, expected, catchup_wait
+                        );
+                    }
                     break;
                 }
 
@@ -3101,7 +3117,12 @@ async fn main() {
                 }
                 let target = exp.max(peer_max);
                 let behind = target.saturating_sub(cur);
-                if behind > 0 {
+                // Only pause production when a peer *actually has* blocks we don't.
+                // If `behind` is purely time-based (peer_max <= cur), every peer is at
+                // our height or below — the network is stalled and we must produce to
+                // advance the chain. Blocking here in that case causes a deadlock where
+                // nobody produces because everyone is waiting for someone else to produce.
+                if behind > 0 && peer_max > cur {
                     static LAST_BEHIND_LOG: std::sync::atomic::AtomicI64 =
                         std::sync::atomic::AtomicI64::new(0);
                     let now_secs = chrono::Utc::now().timestamp();
@@ -3114,7 +3135,7 @@ async fn main() {
                         );
                     }
                     // Request more blocks from peers to accelerate sync
-                    if !peers.is_empty() && peer_max > cur {
+                    if !peers.is_empty() {
                         let requested_end = peer_max.min(cur + 50);
                         for peer_ip in &peers {
                             let msg = crate::network::message::NetworkMessage::GetBlocks(
