@@ -2146,6 +2146,35 @@ impl MasternodeRegistry {
         if eligible.len() < 3 {
             let active = self.get_active_masternodes().await;
             if active.len() < 3 {
+                // Emergency fallback: when the chain is severely stalled (≥5 blocks behind),
+                // the gossip-based "active" state is stale and cannot be trusted. Use ALL
+                // registered masternodes so block production can restart the chain. This
+                // mirrors the same logic in main.rs and prevents the inner guard from
+                // overriding the outer emergency fallback.
+                let blocks_behind = blockchain
+                    .calculate_expected_height()
+                    .saturating_sub(current_height);
+                if blocks_behind >= 5 {
+                    let all_registered = self.list_all().await;
+                    if all_registered.len() >= 3 {
+                        use std::sync::atomic::{AtomicI64, Ordering as AtomOrd};
+                        static LAST_INNER_EMERGENCY: AtomicI64 = AtomicI64::new(0);
+                        let now_secs = chrono::Utc::now().timestamp();
+                        let last = LAST_INNER_EMERGENCY.load(AtomOrd::Relaxed);
+                        if now_secs - last >= 60 {
+                            LAST_INNER_EMERGENCY.store(now_secs, AtomOrd::Relaxed);
+                            tracing::warn!(
+                                "🚨 Emergency fallback (inner): {} active masternodes < 3, \
+                                 {} blocks behind — using {} registered masternodes for block production",
+                                active.len(),
+                                blocks_behind,
+                                all_registered.len()
+                            );
+                        }
+                        return all_registered;
+                    }
+                }
+
                 use std::sync::atomic::{AtomicI64, Ordering as AtomOrd};
                 static LAST_FORK_WARN: AtomicI64 = AtomicI64::new(0);
                 let now_secs = chrono::Utc::now().timestamp();
