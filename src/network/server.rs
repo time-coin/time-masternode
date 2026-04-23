@@ -1640,7 +1640,27 @@ async fn handle_peer(
                                                 if let Some(ref ai) = ai_system {
                                                     ai.attack_detector.record_finality_injection(&ip_str);
                                                 }
+                                                // Direct escalation: each 5-excess cycle is a
+                                                // sustained flood — record a blacklist violation
+                                                // so the ban escalates without waiting for the
+                                                // 30s AI enforcement loop.  Legitimate relays
+                                                // never hit 5 consecutive rate-limit excess.
+                                                let should_disconnect = blacklist
+                                                    .write()
+                                                    .await
+                                                    .record_violation(
+                                                        ip,
+                                                        "tx_finalized flood: sustained rate-limit excess (AV38+AV40)",
+                                                    );
                                                 tx_finalized_excess_streak = 0;
+                                                if should_disconnect {
+                                                    tracing::warn!(
+                                                        "🚫 Disconnecting {} — repeated tx_finalized flooding (AV38+AV40)",
+                                                        peer.addr
+                                                    );
+                                                    peer_registry.kick_peer(&ip_str).await;
+                                                    break;
+                                                }
                                             }
                                             continue;
                                         }

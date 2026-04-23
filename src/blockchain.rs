@@ -4026,10 +4026,43 @@ impl Blockchain {
                 }
 
                 if on_chain_voters.len() < 2 {
-                    on_chain_voters = all_active
-                        .into_iter()
-                        .map(|mn| mn.masternode.address)
-                        .collect();
+                    // Emergency: gossip-active set is stale (stalled network).
+                    // Use all registered masternodes so every tier gets rewards.
+                    let blocks_behind = self
+                        .calculate_expected_height()
+                        .saturating_sub(self.get_height());
+                    if blocks_behind >= 5 {
+                        let all_registered = self.masternode_registry.list_all().await;
+                        if all_registered.len() >= 2 {
+                            use std::sync::atomic::{AtomicI64, Ordering as AtomOrd};
+                            static LAST_REWARD_FALLBACK: AtomicI64 = AtomicI64::new(0);
+                            let now_secs = chrono::Utc::now().timestamp();
+                            let last = LAST_REWARD_FALLBACK.load(AtomOrd::Relaxed);
+                            if now_secs - last >= 60 {
+                                LAST_REWARD_FALLBACK.store(now_secs, AtomOrd::Relaxed);
+                                tracing::warn!(
+                                    "⚠️ Reward fallback: {} blocks behind, using {} registered masternodes for bitmap (was {} on-chain)",
+                                    blocks_behind,
+                                    all_registered.len(),
+                                    on_chain_voters.len()
+                                );
+                            }
+                            on_chain_voters = all_registered
+                                .into_iter()
+                                .map(|mn| mn.masternode.address)
+                                .collect();
+                        } else {
+                            on_chain_voters = all_active
+                                .into_iter()
+                                .map(|mn| mn.masternode.address)
+                                .collect();
+                        }
+                    } else {
+                        on_chain_voters = all_active
+                            .into_iter()
+                            .map(|mn| mn.masternode.address)
+                            .collect();
+                    }
                 }
                 tracing::warn!(
                     "⚠️ No precommit voters for block {} — fallback to {} on-chain masternodes",
