@@ -3997,79 +3997,50 @@ impl Blockchain {
 
             let precommit_voters: Vec<String> = voters_set.into_iter().collect();
             if precommit_voters.is_empty() {
-                let all_active = self.masternode_registry.get_active_masternodes().await;
-                let our_height = self.get_height();
-                let max_behind: u64 = 10;
-                let mut on_chain_voters: Vec<String> = Vec::new();
-
-                if let Some(registry) = self.get_peer_registry().await {
-                    for mn in &all_active {
-                        let mn_ip = mn
-                            .masternode
-                            .address
-                            .split(':')
-                            .next()
-                            .unwrap_or(&mn.masternode.address);
-                        if let Some(peer_height) = registry.get_peer_height(mn_ip).await {
-                            if our_height.saturating_sub(peer_height) <= max_behind {
-                                on_chain_voters.push(mn.masternode.address.clone());
-                            }
-                        } else if let Some(ref local_addr) =
-                            self.masternode_registry.get_local_address().await
-                        {
-                            let local_ip = local_addr.split(':').next().unwrap_or(local_addr);
-                            if mn_ip == local_ip {
-                                on_chain_voters.push(mn.masternode.address.clone());
-                            }
-                        }
+                // No votes collected for the previous block hash (stalled / recovering network).
+                // Fall back to the previous block's consensus_participants_bitmap — those are
+                // the nodes that actually voted last time, so they carry forward as eligible
+                // participants.  This is deterministic (every node reads the same chain) and
+                // does NOT depend on gossip state, so all validators compute the same bitmap.
+                let prev_height = next_height.saturating_sub(1);
+                let bitmap_voters: Vec<String> = match self.get_block_by_height(prev_height).await {
+                    Ok(prev_block) => {
+                        let nodes = self
+                            .masternode_registry
+                            .get_active_from_bitmap(&prev_block.consensus_participants_bitmap)
+                            .await;
+                        nodes.into_iter().map(|mn| mn.masternode.address).collect()
                     }
-                }
+                    Err(_) => Vec::new(),
+                };
 
-                if on_chain_voters.len() < 2 {
-                    // Emergency: gossip-active set is stale (stalled network).
-                    // Use all registered masternodes so every tier gets rewards.
-                    let blocks_behind = self
-                        .calculate_expected_height()
-                        .saturating_sub(self.get_height());
-                    if blocks_behind >= 5 {
-                        let all_registered = self.masternode_registry.list_all().await;
-                        if all_registered.len() >= 2 {
-                            use std::sync::atomic::{AtomicI64, Ordering as AtomOrd};
-                            static LAST_REWARD_FALLBACK: AtomicI64 = AtomicI64::new(0);
-                            let now_secs = chrono::Utc::now().timestamp();
-                            let last = LAST_REWARD_FALLBACK.load(AtomOrd::Relaxed);
-                            if now_secs - last >= 60 {
-                                LAST_REWARD_FALLBACK.store(now_secs, AtomOrd::Relaxed);
-                                tracing::warn!(
-                                    "⚠️ Reward fallback: {} blocks behind, using {} registered masternodes for bitmap (was {} on-chain)",
-                                    blocks_behind,
-                                    all_registered.len(),
-                                    on_chain_voters.len()
-                                );
-                            }
-                            on_chain_voters = all_registered
-                                .into_iter()
-                                .map(|mn| mn.masternode.address)
-                                .collect();
-                        } else {
-                            on_chain_voters = all_active
-                                .into_iter()
-                                .map(|mn| mn.masternode.address)
-                                .collect();
-                        }
-                    } else {
-                        on_chain_voters = all_active
-                            .into_iter()
-                            .map(|mn| mn.masternode.address)
-                            .collect();
+                let fallback_voters = if !bitmap_voters.is_empty() {
+                    use std::sync::atomic::{AtomicI64, Ordering as AtomOrd};
+                    static LAST_BITMAP_FALLBACK: AtomicI64 = AtomicI64::new(0);
+                    let now_secs = chrono::Utc::now().timestamp();
+                    let last = LAST_BITMAP_FALLBACK.load(AtomOrd::Relaxed);
+                    if now_secs - last >= 60 {
+                        LAST_BITMAP_FALLBACK.store(now_secs, AtomOrd::Relaxed);
+                        tracing::warn!(
+                            "⚠️ No votes for block {} — carrying forward {} participants from block {} bitmap",
+                            next_height - 1,
+                            bitmap_voters.len(),
+                            prev_height,
+                        );
                     }
-                }
-                tracing::warn!(
-                    "⚠️ No precommit voters for block {} — fallback to {} on-chain masternodes",
-                    next_height - 1,
-                    on_chain_voters.len()
-                );
-                on_chain_voters
+                    bitmap_voters
+                } else {
+                    // No previous bitmap either (very early chain or genesis recovery).
+                    // Fall back to gossip-active masternodes as a last resort.
+                    let active = self.masternode_registry.get_active_masternodes().await;
+                    tracing::warn!(
+                        "⚠️ No votes and no previous bitmap for block {} — using {} gossip-active masternodes",
+                        next_height - 1,
+                        active.len()
+                    );
+                    active.into_iter().map(|mn| mn.masternode.address).collect()
+                };
+                fallback_voters
             } else {
                 tracing::debug!(
                     "📊 Block {}: {} precommit voters from previous block",

@@ -4677,7 +4677,8 @@ impl MasternodeRegistry {
         }
 
         // ── Pass 3: zero-value / sub-minimum collateral ──────────────────────
-        const BRONZE_MIN: u64 = 1_000_000_000_000; // 1,000 TIME in satoshis
+        // 1,000 TIME × 100_000_000 satoshis/TIME = 100_000_000_000 satoshis
+        const BRONZE_MIN: u64 = 1_000 * crate::constants::blockchain::SATOSHIS_PER_TIME;
         for info in &all_nodes {
             let outpoint = match &info.masternode.collateral_outpoint {
                 Some(op) => op.clone(),
