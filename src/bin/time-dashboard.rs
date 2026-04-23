@@ -460,6 +460,44 @@ impl App {
         // Fetch recent blocks for block explorer
         if let Some(bc) = &self.data.blockchain {
             let current_height = bc.blocks;
+            let best_hash = bc.bestblockhash.clone();
+            let cached_top = self
+                .data
+                .recent_blocks
+                .first()
+                .map(|b| b.height)
+                .unwrap_or(0);
+            let cached_top_hash = self
+                .data
+                .recent_blocks
+                .first()
+                .map(|b| b.hash.clone())
+                .unwrap_or_default();
+
+            // Detect reorg: best block hash changed for the same (or lower) height
+            let reorg_detected = !self.data.recent_blocks.is_empty()
+                && (current_height < cached_top
+                    || (current_height == cached_top && cached_top_hash != best_hash)
+                    || (current_height > cached_top && {
+                        // The cached tip may be on a stale fork; verify its hash still matches
+                        // what the node reports at that height by checking if the top cached
+                        // block's hash is still the best known at that height.
+                        // We detect this cheaply: fetch the block at cached_top and compare.
+                        matches!(
+                            self.rpc_call::<BlockDetail>(
+                                "getblock",
+                                vec![serde_json::json!(cached_top)]
+                            )
+                            .await,
+                            Ok(ref live) if live.hash != cached_top_hash
+                        )
+                    }));
+
+            if reorg_detected {
+                // Chain reorganized — wipe stale cache and do a full re-fetch
+                self.data.recent_blocks.clear();
+            }
+
             let cached_top = self
                 .data
                 .recent_blocks
@@ -467,7 +505,7 @@ impl App {
                 .map(|b| b.height)
                 .unwrap_or(0);
 
-            if cached_top < current_height {
+            if cached_top < current_height || self.data.recent_blocks.is_empty() {
                 // Fetch only new blocks since last cached height
                 let fetch_from = if cached_top == 0 {
                     current_height.saturating_sub(19) // initial: last 20 blocks
@@ -1177,7 +1215,7 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
             }
         };
         let mut sorted: Vec<&MasternodeListEntry> = list.masternodes.iter().collect();
-        sorted.sort_by(|a, b| tier_order(&a.tier).cmp(&tier_order(&b.tier)));
+        sorted.sort_by_key(|a| tier_order(&a.tier));
 
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1641,8 +1679,8 @@ fn render_mempool_detail(f: &mut Frame, area: Rect, tx: &MempoolTx) {
 
 fn render_blocks(f: &mut Frame, area: Rect, app: &App) {
     // TX detail drill-down (third level)
-    if app.block_tx_detail.is_some() {
-        render_tx_detail(f, area, app.block_tx_detail.as_ref().unwrap());
+    if let Some(detail) = &app.block_tx_detail {
+        render_tx_detail(f, area, detail);
         return;
     }
     // Block detail view (second level)
@@ -2483,27 +2521,25 @@ async fn run_app<B: ratatui::backend::Backend>(
                             app.update_data().await;
                             last_update = Instant::now();
                         }
-                        KeyCode::Tab | KeyCode::Right => {
+                        KeyCode::Tab | KeyCode::Right
                             if app.mempool_detail.is_none()
                                 && app.block_detail.is_none()
-                                && app.block_tx_detail.is_none()
-                            {
-                                app.next_tab();
-                                app.mempool_scroll = 0;
-                                app.mempool_cursor = 0;
-                                app.vote_status = None;
-                            }
+                                && app.block_tx_detail.is_none() =>
+                        {
+                            app.next_tab();
+                            app.mempool_scroll = 0;
+                            app.mempool_cursor = 0;
+                            app.vote_status = None;
                         }
-                        KeyCode::Left => {
+                        KeyCode::Left
                             if app.mempool_detail.is_none()
                                 && app.block_detail.is_none()
-                                && app.block_tx_detail.is_none()
-                            {
-                                app.previous_tab();
-                                app.mempool_scroll = 0;
-                                app.mempool_cursor = 0;
-                                app.vote_status = None;
-                            }
+                                && app.block_tx_detail.is_none() =>
+                        {
+                            app.previous_tab();
+                            app.mempool_scroll = 0;
+                            app.mempool_cursor = 0;
+                            app.vote_status = None;
                         }
                         KeyCode::Up => {
                             if app.current_tab == 3 && app.mempool_detail.is_none() {
