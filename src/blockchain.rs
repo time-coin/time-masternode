@@ -6065,13 +6065,24 @@ impl Blockchain {
                         .await
                     {
                         Ok(slot_id) => {
-                            tracing::info!(
-                                "✅ MasternodeRegistration applied: {} -> {} slot={} (tx {})",
-                                node_address,
-                                wallet_address,
-                                slot_id,
-                                &txid_hex[..16]
-                            );
+                            // During sync this fires for every historical block — keep quiet.
+                            if self.is_syncing.load(Ordering::Acquire) {
+                                tracing::debug!(
+                                    "✅ MasternodeRegistration applied (replay): {} -> {} slot={} (tx {})",
+                                    node_address,
+                                    wallet_address,
+                                    slot_id,
+                                    &txid_hex[..16]
+                                );
+                            } else {
+                                tracing::info!(
+                                    "✅ MasternodeRegistration applied: {} -> {} slot={} (tx {})",
+                                    node_address,
+                                    wallet_address,
+                                    slot_id,
+                                    &txid_hex[..16]
+                                );
+                            }
                             undo.registered.push(node_address.clone());
                         }
                         Err(e) => {
@@ -6110,12 +6121,21 @@ impl Blockchain {
                         .await
                     {
                         Ok(()) => {
-                            tracing::info!(
-                                "✅ MasternodeDeregistration applied: {} slot={} (tx {})",
-                                node_address,
-                                slot_id,
-                                &txid_hex[..16]
-                            );
+                            if self.is_syncing.load(Ordering::Acquire) {
+                                tracing::debug!(
+                                    "✅ MasternodeDeregistration applied (replay): {} slot={} (tx {})",
+                                    node_address,
+                                    slot_id,
+                                    &txid_hex[..16]
+                                );
+                            } else {
+                                tracing::info!(
+                                    "✅ MasternodeDeregistration applied: {} slot={} (tx {})",
+                                    node_address,
+                                    slot_id,
+                                    &txid_hex[..16]
+                                );
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -6144,12 +6164,21 @@ impl Blockchain {
                         .await
                     {
                         Ok(()) => {
-                            tracing::info!(
-                                "✅ MasternodePayoutUpdate applied: {} -> {} (tx {})",
-                                node_address,
-                                new_reward_address,
-                                &txid_hex[..16]
-                            );
+                            if self.is_syncing.load(Ordering::Acquire) {
+                                tracing::debug!(
+                                    "✅ MasternodePayoutUpdate applied (replay): {} -> {} (tx {})",
+                                    node_address,
+                                    new_reward_address,
+                                    &txid_hex[..16]
+                                );
+                            } else {
+                                tracing::info!(
+                                    "✅ MasternodePayoutUpdate applied: {} -> {} (tx {})",
+                                    node_address,
+                                    new_reward_address,
+                                    &txid_hex[..16]
+                                );
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(

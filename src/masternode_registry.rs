@@ -4058,7 +4058,7 @@ impl MasternodeRegistry {
             .await
             .insert(node_address.to_string(), mn_info);
 
-        tracing::info!(
+        tracing::debug!(
             "✅ Masternode registered on-chain: {} tier={:?} slot={} height={}",
             node_address,
             tier,

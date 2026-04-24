@@ -1528,6 +1528,18 @@ async fn handle_peer(
                                     check_message_size!(MAX_TX_SIZE, "Transaction");
                                     check_rate_limit!("tx");
 
+                                    // Skip during sync: UTXOs are not yet indexed, initiating
+                                    // TimeVote consensus from a syncing node wastes network resources
+                                    // and can confuse validators. The peer will re-broadcast once
+                                    // we are caught up.
+                                    if blockchain.is_syncing() {
+                                        tracing::debug!(
+                                            "⏭️ Skipping TransactionBroadcast from {} — node is syncing",
+                                            peer.addr
+                                        );
+                                        continue;
+                                    }
+
                                     // Check if we've already seen this transaction using Bloom filter
                                     let txid = tx.txid();
                                     let already_seen = seen_transactions.check_and_insert(&txid).await;
