@@ -996,12 +996,10 @@ impl UTXOStateManager {
                         lock_height,
                         amount,
                     );
-                    // Persist to disk if available
-                    if let Some(tree) = &self.collateral_db {
-                        let key = bincode::serialize(&outpoint).unwrap_or_default();
-                        let value = bincode::serialize(&locked).unwrap_or_default();
-                        let _ = tree.insert(key, value);
-                    }
+                    // Do NOT persist to disk here — only the local node's own collateral
+                    // should be persisted (via lock_local_collateral). Persisting remote
+                    // nodes' locks causes them to be loaded and spuriously "released" on
+                    // every restart.
                     self.locked_collaterals.insert(outpoint, locked);
                     restored += 1;
                 }
