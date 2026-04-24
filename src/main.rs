@@ -5591,7 +5591,8 @@ fn setup_logging(
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
     let level = if verbose { "trace" } else { &config.level };
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(format!("{},sled=off", level)));
 
     // Detect if running under systemd/journald
     let is_systemd =
