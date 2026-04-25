@@ -1321,6 +1321,11 @@ async fn main() {
                 mn.clone()
             };
 
+        // Pre-declare as local so AV40's is_local_update exemption fires correctly
+        // for the self-registration path (e.g. provisional Free tier while new
+        // collateral is unconfirmed — without this the daemon exits on startup).
+        registry.set_local_masternode(mn.address.clone()).await;
+
         // Try registration; on squatter conflict, evict and retry once.
         let registration_ok = match registry
             .register(
@@ -1377,9 +1382,6 @@ async fn main() {
         };
 
         if registration_ok {
-            // Mark this as our local masternode
-            registry.set_local_masternode(mn.address.clone()).await;
-
             // Local masternode must be OnChain so it persists across
             // peer disconnects (Handshake nodes are removed on disconnect).
             if mn.tier != types::MasternodeTier::Free {
