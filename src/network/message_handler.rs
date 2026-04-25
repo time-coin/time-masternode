@@ -3406,6 +3406,12 @@ impl MessageHandler {
                                 "❌ [{}] Rejecting {:?} masternode from {} — collateral {} != required {}",
                                 self.direction, tier, peer_ip, utxo.value, required
                             );
+                                if utxo.value == 0 {
+                                    if let Some(ai) = &context.ai_system {
+                                        ai.attack_detector
+                                            .record_zero_collateral_pollution(&peer_ip);
+                                    }
+                                }
                                 return Ok(None);
                             }
                             // ── Collateral authorization hierarchy ──────────────────────────
@@ -3445,6 +3451,9 @@ impl MessageHandler {
                                             &embedded_key_hex[..16]
                                         );
                                     }
+                                    if let Some(ai) = &context.ai_system {
+                                        ai.attack_detector.record_collateral_hijack(&peer_ip);
+                                    }
                                     return Ok(None);
                                 }
                                 // Embedded key matches — skip further checks, allow through.
@@ -3474,6 +3483,9 @@ impl MessageHandler {
                                             &announcing_key_hex[..16],
                                             &registered_op_hex[..16]
                                         );
+                                    }
+                                    if let Some(ai) = &context.ai_system {
+                                        ai.attack_detector.record_collateral_hijack(&peer_ip);
                                     }
                                     return Ok(None);
                                 }

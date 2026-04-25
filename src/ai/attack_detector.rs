@@ -143,6 +143,12 @@ pub struct AttackDetector {
     /// Per-IP frame bomb timestamps for FrameBomb detection (AV51).
     /// Key: IP address, Value: deque of oversized-frame Unix timestamps.
     frame_bomb_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
+    /// Per-IP collateral hijack attempt timestamps for CollateralHijack detection (AV52).
+    /// Key: IP address, Value: deque of key-mismatch Unix timestamps.
+    collateral_hijack_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
+    /// Per-IP zero-value collateral registration timestamps for ZeroCollateralPollution (AV40).
+    /// Key: IP address, Value: deque of zero-collateral registration Unix timestamps.
+    zero_collateral_pollution_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
     /// Fires when a new (non-duplicate) attack is detected so the enforcement
     /// loop can wake up immediately instead of waiting the full 30-second tick.
     ban_notify: Arc<tokio::sync::Notify>,
@@ -167,6 +173,8 @@ impl AttackDetector {
             null_tx_flood_times: Arc::new(RwLock::new(HashMap::new())),
             connection_flood_times: Arc::new(RwLock::new(HashMap::new())),
             frame_bomb_times: Arc::new(RwLock::new(HashMap::new())),
+            collateral_hijack_times: Arc::new(RwLock::new(HashMap::new())),
+            zero_collateral_pollution_times: Arc::new(RwLock::new(HashMap::new())),
             ban_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
@@ -1233,6 +1241,156 @@ impl AttackDetector {
                 last_seen: now,
                 source_ips: vec![addr.to_string()],
                 recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        }
+    }
+
+    /// Record a collateral hijack attempt from `addr` (AV52).
+    ///
+    /// This fires when a peer's announced node key does not match either the embedded
+    /// masternode key in the collateral UTXO (Level 1) or the on-chain registered operator
+    /// pubkey (Level 2).  A legitimate node never announces with a mismatched key — this is
+    /// unambiguous evidence that the sender does not own the claimed collateral.
+    ///
+    /// Thresholds:
+    ///   ≥1 in 300 s  → `RateLimitPeer`  (first attempt; allow for misconfigured relays)
+    ///   ≥3 in 300 s  → `BlockPeer`      (repeat offender is conducting an active hijack attempt)
+    pub fn record_collateral_hijack(&self, addr: &str) {
+        let now = Self::now_secs();
+        const HIJACK_WINDOW_SECS: u64 = 300;
+        const BLOCK_THRESHOLD: usize = 3;
+
+        let count = {
+            let mut map = self.collateral_hijack_times.write();
+            let timestamps = map.entry(addr.to_string()).or_default();
+            while timestamps
+                .front()
+                .map(|t| now.saturating_sub(*t) > HIJACK_WINDOW_SECS)
+                .unwrap_or(false)
+            {
+                timestamps.pop_front();
+            }
+            timestamps.push_back(now);
+            timestamps.len()
+        };
+
+        if count >= BLOCK_THRESHOLD {
+            tracing::warn!(
+                "🚨 CollateralHijack from {} (AV52) — {} key-mismatch announcements in {}s — blocking",
+                addr,
+                count,
+                HIJACK_WINDOW_SECS
+            );
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::CollateralHijack,
+                confidence: 0.97,
+                severity: AttackSeverity::Critical,
+                indicators: vec![
+                    format!(
+                        "{} collateral key-mismatch announcements from {} within {}s (AV52)",
+                        count, addr, HIJACK_WINDOW_SECS
+                    ),
+                    "Peer's node key does not match collateral UTXO — definitive hijack attempt"
+                        .to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        } else {
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::CollateralHijack,
+                confidence: 0.80,
+                severity: AttackSeverity::High,
+                indicators: vec![
+                    format!(
+                        "Collateral key mismatch from {} (AV52) — occurrence {} in {}s window",
+                        addr, count, HIJACK_WINDOW_SECS
+                    ),
+                    "Node key does not match UTXO embedded key or registered operator key"
+                        .to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::RateLimitPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        }
+    }
+
+    /// Record a zero-value collateral registration attempt from `addr` (AV40).
+    ///
+    /// This fires when a peer tries to register as a staked tier (Bronze/Silver/Gold)
+    /// but the claimed collateral UTXO has a value of zero.  Zero-value UTXOs are trivial
+    /// to create and are never legitimate collateral for any staked tier.
+    ///
+    /// Thresholds:
+    ///   ≥1 in 120 s  → `RateLimitPeer`  (first attempt; may be a misconfigured relay)
+    ///   ≥2 in 120 s  → `BlockPeer`      (repeat offender is actively polluting the registry)
+    pub fn record_zero_collateral_pollution(&self, addr: &str) {
+        let now = Self::now_secs();
+        const ZERO_COLLATERAL_WINDOW_SECS: u64 = 120;
+        const BLOCK_THRESHOLD: usize = 2;
+
+        let count = {
+            let mut map = self.zero_collateral_pollution_times.write();
+            let timestamps = map.entry(addr.to_string()).or_default();
+            while timestamps
+                .front()
+                .map(|t| now.saturating_sub(*t) > ZERO_COLLATERAL_WINDOW_SECS)
+                .unwrap_or(false)
+            {
+                timestamps.pop_front();
+            }
+            timestamps.push_back(now);
+            timestamps.len()
+        };
+
+        if count >= BLOCK_THRESHOLD {
+            tracing::warn!(
+                "🛡️ ZeroCollateralPollution from {} (AV40) — {} zero-value registrations in {}s — blocking",
+                addr,
+                count,
+                ZERO_COLLATERAL_WINDOW_SECS
+            );
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::ZeroCollateralPollution,
+                confidence: 0.95,
+                severity: AttackSeverity::High,
+                indicators: vec![
+                    format!(
+                        "{} zero-value collateral registrations from {} within {}s (AV40)",
+                        count, addr, ZERO_COLLATERAL_WINDOW_SECS
+                    ),
+                    "Zero-value UTXOs used as staked-tier collateral — registry pollution attack"
+                        .to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        } else {
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::ZeroCollateralPollution,
+                confidence: 0.75,
+                severity: AttackSeverity::Medium,
+                indicators: vec![
+                    format!(
+                        "Zero-value collateral registration from {} (AV40) — first occurrence in {}s window",
+                        addr, ZERO_COLLATERAL_WINDOW_SECS
+                    ),
+                    "Staked-tier announcement with 0-value UTXO — never legitimate".to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::RateLimitPeer(addr.to_string()),
                 mitigation_applied_at: None,
             });
         }
