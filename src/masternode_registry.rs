@@ -728,6 +728,27 @@ impl MasternodeRegistry {
             .as_ref()
             .map(|a| a.split(':').next().unwrap_or(a).to_string());
 
+        // Pre-fetch whether the EXISTING node's collateral UTXO is still on-chain.
+        // Used by AV40 check: if collateral is gone the node legitimately deregistered
+        // and may re-register as Free — we allow the downgrade instead of dropping it.
+        let existing_collateral_exists: Option<bool> = {
+            let nodes_read = self.masternodes.read().await;
+            if let Some(existing) = nodes_read.get(&masternode.address) {
+                if let Some(ref outpoint) = existing.masternode.collateral_outpoint {
+                    let utxo_mgr_guard = self.utxo_manager.read().await;
+                    if let Some(ref utxo_manager) = *utxo_mgr_guard {
+                        Some(utxo_manager.get_utxo(outpoint).await.is_ok())
+                    } else {
+                        None
+                    }
+                } else {
+                    Some(false)
+                }
+            } else {
+                None
+            }
+        };
+
         let mut nodes = self.masternodes.write().await;
         let now = Self::now();
 
@@ -1324,23 +1345,36 @@ impl MasternodeRegistry {
                     && existing.masternode.tier != crate::types::MasternodeTier::Free
                     && masternode.tier == crate::types::MasternodeTier::Free
                 {
-                    tracing::warn!(
-                        "🛡️ [AV40] Gossip tier downgrade blocked for {}: {:?} → Free",
-                        masternode.address,
-                        existing.masternode.tier,
-                    );
-                    // The tier change is blocked, but the node IS connected. Nodes in the
-                    // deferred-tier state (UTXO not resolved at startup) announce as Free
-                    // temporarily; we must not leave them permanently inactive just because
-                    // their announced tier doesn't match our records. Activate them at their
-                    // existing tier so they count toward quorum while the chain-sync resolves.
-                    if should_activate && !existing.is_active {
-                        existing.is_active = true;
-                        existing.uptime_start = now;
-                        self.store_masternode(&masternode.address, existing)?;
-                        self.rebuild_node_caches(&nodes);
+                    // If the existing collateral UTXO is confirmed gone on-chain, the node
+                    // legitimately deregistered (collateral spent/rejected).  Allow the
+                    // downgrade to Free so the connection stays open rather than being dropped.
+                    let collateral_gone = !existing_collateral_exists.unwrap_or(true);
+                    if collateral_gone {
+                        tracing::info!(
+                            "📉 [AV40] Collateral UTXO gone for {} ({:?} → Free) — allowing legitimate downgrade",
+                            masternode.address,
+                            existing.masternode.tier,
+                        );
+                        // Fall through: let the normal update path below set tier = Free.
+                    } else {
+                        tracing::warn!(
+                            "🛡️ [AV40] Gossip tier downgrade blocked for {}: {:?} → Free (collateral still on-chain)",
+                            masternode.address,
+                            existing.masternode.tier,
+                        );
+                        // The tier change is blocked, but the node IS connected. Nodes in the
+                        // deferred-tier state (UTXO not resolved at startup) announce as Free
+                        // temporarily; we must not leave them permanently inactive just because
+                        // their announced tier doesn't match our records. Activate them at their
+                        // existing tier so they count toward quorum while the chain-sync resolves.
+                        if should_activate && !existing.is_active {
+                            existing.is_active = true;
+                            existing.uptime_start = now;
+                            self.store_masternode(&masternode.address, existing)?;
+                            self.rebuild_node_caches(&nodes);
+                        }
+                        return Err(RegistryError::InvalidCollateral);
                     }
-                    return Err(RegistryError::InvalidCollateral);
                 }
 
                 // Update tier and collateral info on re-registration
