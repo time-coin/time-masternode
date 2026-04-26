@@ -580,6 +580,29 @@ impl UTXOStateManager {
         self.utxo_states.insert(outpoint.clone(), state);
     }
 
+    /// Mark a UTXO as TimeVote-finalized (spent).
+    ///
+    /// Unlike `update_state`, this also removes the UTXO from persistent sled
+    /// storage and the address index so that, after a node restart,
+    /// `initialize_states` does not resurrect it as `Unspent`.
+    pub async fn mark_timevote_finalized(&self, outpoint: &OutPoint, txid: Hash256) {
+        // Remove from address index first (needs storage lookup for address)
+        if let Some(utxo) = self.storage.get_utxo(outpoint).await {
+            self.remove_from_address_index(&utxo.address, outpoint);
+        }
+        // Remove from persistent storage so restarts don't revive it as Unspent
+        let _ = self.storage.remove_utxo(outpoint).await;
+        // Update in-memory state
+        self.utxo_states.insert(
+            outpoint.clone(),
+            UTXOState::SpentFinalized {
+                txid,
+                finalized_at: Self::current_timestamp(),
+                votes: 0,
+            },
+        );
+    }
+
     /// Force reset a UTXO to Unspent state (for recovery from stuck locks)
     /// Refuses to unlock UTXOs locked as masternode collateral.
     pub fn force_unlock(&self, outpoint: &OutPoint) -> bool {

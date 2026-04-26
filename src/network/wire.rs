@@ -230,8 +230,12 @@ pub async fn read_message<R: AsyncRead + Unpin>(
     let mut len_buf = [0u8; 4];
     match reader.read_exact(&mut len_buf).await {
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof
-            || e.kind() == std::io::ErrorKind::ConnectionReset => return Ok(None),
+        Err(e)
+            if e.kind() == std::io::ErrorKind::UnexpectedEof
+                || e.kind() == std::io::ErrorKind::ConnectionReset =>
+        {
+            return Ok(None)
+        }
         Err(e) => return Err(format!("Failed to read frame length: {}", e)),
     }
 

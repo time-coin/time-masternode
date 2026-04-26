@@ -3157,15 +3157,13 @@ impl ConsensusEngine {
 
                 // CRITICAL: Transition UTXOs from Locked → SpentFinalized
                 // Without this, other nodes reject blocks containing this TX
-                // because the UTXOs are still in Locked state
+                // because the UTXOs are still in Locked state.
+                // mark_timevote_finalized also removes from sled so they don't
+                // resurrect as Unspent after a node restart.
                 for input in &tx.inputs {
-                    let new_state = UTXOState::SpentFinalized {
-                        txid,
-                        finalized_at: chrono::Utc::now().timestamp(),
-                        votes: 0,
-                    };
                     self.utxo_manager
-                        .update_state(&input.previous_output, new_state);
+                        .mark_timevote_finalized(&input.previous_output, txid)
+                        .await;
                 }
 
                 // Create new UTXOs from transaction outputs (change + recipient)
@@ -3382,14 +3380,10 @@ impl ConsensusEngine {
                             // and create output UTXOs as Unspent
                             if let Some(ref tx_data) = tx_for_broadcast {
                                 for input in &tx_data.inputs {
-                                    let new_state = UTXOState::SpentFinalized {
-                                        txid,
-                                        finalized_at: chrono::Utc::now().timestamp(),
-                                        votes: 0,
-                                    };
                                     consensus_engine_clone
                                         .utxo_manager
-                                        .update_state(&input.previous_output, new_state);
+                                        .mark_timevote_finalized(&input.previous_output, txid)
+                                        .await;
                                 }
                                 for (idx, output) in tx_data.outputs.iter().enumerate() {
                                     let outpoint = OutPoint {

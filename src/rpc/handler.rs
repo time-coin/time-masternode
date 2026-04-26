@@ -1134,31 +1134,24 @@ impl RpcHandler {
             }
         }
 
-        tokio::spawn({
-            let consensus = self.consensus.clone();
-            let tx_for_consensus = tx.clone();
-            let txid_for_log = txid_hex.clone();
-            async move {
-                // Initiate TimeVote consensus for transaction
-                match consensus.add_transaction(tx_for_consensus).await {
-                    Ok(_) => {
-                        tracing::info!(
-                            "✅ Transaction {} accepted by consensus",
-                            &txid_for_log[..16]
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "❌ Transaction {} REJECTED by consensus: {}",
-                            &txid_for_log[..16],
-                            e
-                        );
-                    }
-                }
+        match self.consensus.add_transaction(tx).await {
+            Ok(_) => {
+                tracing::info!("✅ Transaction {} accepted by consensus", &txid_hex[..16]);
             }
-        });
+            Err(e) => {
+                tracing::error!(
+                    "❌ Transaction {} REJECTED by consensus: {}",
+                    &txid_hex[..16],
+                    e
+                );
+                return Err(RpcError {
+                    code: -26,
+                    message: format!("Transaction rejected: {}", e),
+                });
+            }
+        }
 
-        Ok(json!(hex::encode(txid)))
+        Ok(json!(txid_hex))
     }
 
     async fn create_raw_transaction(&self, params: &[Value]) -> Result<Value, RpcError> {

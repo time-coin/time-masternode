@@ -7445,14 +7445,10 @@ impl MessageHandler {
                         // Transition input UTXOs and create output UTXOs
                         if let Some(ref tx) = tx_data {
                             for input in &tx.inputs {
-                                let new_state = crate::types::UTXOState::SpentFinalized {
-                                    txid,
-                                    finalized_at: chrono::Utc::now().timestamp(),
-                                    votes: 0,
-                                };
                                 consensus
                                     .utxo_manager
-                                    .update_state(&input.previous_output, new_state);
+                                    .mark_timevote_finalized(&input.previous_output, txid)
+                                    .await;
                             }
                             for (idx, output) in tx.outputs.iter().enumerate() {
                                 let outpoint = crate::types::OutPoint {
