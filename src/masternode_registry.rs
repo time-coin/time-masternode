@@ -3061,8 +3061,19 @@ impl MasternodeRegistry {
             let was_active = info.is_active;
 
             // Require sufficient report count AND subnet diversity (if network is large enough)
-            let meets_count = report_count >= min_reports;
-            let meets_diversity = if total_masternodes > 12 && report_count >= 2 {
+            //
+            // Cap the required reporter count at the number of peers we are actually
+            // connected to.  With N live connections the maximum possible reporters
+            // is N; requiring MIN_PEER_REPORTS > N makes the threshold permanently
+            // unsatisfiable regardless of whether the remote masternode is genuinely
+            // online, trapping the network in a "2 active / 242 total" deadlock.
+            let effective_min = min_reports.min(connected_peers.len().max(1));
+            let meets_count = report_count >= effective_min;
+            // Only enforce /16 subnet diversity when we have enough connections that
+            // multi-subnet witnesses are actually achievable (≥3 connected peers).
+            // With <3 connections reporters may all share a subnet even for a fully
+            // healthy masternode.
+            let meets_diversity = if total_masternodes > 12 && connected_peers.len() >= 3 && report_count >= 2 {
                 // Require witnesses from at least 2 distinct /16 subnets to prevent
                 // targeted DDoS against a node's witnesses on the same subnet.
                 // Only enforce for larger networks (>12 nodes) — small networks with
@@ -3081,7 +3092,7 @@ impl MasternodeRegistry {
                 }
                 subnets.len() >= 2
             } else {
-                true // Small networks exempt from diversity requirement
+                true // Small networks or under-connected state exempt from diversity requirement
             };
             // A direct TCP connection is authoritative proof of liveness —
             // gossip counts are a secondary signal for nodes we aren't directly
