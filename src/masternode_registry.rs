@@ -1329,6 +1329,17 @@ impl MasternodeRegistry {
                         masternode.address,
                         existing.masternode.tier,
                     );
+                    // The tier change is blocked, but the node IS connected. Nodes in the
+                    // deferred-tier state (UTXO not resolved at startup) announce as Free
+                    // temporarily; we must not leave them permanently inactive just because
+                    // their announced tier doesn't match our records. Activate them at their
+                    // existing tier so they count toward quorum while the chain-sync resolves.
+                    if should_activate && !existing.is_active {
+                        existing.is_active = true;
+                        existing.uptime_start = now;
+                        self.store_masternode(&masternode.address, existing)?;
+                        self.rebuild_node_caches(&nodes);
+                    }
                     return Err(RegistryError::InvalidCollateral);
                 }
 

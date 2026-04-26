@@ -1084,9 +1084,13 @@ async fn handle_peer(
                         let clearly_malicious = frame_bytes.is_some_and(|b| b > MALICIOUS_FRAME_BYTES);
                         if is_large_frame && (!handshake_done || clearly_malicious) {
                             if is_whitelisted {
-                                // Likely a framing protocol mismatch with an older friendly node.
-                                // Don't penalise — the backoff in the reconnect loop handles pacing.
-                                tracing::debug!("🔌 Oversized frame from whitelisted peer {} — version mismatch likely, skipping penalty", peer.addr);
+                                // Trusted masternode sending oversized frames — log at WARN
+                                // so operators can investigate; never penalise/ban whitelisted peers.
+                                tracing::warn!(
+                                    "🔌 Oversized frame ({} bytes) from whitelisted peer {} — \
+                                     connection reset; will reconnect on next PHASE3-MN cycle",
+                                    frame_bytes.unwrap_or(0), peer.addr
+                                );
                             } else {
                                 blacklist.write().await.record_violation(
                                     ip,

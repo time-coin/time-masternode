@@ -3375,6 +3375,39 @@ impl MessageHandler {
             .unwrap()
             .as_secs();
 
+        // Deferred-tier recovery: a node whose UTXO wasn't in local storage at startup
+        // sets tier=Free provisionally but still includes its collateral outpoint.
+        // Peers receiving this state reject it via AV40 (tier=Free with outpoint). Resolve
+        // the contradiction here by looking up the UTXO and deriving the correct tier.
+        // If found → upgrade to the real tier and proceed through the normal paid-tier path.
+        // If not found or zero value → strip the outpoint so it registers cleanly as Free.
+        let (tier, collateral_outpoint) =
+            if tier == crate::types::MasternodeTier::Free && collateral_outpoint.is_some() {
+                if let Some(utxo_manager) = &context.utxo_manager {
+                    let op = collateral_outpoint.as_ref().unwrap();
+                    match utxo_manager.get_utxo(op).await {
+                        Ok(utxo) if utxo.value > 0 => {
+                            if let Some(derived) =
+                                crate::types::MasternodeTier::from_collateral_value(utxo.value)
+                            {
+                                debug!(
+                                    "📊 [{}] Deferred-tier upgrade: {} Free→{:?} via UTXO lookup",
+                                    self.direction, masternode_ip, derived
+                                );
+                                (derived, collateral_outpoint)
+                            } else {
+                                (tier, None)
+                            }
+                        }
+                        _ => (tier, None),
+                    }
+                } else {
+                    (tier, None)
+                }
+            } else {
+                (tier, collateral_outpoint)
+            };
+
         if tier != crate::types::MasternodeTier::Free {
             // Staked tiers MUST include collateral_outpoint
             let outpoint = match collateral_outpoint {

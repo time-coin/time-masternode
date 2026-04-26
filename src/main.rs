@@ -1666,8 +1666,19 @@ async fn main() {
             // the masternode key and lets other nodes evict V3 squatters who
             // grabbed the UTXO before the legitimate owner announced.
             let build_announcement = |mn: &types::Masternode| -> NetworkMessage {
+                // Never broadcast a collateral outpoint when tier is provisionally Free.
+                // Nodes in the deferred-tier state (UTXO not yet resolved) set tier=Free
+                // while still carrying the outpoint from config. Peers receiving this
+                // contradictory state hit AV40 and can't activate the node. Strip the
+                // outpoint so the announcement is internally consistent; the correct tier
+                // will be broadcast once the on-chain collateral sync resolves it.
+                let effective_outpoint = if mn.tier == types::MasternodeTier::Free {
+                    None
+                } else {
+                    mn.collateral_outpoint.clone()
+                };
                 if let (Some(ref signing_key), Some(ref outpoint)) =
-                    (&signing_key_for_announcement, &mn.collateral_outpoint)
+                    (&signing_key_for_announcement, &effective_outpoint)
                 {
                     let txid_hex = hex::encode(outpoint.txid);
                     let proof_msg = format!("TIME_COLLATERAL_CLAIM:{}:{}", txid_hex, outpoint.vout);
@@ -1678,7 +1689,7 @@ async fn main() {
                         reward_address: mn.wallet_address.clone(),
                         tier: mn.tier,
                         public_key: mn.public_key,
-                        collateral_outpoint: mn.collateral_outpoint.clone(),
+                        collateral_outpoint: effective_outpoint,
                         certificate: vec![0u8; 64],
                         started_at: daemon_started_at,
                         collateral_proof: sig.to_bytes().to_vec(),
@@ -1689,7 +1700,7 @@ async fn main() {
                     reward_address: mn.wallet_address.clone(),
                     tier: mn.tier,
                     public_key: mn.public_key,
-                    collateral_outpoint: mn.collateral_outpoint.clone(),
+                    collateral_outpoint: effective_outpoint,
                     certificate: vec![0u8; 64],
                     started_at: daemon_started_at,
                 }

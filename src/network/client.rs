@@ -510,22 +510,21 @@ impl NetworkClient {
                             false
                         };
                         if mn_is_whitelisted {
-                            // Whitelisted peers bypass the AI cooldown entirely, but still
-                            // apply a simple exponential back-off when they keep failing.
-                            // Without this the loop reconnects every 30s to a misbehaving
-                            // own node (e.g. one sending frame bombs due to old software).
-                            // Delay: 60s after 1 failure, doubling each time, capped at 300s.
+                            // Whitelisted peers get a short cooldown only — reconnect within
+                            // one PHASE3-MN cycle. A short delay prevents tight spin loops on
+                            // frame-bomb peers while still achieving near-100% uptime for
+                            // trusted masternodes.  Max backoff: 10 s (well under the 30s tick).
                             let failures = res.reconnection_ai.consecutive_failures_for(mn_ip);
                             if failures > 0 {
                                 let min_delay_secs =
-                                    (60u64 * 2u64.pow(failures.saturating_sub(1).min(3))).min(300);
+                                    (5u64 * 2u64.pow(failures.saturating_sub(1).min(1))).min(10);
                                 let elapsed = connection_manager
                                     .time_since_disconnect(mn_ip)
                                     .unwrap_or(Duration::MAX);
                                 if elapsed < Duration::from_secs(min_delay_secs) {
                                     tracing::debug!(
-                                        "⏸️  [PHASE3-MN] Whitelisted {} cooling down ({} failures, {}s/{min_delay_secs}s elapsed)",
-                                        mn_ip, failures, elapsed.as_secs()
+                                        "⏸️  [PHASE3-MN] Whitelisted {} cooling down ({} failures, {}s/{}s elapsed)",
+                                        mn_ip, failures, elapsed.as_secs(), min_delay_secs
                                     );
                                     continue;
                                 }
