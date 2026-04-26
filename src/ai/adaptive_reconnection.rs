@@ -435,11 +435,19 @@ impl AdaptiveReconnectionAI {
         // Check if in cooldown — cooldown grows exponentially with each repeated failure
         // cycle so that persistently unreachable peers back off to hours rather than
         // hammering forever at a fixed 10-minute interval.
+        //
+        // Masternodes use a much lower cap (120 s) because they accumulate failure
+        // counts from short-lived connections caused by AV40 rejections, version
+        // mismatches, and simultaneous-connection tiebreakers — all transient causes
+        // that resolve once the node updates.  Applying the anonymous-peer 24-hour
+        // cap to masternodes would silently block them for days after a buggy period,
+        // preventing consensus even after the root cause is fixed.
         if profile.consecutive_failures >= self.config.max_consecutive_failures {
             let extra_cycles = profile.consecutive_failures - self.config.max_consecutive_failures;
+            let max_cooldown = if profile.is_masternode { 120.0 } else { 86_400.0 };
             let effective_cooldown = (self.config.cooldown_period_secs as f64
                 * 2_f64.powi(extra_cycles.min(8) as i32)) // cap at 2^8 = 256× base
-            .min(86_400.0) as u64; // never exceed 24 hours
+            .min(max_cooldown) as u64;
             let time_since_failure = now.saturating_sub(profile.last_failure_time);
             if time_since_failure < effective_cooldown {
                 let remaining = effective_cooldown - time_since_failure;
