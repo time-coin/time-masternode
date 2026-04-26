@@ -1371,6 +1371,32 @@ OOM prevention is retained via an overall PHASE3 reconnect concurrency cap (not 
 
 ---
 
+### 15.11b ✅ FIXED — Transaction Censorship via Selective Relay (AV30)
+**Status:** **FIXED**
+**Severity:** Medium — user funds stuck in perpetual "Pending"; wallet shows ghost transactions
+
+**Attack:** A malicious or compromised masternode accepts a `sendrawtransaction` RPC call and immediately returns the txid (success), but deliberately never relays the transaction to other masternodes via TimeVote broadcast. Since the wallet considers the txid return value as confirmation of broadcast, it records the transaction as Pending. The tx never receives TimeVote votes from other masternodes, never finalizes, and is eventually evicted from the malicious node's mempool (e.g., on restart). The wallet is left with a ghost "Pending" send entry that the user cannot clear.
+
+**Attack Variants:**
+1. **Malicious relay**: Attacker deliberately accepts but does not relay (censorship).
+2. **Node restart / mempool eviction**: Honest node accepts tx, restarts before relaying — tx lost.
+3. **Eclipse attack amplification**: If all connected peers are controlled by attacker, all ACK the tx but none relay it — user's funds appear locked indefinitely.
+
+**Root Causes:**
+1. **Node side** (`src/rpc/handler.rs`): `send_raw_transaction` spawned `consensus.add_transaction()` as a fire-and-forget `tokio::spawn` task, then immediately returned `Ok(txid)` — even if the consensus task rejected the transaction. Broadcast failures were silently discarded.
+2. **Wallet side** (`WalletService.kt`): `refreshTransactionsSync()` never reconciled DB-resident Pending txids against the node's current knowledge. Ghost txids persisted in the DB indefinitely across refreshes.
+
+**Fixes Implemented:**
+1. **Node** (`src/rpc/handler.rs`): Replaced `tokio::spawn` fire-and-forget with a direct `await` on `consensus.add_transaction()`. `send_raw_transaction` now returns `RpcError { code: -26 }` if local consensus rejects the transaction — the txid is only returned on `Ok`.
+2. **Wallet** (`WalletService.kt`, `WalletDatabase.kt`): `refreshTransactionsSync()` now collects all DB-resident Pending txids, filters out those present in the fresh RPC response, and calls `gettransaction` for the remainder. Any txid that returns `RPC error -5` (not found in blocks or mempool) is deleted from the DB. Network errors (timeouts, connection refused) leave the entry pending for the next refresh cycle.
+
+**Code References:**
+- `src/rpc/handler.rs` — `send_raw_transaction()`: await consensus directly; return `-26` on rejection
+- `android/.../service/WalletService.kt` — `refreshTransactionsSync()`: ghost-tx purge loop
+- `android/.../db/WalletDatabase.kt` — `TransactionDao.getPendingTxids()`, `deleteByTxid()`
+
+---
+
 ### 15.12 ✅ FIXED — Producer Pool Self-Award (AV33)
 **Status:** **FIXED**
 **Severity:** High — reward theft; enables sustained unfair monopolization of block rewards
@@ -1761,6 +1787,7 @@ Connection from 64.91.224.76:36048 ended: Frame too large: 4083387062 bytes (max
 | AV27 | Invalid vote signature spam | Medium | ✅ Fixed |
 | AV28 | Unregistered voter spam | Medium | ✅ Fixed |
 | AV29 | SNI false-flag / reputation poisoning | Low | ✅ Confirmed non-issue |
+| AV30 | Transaction censorship via selective relay | Medium | ✅ Fixed |
 | AV33 | Producer pool self-award | High | ✅ Fixed |
 | AV34 | Targeted disconnect / reward theft | Medium | ✅ Fixed |
 | AV35 | Free-tier reward monopolisation | High | ✅ Fixed |
