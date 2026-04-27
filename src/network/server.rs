@@ -1835,14 +1835,13 @@ async fn handle_peer(
                                         if consensus.tx_pool.finalize_transaction(*txid) {
                                             tracing::info!("📦 Moved TX {} to finalized pool on this node", hex::encode(*txid));
 
-                                            // Transition input UTXOs → SpentFinalized
+                                            // Transition input UTXOs → SpentFinalized and
+                                            // remove from sled storage + address_index so they
+                                            // are not resurrected as Unspent after a node restart.
                                             for input in &tx.inputs {
-                                                let new_state = crate::types::UTXOState::SpentFinalized {
-                                                    txid: *txid,
-                                                    finalized_at: chrono::Utc::now().timestamp(),
-                                                    votes: 0,
-                                                };
-                                                consensus.utxo_manager.update_state(&input.previous_output, new_state);
+                                                consensus.utxo_manager
+                                                    .mark_timevote_finalized(&input.previous_output, *txid)
+                                                    .await;
                                             }
 
                                             // Create output UTXOs
