@@ -210,9 +210,9 @@ impl NetworkClient {
             const GOLD_SILVER_EXTRAS: usize = 3; // Gold also connects to N Silver for downward visibility
             const SILVER_LATERAL: usize = 4; // Silver lateral peers within Silver tier
             const BRONZE_UPWARD: usize = 5; // Bronze → Silver connections
-            const BRONZE_LATERAL: usize = 3; // Bronze lateral peers within Bronze tier
+            const BRONZE_LATERAL: usize = 3; // Bronze lateral peers within Bronze tier (when upward nodes exist)
             const FREE_UPWARD: usize = 5; // Free → Bronze connections (+ 1 Silver fallback)
-            const FULL_MESH_THRESHOLD: usize = 20; // Use full mesh when total nodes ≤ this
+            const FULL_MESH_THRESHOLD: usize = 50; // Use full mesh when total nodes ≤ this
 
             // Determine our own tier
             let our_tier: Option<MasternodeTier> = {
@@ -289,21 +289,25 @@ impl NetworkClient {
                         t
                     }
                     Some(MasternodeTier::Silver) => {
-                        // Silver: connect to ALL Gold (backbone) + lateral Silver peers
+                        // Silver: connect to ALL Gold (backbone) + lateral Silver peers.
+                        // If no Gold exists, connect to ALL Silver (single-tier network).
                         let mut t: Vec<String> = gold_nodes
                             .iter()
                             .map(|m| m.masternode.address.clone())
                             .collect();
+                        let silver_limit = if t.is_empty() { silver_nodes.len() } else { SILVER_LATERAL };
                         t.extend(
                             silver_nodes
                                 .iter()
-                                .take(SILVER_LATERAL)
+                                .take(silver_limit)
                                 .map(|m| m.masternode.address.clone()),
                         );
                         t
                     }
                     Some(MasternodeTier::Bronze) => {
-                        // Bronze: N Silver (upward) + lateral Bronze peers; fall back to Gold if no Silver
+                        // Bronze: N Silver (upward) + lateral Bronze; fall back to Gold if no Silver.
+                        // If no upward tier exists at all, connect to ALL Bronze so the
+                        // network stays fully connected even in a Bronze-only deployment.
                         let mut t: Vec<String> = silver_nodes
                             .iter()
                             .take(BRONZE_UPWARD)
@@ -312,16 +316,18 @@ impl NetworkClient {
                         if t.is_empty() {
                             t.extend(gold_nodes.iter().map(|m| m.masternode.address.clone()));
                         }
+                        let bronze_limit = if t.is_empty() { bronze_nodes.len() } else { BRONZE_LATERAL };
                         t.extend(
                             bronze_nodes
                                 .iter()
-                                .take(BRONZE_LATERAL)
+                                .take(bronze_limit)
                                 .map(|m| m.masternode.address.clone()),
                         );
                         t
                     }
                     None | Some(MasternodeTier::Free) => {
-                        // Free / unregistered: connect upward to Bronze, with a Silver fallback
+                        // Free / unregistered: connect upward to Bronze, with a Silver fallback.
+                        // If no upward tier exists, connect to ALL Free nodes.
                         let mut t: Vec<String> = bronze_nodes
                             .iter()
                             .take(FREE_UPWARD)
@@ -334,8 +340,11 @@ impl NetworkClient {
                                 .map(|m| m.masternode.address.clone()),
                         );
                         if t.is_empty() {
-                            // Last resort: any Gold that is reachable
+                            // No upward tier: try Gold, then all Free peers
                             t.extend(gold_nodes.iter().map(|m| m.masternode.address.clone()));
+                            if t.is_empty() {
+                                t.extend(free_nodes.iter().map(|m| m.masternode.address.clone()));
+                            }
                         }
                         t
                     }
@@ -555,7 +564,13 @@ impl NetworkClient {
                         }
                         // AV25: Per-/24 subnet cap for Free-tier reconnections.
                         // Stops PHASE3 from maintaining dozens of connections to one attacker subnet.
-                        if mn_info.masternode.tier == MasternodeTier::Free {
+                        // OnChain masternodes bypass: they're verified on-chain and the operator
+                        // may legitimately run multiple nodes on the same /24.
+                        let is_onchain = matches!(
+                            mn_info.registration_source,
+                            crate::masternode_registry::RegistrationSource::OnChain(_)
+                        );
+                        if mn_info.masternode.tier == MasternodeTier::Free && !is_onchain && !mn_is_whitelisted {
                             let ip = mn_ip.split(':').next().unwrap_or(mn_ip);
                             let parts: Vec<&str> = ip.split('.').collect();
                             let subnet = if parts.len() >= 3 {

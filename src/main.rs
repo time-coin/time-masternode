@@ -4979,10 +4979,16 @@ async fn main() {
     });
     shutdown_manager.register_task(utxo_sync_handle);
 
-    // Prepare whitelist from official peer discovery ONLY (time-coin.io).
-    // Users cannot add to the whitelist via time.conf — only the addwhitelist
-    // RPC (which verifies against the official peer list) is accepted.
-    let combined_whitelist = discovered_peer_ips.clone();
+    // Whitelist = time-coin.io discovered peers + operator-configured addnode peers.
+    // addnode entries in time.conf are explicitly trusted by the operator; they bypass
+    // AI cooldowns and the inbound redirect threshold just like official discovered peers.
+    let mut combined_whitelist = discovered_peer_ips.clone();
+    for peer in &config.network.bootstrap_peers {
+        let ip = peer.split(':').next().unwrap_or(peer).to_string();
+        if !combined_whitelist.contains(&ip) {
+            combined_whitelist.push(ip);
+        }
+    }
 
     println!(
         "🔐 Preparing whitelist with {} trusted peer(s) from time-coin.io...",
