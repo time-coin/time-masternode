@@ -53,6 +53,11 @@ pub struct UTXOStateManager {
     /// Cache of address → Ed25519 public key, populated from transaction signatures.
     /// Used for encrypted memo recipient key lookup.
     pubkey_cache: DashMap<String, [u8; 32]>,
+    /// Permanent tombstone set: once an outpoint enters a spent state it is recorded here
+    /// and add_utxo will hard-reject any attempt to re-add it, even if utxo_states or
+    /// sled have been cleared.  Backed by a sled tree so the guard survives restarts.
+    spent_tombstones: DashSet<OutPoint>,
+    spent_db: Option<sled::Tree>,
 }
 
 impl Default for UTXOStateManager {
@@ -71,6 +76,8 @@ impl UTXOStateManager {
             collateral_db: None,
             address_index: DashMap::new(),
             pubkey_cache: DashMap::new(),
+            spent_tombstones: DashSet::new(),
+            spent_db: None,
         }
     }
 
@@ -83,6 +90,8 @@ impl UTXOStateManager {
             collateral_db: None,
             address_index: DashMap::new(),
             pubkey_cache: DashMap::new(),
+            spent_tombstones: DashSet::new(),
+            spent_db: None,
         }
     }
 
@@ -94,6 +103,41 @@ impl UTXOStateManager {
             .map_err(|e| UtxoError::Storage(e.into()))?;
         self.collateral_db = Some(tree);
         Ok(())
+    }
+
+    /// Enable persistent spent-UTXO tombstone storage.  Call once on startup, before
+    /// initialize_states, so the tombstone set is fully populated before any add_utxo
+    /// calls can happen.  Loads all previously-recorded tombstones from disk.
+    pub fn enable_spent_persistence(&mut self, db: &sled::Db) -> Result<(), UtxoError> {
+        let tree = db
+            .open_tree("spent_utxos")
+            .map_err(|e| UtxoError::Storage(e.into()))?;
+        // Reload tombstones that survived the last restart
+        let mut loaded = 0usize;
+        for item in tree.iter() {
+            if let Ok((key, _)) = item {
+                if let Ok(op) = bincode::deserialize::<OutPoint>(&key) {
+                    self.spent_tombstones.insert(op);
+                    loaded += 1;
+                }
+            }
+        }
+        if loaded > 0 {
+            tracing::info!("🪦 Loaded {} spent UTXO tombstone(s) from disk", loaded);
+        }
+        self.spent_db = Some(tree);
+        Ok(())
+    }
+
+    /// Record an outpoint as permanently spent.  Writes to both the in-memory tombstone
+    /// set and the sled tree so the guard survives node restarts.
+    fn record_spent(&self, outpoint: &OutPoint) {
+        self.spent_tombstones.insert(outpoint.clone());
+        if let Some(tree) = &self.spent_db {
+            if let Ok(key) = bincode::serialize(outpoint) {
+                let _ = tree.insert(key, &[][..]);
+            }
+        }
     }
 
     /// Register a known Ed25519 public key for an address.
@@ -235,6 +279,13 @@ impl UTXOStateManager {
             let _ = tree.clear();
         }
 
+        // Clear spent tombstones — reindex replays the full chain and will re-populate
+        // them via spend_utxo as each block is processed.
+        self.spent_tombstones.clear();
+        if let Some(tree) = &self.spent_db {
+            let _ = tree.clear();
+        }
+
         tracing::info!("✅ All UTXOs cleared");
         Ok(())
     }
@@ -254,7 +305,17 @@ impl UTXOStateManager {
         let outpoint = utxo.outpoint.clone();
         let address = utxo.address.clone();
 
-        // Check if UTXO already exists
+        // Hard invariant: a spent outpoint can never be re-added, even if utxo_states
+        // has been cleared (e.g. after reindex) or sled was modified externally.
+        if self.spent_tombstones.contains(&outpoint) {
+            tracing::warn!(
+                "🚫 add_utxo rejected: outpoint {:?} is permanently spent (tombstone hit)",
+                outpoint
+            );
+            return Err(UtxoError::AlreadySpent);
+        }
+
+        // Check if UTXO already exists in current state
         if let Some(existing_state) = self.utxo_states.get(&outpoint) {
             match existing_state.value() {
                 UTXOState::Unspent => {
@@ -343,6 +404,7 @@ impl UTXOStateManager {
                 votes: 0,
             },
         );
+        self.record_spent(outpoint);
         Ok(())
     }
 
@@ -386,6 +448,16 @@ impl UTXOStateManager {
                         hex::encode(txid)
                     );
                 }
+            }
+        }
+
+        // Lift the spent tombstone so future transactions can use this UTXO again.
+        // This is safe: we are explicitly rolling back a block, so the spend never
+        // made it into the canonical chain.
+        self.spent_tombstones.remove(&outpoint);
+        if let Some(tree) = &self.spent_db {
+            if let Ok(key) = bincode::serialize(&outpoint) {
+                let _ = tree.remove(key);
             }
         }
 
@@ -601,6 +673,8 @@ impl UTXOStateManager {
                 votes: 0,
             },
         );
+        // Permanently tombstone this outpoint — it can never be re-added
+        self.record_spent(outpoint);
     }
 
     /// Force reset a UTXO to Unspent state (for recovery from stuck locks)
