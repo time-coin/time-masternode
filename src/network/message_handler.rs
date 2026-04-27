@@ -4482,11 +4482,18 @@ impl MessageHandler {
                 .await
                 .is_none();
 
-            match context
-                .masternode_registry
-                .register(mn, reward_address.clone())
-                .await
-            {
+            let reg_result = if !is_relayed {
+                context
+                    .masternode_registry
+                    .register_direct(mn, reward_address.clone())
+                    .await
+            } else {
+                context
+                    .masternode_registry
+                    .register(mn, reward_address.clone())
+                    .await
+            };
+            match reg_result {
                 Ok(()) => {
                     // Collateral was verified on-chain above — mark as OnChain so the
                     // node is NOT removed as a "transient Free-tier" on disconnect.
@@ -4665,11 +4672,18 @@ impl MessageHandler {
                 now,
             );
 
-            match context
-                .masternode_registry
-                .register(mn, reward_address.clone())
-                .await
-            {
+            let reg_result = if !is_relayed {
+                context
+                    .masternode_registry
+                    .register_direct(mn, reward_address.clone())
+                    .await
+            } else {
+                context
+                    .masternode_registry
+                    .register(mn, reward_address.clone())
+                    .await
+            };
+            match reg_result {
                 Ok(()) => {
                     let count = context.masternode_registry.total_count().await;
                     debug!(
@@ -4895,7 +4909,7 @@ impl MessageHandler {
 
             if context
                 .masternode_registry
-                .register_internal(masternode, mn_data.reward_address, should_activate)
+                .register_internal(masternode, mn_data.reward_address, should_activate, true)
                 .await
                 .is_ok()
             {

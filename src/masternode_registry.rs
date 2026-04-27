@@ -626,7 +626,22 @@ impl MasternodeRegistry {
         masternode: Masternode,
         reward_address: String,
     ) -> Result<(), RegistryError> {
-        self.register_internal(masternode, reward_address, true)
+        self.register_internal(masternode, reward_address, true, false)
+            .await
+    }
+
+    /// Like `register()` but marks the announcement as coming directly from the
+    /// masternode itself (not relayed through a third peer).  Used by the message
+    /// handler when `peer_ip == masternode_ip`.  Direct self-announcements are
+    /// allowed to downgrade to Free even if the old collateral UTXO is still
+    /// on-chain — the operator may have commented out the UTXO entry to release
+    /// it for a higher-tier upgrade.
+    pub async fn register_direct(
+        &self,
+        masternode: Masternode,
+        reward_address: String,
+    ) -> Result<(), RegistryError> {
+        self.register_internal(masternode, reward_address, true, true)
             .await
     }
 
@@ -635,11 +650,14 @@ impl MasternodeRegistry {
     /// `should_activate`: if true, mark as active when registering/updating
     ///                    if false, only update info but don't change active status
     ///                    (used for peer exchange to avoid marking offline nodes as active)
+    /// `is_direct`: if true, the announcement came directly from the masternode's own
+    ///              connection (peer_ip == masternode_ip), not relayed via a third party.
     pub async fn register_internal(
         &self,
         masternode: Masternode,
         reward_address: String,
         should_activate: bool,
+        is_direct: bool,
     ) -> Result<(), RegistryError> {
         // Filter out invalid addresses
         if masternode.address == "0.0.0.0"
@@ -1345,20 +1363,28 @@ impl MasternodeRegistry {
                     && existing.masternode.tier != crate::types::MasternodeTier::Free
                     && masternode.tier == crate::types::MasternodeTier::Free
                 {
-                    // If the existing collateral UTXO is confirmed gone on-chain, the node
-                    // legitimately deregistered (collateral spent/rejected).  Allow the
-                    // downgrade to Free so the connection stays open rather than being dropped.
+                    // Determine whether this downgrade is legitimate:
+                    //  1. Direct self-announcement (operator commented out UTXO for upgrade)
+                    //  2. Collateral UTXO is confirmed gone on-chain (deregistered / rejected)
+                    // Either case: allow the node to stay connected at Free tier.
+                    // Relayed gossip with collateral still on-chain: block (attack attempt).
                     let collateral_gone = !existing_collateral_exists.unwrap_or(true);
-                    if collateral_gone {
+                    if is_direct || collateral_gone {
+                        let reason = if is_direct {
+                            "direct self-announcement (operator config change)"
+                        } else {
+                            "collateral UTXO gone on-chain"
+                        };
                         tracing::info!(
-                            "📉 [AV40] Collateral UTXO gone for {} ({:?} → Free) — allowing legitimate downgrade",
-                            masternode.address,
+                            "📉 [AV40] Allowing {:?} → Free for {} — {}",
                             existing.masternode.tier,
+                            masternode.address,
+                            reason,
                         );
                         // Fall through: let the normal update path below set tier = Free.
                     } else {
                         tracing::warn!(
-                            "🛡️ [AV40] Gossip tier downgrade blocked for {}: {:?} → Free (collateral still on-chain)",
+                            "🛡️ [AV40] Gossip tier downgrade blocked for {}: {:?} → Free (collateral still on-chain, relayed)",
                             masternode.address,
                             existing.masternode.tier,
                         );
