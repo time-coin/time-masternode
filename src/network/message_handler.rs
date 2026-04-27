@@ -3396,13 +3396,34 @@ impl MessageHandler {
                                 );
                                 (derived, collateral_outpoint)
                             } else {
+                                // UTXO found but value doesn't match any tier — strip outpoint.
                                 (tier, None)
                             }
                         }
-                        _ => (tier, None),
+                        Ok(_) => {
+                            // UTXO found with zero value — strip outpoint (can't be collateral).
+                            (tier, None)
+                        }
+                        Err(_) => {
+                            // UTXO not found — may be unconfirmed collateral (deferred-tier state).
+                            // Direct connection: keep outpoint so has_collateral=true on disconnect,
+                            // preventing AV3 30s cooldown from cycling the connection.  AV40 in
+                            // register_internal is relaxed for is_direct to allow this path through.
+                            // Relayed: strip outpoint to block relay-based Free+outpoint pollution.
+                            if !is_relayed {
+                                (tier, collateral_outpoint)
+                            } else {
+                                (tier, None)
+                            }
+                        }
                     }
                 } else {
-                    (tier, None)
+                    // No UTXO manager — same direct/relay split as Err case above.
+                    if !is_relayed {
+                        (tier, collateral_outpoint)
+                    } else {
+                        (tier, None)
+                    }
                 }
             } else {
                 (tier, collateral_outpoint)
@@ -4882,7 +4903,18 @@ impl MessageHandler {
                 }
             }
 
-            let masternode = if let Some(outpoint) = mn_data.collateral_outpoint {
+            // Deferred-tier nodes announce as Free + collateral_outpoint during
+            // initial sync before their UTXO confirms.  Peer exchange passes this
+            // state verbatim, which would trigger AV40 in register_internal.
+            // Strip the outpoint here; the node will upgrade to its real tier via
+            // a direct MasternodeAnnouncement once it connects to us.
+            let effective_outpoint = if mn_data.tier == crate::types::MasternodeTier::Free {
+                None
+            } else {
+                mn_data.collateral_outpoint.clone()
+            };
+
+            let masternode = if let Some(outpoint) = effective_outpoint {
                 crate::types::Masternode::new_with_collateral(
                     mn_data.address.clone(),
                     mn_data.reward_address.clone(),

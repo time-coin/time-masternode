@@ -680,21 +680,38 @@ impl MasternodeRegistry {
             return Err(RegistryError::InvalidCollateral);
         }
 
-        // AV40: Reject Free-tier registrations that supply a collateral outpoint.
-        // Free tier requires zero collateral — a supplied outpoint is either a
+        // AV40: Reject relayed Free-tier registrations that supply a collateral outpoint.
+        // Free tier requires zero collateral — a relayed outpoint is either a
         // mistake or an attempt to associate a zero-value UTXO with a paid node's
         // IP, poisoning the registry and evading the collateral audit (which skips
-        // Free tier).  Strip or reject the outpoint to prevent pollution.
+        // Free tier).
+        //
+        // Direct connections are allowed through: a node whose collateral UTXO hasn't
+        // confirmed in our storage yet announces as Free+outpoint (deferred-tier state).
+        // We keep the outpoint so has_collateral=true on disconnect, preventing the AV3
+        // 30-second reconnect cooldown from triggering and breaking the connection cycle.
         if masternode.tier == crate::types::MasternodeTier::Free
             && masternode.collateral_outpoint.is_some()
+            && !is_direct
         {
             tracing::warn!(
-                "🛡️ [AV40] Rejected Free-tier registration from {} with collateral outpoint {:?} \
-                 — Free tier must have no outpoint",
+                "🛡️ [AV40] Rejected relayed Free-tier registration from {} with collateral \
+                 outpoint {:?} — relay must not carry Free+outpoint (deferred-tier state \
+                 must be resolved on direct connection)",
                 masternode.address,
                 masternode.collateral_outpoint,
             );
             return Err(RegistryError::InvalidCollateral);
+        }
+        if masternode.tier == crate::types::MasternodeTier::Free
+            && masternode.collateral_outpoint.is_some()
+            && is_direct
+        {
+            tracing::debug!(
+                "📊 [AV40] Allowing direct Free+outpoint for {} (deferred-tier — UTXO not yet \
+                 confirmed in local storage; will upgrade when UTXO confirms)",
+                masternode.address,
+            );
         }
 
         // AV3: Per-IP reconnect cooldown for Free-tier nodes.
