@@ -5974,7 +5974,7 @@ impl Blockchain {
         }
 
         if utxos_created > 0 || utxos_spent > 0 {
-            tracing::info!(
+            tracing::debug!(
                 "💰 Block {} indexed {} UTXOs ({} created, {} spent, {} in undo log)",
                 block.header.height,
                 utxos_created,

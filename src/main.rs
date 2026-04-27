@@ -1136,6 +1136,39 @@ async fn main() {
         }
     }
 
+    // Rebuild in-memory UTXO set from stored blocks on every startup.
+    //
+    // The UTXO set (InMemoryUtxoStorage) is entirely in memory — it does not survive
+    // daemon restarts.  Without this reindex, the UTXO set is empty after restart, so
+    // every paid-tier masternode announcement fails collateral verification ("collateral
+    // UTXO not found on-chain") even though the UTXO exists on-chain.  This prevents
+    // any paid-tier node from being counted as active, breaking consensus quorum.
+    //
+    // Must run before rebuild_collateral_locks so purge_stale_collateral_locks can
+    // validate locks against real UTXO states rather than an empty set.
+    if blockchain.get_height() > 0 {
+        let h = blockchain.get_height();
+        tracing::info!(
+            "🔄 [STARTUP] Rebuilding in-memory UTXO set from {} stored block(s)...",
+            h
+        );
+        match blockchain.reindex_utxos().await {
+            Ok((blocks, utxos)) => {
+                tracing::info!(
+                    "✅ [STARTUP] UTXO reindex complete: {} blocks replayed, {} unspent UTXOs",
+                    blocks,
+                    utxos
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "⚠️ [STARTUP] UTXO reindex failed: {} — collateral verification may reject valid masternodes",
+                    e
+                );
+            }
+        }
+    }
+
     println!("✓ Blockchain initialized");
     println!();
 
