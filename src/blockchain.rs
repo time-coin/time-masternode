@@ -3995,59 +3995,49 @@ impl Blockchain {
                 voters_set.insert(v);
             }
 
-            let precommit_voters: Vec<String> = voters_set.into_iter().collect();
-            if precommit_voters.is_empty() {
-                // No votes collected for the previous block hash (stalled / recovering network).
-                // Fall back to the previous block's consensus_participants_bitmap — those are
-                // the nodes that actually voted last time, so they carry forward as eligible
-                // participants.  This is deterministic (every node reads the same chain) and
-                // does NOT depend on gossip state, so all validators compute the same bitmap.
-                let prev_height = next_height.saturating_sub(1);
-                let bitmap_voters: Vec<String> = match self.get_block_by_height(prev_height).await {
-                    Ok(prev_block) => {
-                        let nodes = self
-                            .masternode_registry
-                            .get_active_from_bitmap(&prev_block.consensus_participants_bitmap)
-                            .await;
-                        nodes.into_iter().map(|mn| mn.masternode.address).collect()
-                    }
-                    Err(_) => Vec::new(),
-                };
+            let timevote_count = voters_set.len();
 
-                let fallback_voters = if !bitmap_voters.is_empty() {
-                    use std::sync::atomic::{AtomicI64, Ordering as AtomOrd};
-                    static LAST_BITMAP_FALLBACK: AtomicI64 = AtomicI64::new(0);
-                    let now_secs = chrono::Utc::now().timestamp();
-                    let last = LAST_BITMAP_FALLBACK.load(AtomOrd::Relaxed);
-                    if now_secs - last >= 60 {
-                        LAST_BITMAP_FALLBACK.store(now_secs, AtomOrd::Relaxed);
-                        tracing::warn!(
-                            "⚠️ No votes for block {} — carrying forward {} participants from block {} bitmap",
-                            next_height - 1,
-                            bitmap_voters.len(),
-                            prev_height,
-                        );
-                    }
-                    bitmap_voters
-                } else {
-                    // No previous bitmap either (very early chain or genesis recovery).
-                    // Fall back to gossip-active masternodes as a last resort.
-                    let active = self.masternode_registry.get_active_masternodes().await;
-                    tracing::warn!(
-                        "⚠️ No votes and no previous bitmap for block {} — using {} gossip-active masternodes",
-                        next_height - 1,
-                        active.len()
-                    );
-                    active.into_iter().map(|mn| mn.masternode.address).collect()
-                };
-                fallback_voters
+            // 1-round grace period: also include nodes that voted in the previous
+            // round (decode from block N's active_masternodes_bitmap, which encodes
+            // who voted in round N-1).  A node must have voted in at least one of
+            // the last two rounds to remain eligible.  After two consecutive misses
+            // it falls out naturally because it is absent from both voters_N (didn't
+            // vote this round) and voters_{N-1} (decoded from prev block's bitmap).
+            // This gives attack-resilience for momentary disconnects while still
+            // excluding genuinely offline nodes after two rounds.
+            let prev_height = next_height.saturating_sub(1);
+            let prev_round_voters_count = if let Ok(prev_block) = self.get_block_by_height(prev_height).await {
+                let prev_voters = self
+                    .masternode_registry
+                    .get_active_from_bitmap(&prev_block.header.active_masternodes_bitmap)
+                    .await;
+                let count = prev_voters.len();
+                for mn in prev_voters {
+                    voters_set.insert(mn.masternode.address);
+                }
+                count
             } else {
-                tracing::debug!(
-                    "📊 Block {}: {} precommit voters from previous block",
-                    next_height,
-                    precommit_voters.len()
+                0
+            };
+
+            if voters_set.is_empty() {
+                // Emergency: no votes in either recent round — last resort gossip-active.
+                let active = self.masternode_registry.get_active_masternodes().await;
+                tracing::warn!(
+                    "⚠️ No voters in last 2 rounds for block {} bitmap — using {} gossip-active",
+                    next_height - 1,
+                    active.len()
                 );
-                precommit_voters
+                active.into_iter().map(|mn| mn.masternode.address).collect()
+            } else {
+                tracing::info!(
+                    "📊 Block {}: {} in bitmap ({} current voters + {} from prev round)",
+                    next_height,
+                    voters_set.len(),
+                    timevote_count,
+                    prev_round_voters_count
+                );
+                voters_set.into_iter().collect()
             }
         };
 
