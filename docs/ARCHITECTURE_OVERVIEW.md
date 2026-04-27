@@ -1,7 +1,36 @@
 # TimeCoin Architecture Overview
 
-**Last Updated:** 2026-04-06
-**Version:** 1.4.34 (Genesis Verification False Disconnect Fix, Solo Production Prevention, Block Timing Enforcement, Sync Loop Fix, Fork Resolution Bugs 1-4, Faster Peer Connections, Encrypted Memos, Payment Request URIs)
+**Last Updated:** 2026-04-26
+**Version:** 1.5.0 (Spent UTXO tombstone, peer finalization UTXO fix, wallet-gui consolidation race condition)
+
+---
+
+## Recent Updates (v1.5.0 - April 26, 2026)
+
+### Spent UTXO Tombstone — Hard Re-Add Prevention
+
+Added a permanent spent-outpoint tombstone to `UTXOStateManager`. Once any UTXO enters a spent state (`mark_timevote_finalized` or `spend_utxo`), its outpoint is written to:
+
+- **In-memory `spent_tombstones: DashSet<OutPoint>`** — checked first in `add_utxo`, before touching `utxo_states` or sled storage.
+- **Sled `spent_utxos` tree** — persisted to disk so the guard survives node restarts.
+
+`add_utxo` now hard-rejects any call for a tombstoned outpoint with `UtxoError::AlreadySpent`, even if `utxo_states` has been cleared (e.g., after a reindex or future cleanup). This closes a class of bugs and attack vectors where a spent UTXO could silently re-enter the live UTXO set.
+
+`clear_all()` (invoked by reindex) wipes both the in-memory set and the sled tree so full chain replay correctly repopulates tombstones via `spend_utxo`. `restore_utxo()` (used during fork rollbacks) lifts the tombstone for the specific outpoint being un-spent, since the spend is being reversed on the canonical chain.
+
+**Startup sequence:** `enable_spent_persistence()` must be called before `initialize_states()` so all previously-recorded tombstones are loaded before any `add_utxo` calls can occur.
+
+### Peer Node UTXO Double-Count on Restart (Bug Fix)
+
+When a peer node received a `TransactionFinalized` message, the handler in `server.rs` called `update_state(input, SpentFinalized)` — which updated only the in-memory `utxo_states` DashMap. Input UTXOs remained in sled storage and the `address_index`. After a node restart, `initialize_states` reloads from sled and resurrects those inputs as `Unspent`, so both the original inputs AND the new outputs appear as spendable — doubling the reported balance for any wallet querying that node.
+
+**Fix:** Replaced `update_state` with `mark_timevote_finalized` in the `TransactionFinalized` peer handler. This removes inputs from both sled storage and the `address_index`, matching the behaviour of the originating node's auto-finalization path.
+
+### Wallet-GUI Consolidation Balance Inflation (Bug Fix)
+
+WebSocket events (`TransactionReceived`, `UtxoFinalized`) arrive at the wallet before `broadcast_transaction` RPC returns, so the txid is not yet in `consolidation_txids` when those events are processed. With no send-record and `is_consolidation=false`, a phantom receive entry was created for every consolidation output, inflating the displayed balance by 2×.
+
+**Fix (wallet-gui `service.rs`):** Both WS handlers now check `consolidation_active && is_own_addr` as a fallback. If true, the txid is registered into `consolidation_txids` immediately (before RPC returns) and the event is classified as consolidation change, preventing the phantom entry.
 
 ---
 
@@ -496,18 +525,12 @@ impl UtxoStorage for SledUtxoStorage {
 pub struct UTXOStateManager {
     storage: Arc<dyn UtxoStorage>,
     utxo_states: DashMap<OutPoint, UTXOState>,              // Lock-free state
+    locked_collaterals: DashMap<OutPoint, LockedCollateral>,
+    collateral_db: Option<sled::Tree>,                      // Persisted collateral locks
     address_index: DashMap<String, DashSet<OutPoint>>,      // Per-address UTXO index
-}
-
-pub enum UTXOState {
-    Unspent,
-    SpentPending {
-        txid: Hash256,
-        votes: u32,
-        total_nodes: u32,
-        spent_at: i64,
-    },
-    Spent,
+    pubkey_cache: DashMap<String, [u8; 32]>,                // Ed25519 pubkey cache
+    spent_tombstones: DashSet<OutPoint>,                    // Permanent spent guard (in-memory)
+    spent_db: Option<sled::Tree>,                           // Spent tombstones persisted to disk
 }
 ```
 
@@ -1062,6 +1085,8 @@ Five states (not the typical 2):
 - **Archived**: Included in block; final on-chain state
 
 Collateral locking includes a 10-minute timeout cleanup for orphaned locks.
+
+**Spent tombstone invariant (v1.5.0+):** Once an outpoint transitions to any spent state it is permanently recorded in a `spent_tombstones: DashSet<OutPoint>` (also persisted to the sled `spent_utxos` tree). `add_utxo` rejects the outpoint with `AlreadySpent` regardless of what `utxo_states` or sled storage contain. The tombstone is only lifted by `restore_utxo` during an explicit rollback (fork resolution), and cleared entirely by `clear_all` at the start of a reindex.
 
 ---
 

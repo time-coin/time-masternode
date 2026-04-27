@@ -4,8 +4,8 @@
 **Date:** January 23, 2026  
 **Version:** 1.4  
 **Audit Scope:** Full system security analysis against known cryptocurrency vulnerabilities + Bitcoin development insights  
-**Last Verification:** April 20, 2026  
-**Last Updated:** April 20, 2026 — AV50–AV51 added (Section 15.27–15.28): inbound connection flood and frame bomb AI detection; cross-chain replay protection (AV-REPLAY) implemented in v1.5.0, activating at block 1000
+**Last Verification:** April 26, 2026  
+**Last Updated:** April 26, 2026 — AV52–AV53 added (Section 15.29–15.30): spent UTXO re-add via peer finalization path (node-side balance doubling after restart) and wallet-GUI consolidation race condition (phantom receive inflation)
 
 ---
 
@@ -20,6 +20,7 @@ This document provides a comprehensive security analysis of TimeCoin against all
 - ✅ **24 attack vectors fully mitigated** (+2 from April 16, 2026: AV40 + AV41)
 - ✅ **32 attack vectors fully mitigated** (+3 from April 19, 2026: AV47–AV49)
 - ✅ **34 attack vectors fully mitigated** (+2 from April 20, 2026: AV50–AV51)
+- ✅ **36 attack vectors fully mitigated** (+2 from April 26, 2026: AV52–AV53)
 - ⚠️ **4 attack vectors with recommended enhancements**
 - ❌ **0 critical vulnerabilities**
 - 🟢 **Already 2106-safe** (ahead of Bitcoin's uint32 → uint64 migration)
@@ -403,14 +404,15 @@ pub struct BlockHeader {
 
 **TimeCoin Protection:**
 - **UTXO locking**: Atomic lock with 10-minute timeout
-- **State machine**: Unspent → Locked → Confirmed → SpentFinalized
+- **State machine**: Unspent → Locked → SpentPending → SpentFinalized → Archived
 - **Lock conflict detection**: Second transaction automatically rejected
 - **Mempool deduplication**: Same transaction can't enter mempool twice
 - **Block validation**: Checks for double-spends within block
+- **Permanent tombstone (v1.5.0+)**: Once spent, an outpoint is recorded in a sled-persisted `spent_tombstones` set. `add_utxo` hard-rejects any attempt to re-add it, even after `utxo_states` is cleared or the node restarts. See AV52.
 
 **Code References:**
-- `src/utxo_manager.rs:179-227` - Atomic UTXO locking
-- `src/network/message_handler.rs:2272-2284` - Pre-vote double-spend check
+- `src/utxo_manager.rs` — `add_utxo()` tombstone check; `record_spent()`; `enable_spent_persistence()`
+- `src/network/message_handler.rs` — Pre-vote double-spend check
 
 ---
 
@@ -1772,6 +1774,45 @@ Connection from 64.91.224.76:36048 ended: Frame too large: 4083387062 bytes (max
 
 ---
 
+### 15.29 ✅ FIXED — Spent UTXO Re-Add via Peer Finalization Path (AV52)
+
+**Status:** **FIXED in v1.5.0** (April 26, 2026)
+**Severity:** High — balance doubles on node restart; spent inputs reappear as spendable
+
+**Attack / Bug:** When a peer node received a `TransactionFinalized` message, the handler called `update_state(input, SpentFinalized)` — updating only the in-memory `utxo_states` DashMap. Input UTXOs remained in sled storage and in the `address_index`. After any node restart, `initialize_states()` reloads from sled and resurrects those inputs as `Unspent`. Both the original input UTXOs and the new output UTXOs then appear simultaneously as spendable, doubling the balance returned by `getbalance` and `listunspentmulti` for any wallet querying that node. This also created a latent window where a malicious actor could attempt to re-spend an already-finalized input across a restart.
+
+**Root Cause (primary):** `server.rs` `TransactionFinalized` handler used `update_state` (in-memory only) instead of `mark_timevote_finalized` (removes from sled + `address_index`).
+
+**Root Cause (secondary):** No hard invariant prevented `add_utxo` from accepting an outpoint that had previously been spent, if both `utxo_states` and sled had been cleared or not yet populated on that peer.
+
+**Fixes Applied:**
+- ✅ **`mark_timevote_finalized` in peer handler** — `server.rs` `TransactionFinalized` handler now calls `mark_timevote_finalized` for each input, removing them from sled storage and the `address_index` (not just the in-memory state map). Matches the behaviour of the originating node's auto-finalization path.
+- ✅ **Permanent spent tombstone** — `UTXOStateManager` gains `spent_tombstones: DashSet<OutPoint>` and a sled-backed `spent_db: Option<sled::Tree>`. Every call to `mark_timevote_finalized` or `spend_utxo` records the outpoint in both. `add_utxo` checks the tombstone first and returns `AlreadySpent` unconditionally. The tombstone set is loaded from disk on startup (before `initialize_states`) and cleared only by `clear_all()` at the start of a reindex. `restore_utxo()` (fork rollback) lifts the tombstone for the specific outpoint being un-spent.
+
+**Code References:**
+- `src/network/server.rs` — `TransactionFinalized` handler: `mark_timevote_finalized` replaces `update_state`
+- `src/utxo_manager.rs` — `spent_tombstones`/`spent_db` fields; `record_spent()`; `enable_spent_persistence()`; `add_utxo` tombstone check; `restore_utxo` tombstone lift; `clear_all` tombstone wipe
+- `src/main.rs` — `enable_spent_persistence()` called after `enable_collateral_persistence`, before `initialize_states`
+
+---
+
+### 15.30 ✅ FIXED — Wallet-GUI Consolidation Race Condition (AV53)
+
+**Status:** **FIXED in v1.5.0** (April 26, 2026)
+**Severity:** Medium — displayed balance inflated 2× during and after UTXO consolidation
+
+**Attack / Bug:** The wallet-GUI consolidation background task submits batches of consolidation transactions via `broadcast_transaction` RPC. The node emits a `tx_notification` WebSocket event immediately upon receiving the raw transaction (before `add_transaction` even runs) and an `utxo_finalized` WS event immediately upon finalization. Both WS events arrive at the wallet before `broadcast_transaction` RPC returns the txid. At that point, the txid is not yet in `consolidation_txids`, so the `is_consolidation` guard evaluates to `false`. Since there is also no `send_record` for the txid, and the output address is the wallet's own address (`is_own_addr = true`), both the `TransactionReceived` and `UtxoFinalized` handlers create a **phantom receive entry** with `is_change = false`. These phantom entries are counted in `computed_balance`, doubling the displayed total (original UTXOs still visible + phantom receive of the same amount). Both the desktop wallet and any mobile wallet reading from the same node exhibited the symptom.
+
+**Root Cause:** `broadcast_transaction` inserts the txid into `consolidation_txids` only after the RPC call returns, but WS events propagate synchronously through the node's finalization path before that return.
+
+**Fix Applied:**
+- ✅ **Pre-registration in WS handlers** — both `WsEvent::TransactionReceived` and `WsEvent::UtxoFinalized` handlers in `service.rs` now check `consolidation_active.load() && is_own_addr` before evaluating `is_consolidation`. If both are true, the txid is inserted into `consolidation_txids` immediately and `is_consolidation` is set to `true`, preventing the phantom receive from being recorded regardless of when the RPC returns.
+
+**Code References:**
+- `wallet-gui/src/service.rs` (time-wallet repo) — `WsEvent::TransactionReceived` and `WsEvent::UtxoFinalized` handlers: early `consolidation_txids` insertion when `consolidation_active && is_own_addr`
+
+---
+
 ## SUMMARY TABLE — Additional Vectors (Section 15)
 
 | ID | Name | Severity | Status |
@@ -1805,6 +1846,8 @@ Connection from 64.91.224.76:36048 ended: Frame too large: 4083387062 bytes (max
 | AV49 | Deregistration spam flood — multiple dereg TXs for same slot in one block | High | ✅ Fixed |
 | AV50 | Inbound connection flood — subnet rate-limit rejections with no AI visibility | High | ✅ Fixed |
 | AV51 | Frame bomb — 4-byte TCP header claiming multi-GB payload, repeated OOM attempt | Critical | ✅ Fixed |
+| AV52 | Spent UTXO re-add via peer finalization path — balance doubles on node restart | High | ✅ Fixed |
+| AV53 | Wallet-GUI consolidation race condition — phantom receives inflate balance 2× | Medium | ✅ Fixed |
 
 ### 15.26 ✅ FIXED — Deregistration Spam Flood (AV49)
 
