@@ -1224,7 +1224,7 @@ async fn handle_peer(
                                         // send a PeerExchange of less-loaded alternatives and
                                         // close.  MIN_CONNECTIONS ensures the network never
                                         // fractures — we always keep at least that many inbound.
-                                        const INBOUND_REDIRECT_THRESHOLD: usize = 70; // 70 % of MAX_INBOUND_CONNECTIONS
+                                        const INBOUND_REDIRECT_THRESHOLD: usize = 175; // 70 % of MAX_INBOUND_CONNECTIONS
                                         const MIN_CONNECTIONS: usize = 8;
                                         let cur_inbound = peer_registry.inbound_count();
                                         if !is_whitelisted

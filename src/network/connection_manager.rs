@@ -11,14 +11,14 @@ use std::time::{Duration, Instant};
 
 // Phase 2.1: Connection limits for DoS protection
 // Phase 3: Masternode slot reservation
-const MAX_TOTAL_CONNECTIONS: usize = 125;
-const MAX_INBOUND_CONNECTIONS: usize = 100;
-const MAX_OUTBOUND_CONNECTIONS: usize = 25;
-const RESERVED_MASTERNODE_SLOTS: usize = 50; // Reserve slots for whitelisted masternodes
-const MAX_REGULAR_PEER_CONNECTIONS: usize = 75; // Remaining slots for regular peers
+const MAX_TOTAL_CONNECTIONS: usize = 500;
+const MAX_INBOUND_CONNECTIONS: usize = 250;
+const MAX_OUTBOUND_CONNECTIONS: usize = 250;
+const RESERVED_MASTERNODE_SLOTS: usize = 100; // Reserve slots for whitelisted masternodes
+const MAX_REGULAR_PEER_CONNECTIONS: usize = 150; // Remaining slots for regular peers
 const MAX_CONNECTIONS_PER_IP: usize = 3;
 const CONNECTION_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60); // 1 minute
-const MAX_NEW_CONNECTIONS_PER_WINDOW: usize = 10; // 10 new connections per minute
+const MAX_NEW_CONNECTIONS_PER_WINDOW: usize = 25; // 25 new connections per minute
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PeerConnectionState {

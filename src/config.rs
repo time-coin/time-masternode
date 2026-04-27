@@ -573,7 +573,7 @@ impl Config {
             network: NetworkConfig {
                 listen_address: "0.0.0.0".to_string(),
                 external_address: None,
-                max_peers: 50,
+                max_peers: 250,
                 enable_upnp: false,
                 enable_peer_discovery: true,
                 bootstrap_peers: vec![],
@@ -723,7 +723,7 @@ impl Config {
         self.node.version = env!("CARGO_PKG_VERSION").to_string();
 
         // Network — these are protocol-critical
-        self.network.max_peers = 50;
+        self.network.max_peers = 250;
         self.network.enable_upnp = false;
         self.network.enable_peer_discovery = true;
         // Don't clear blacklist/whitelist — those may be set intentionally

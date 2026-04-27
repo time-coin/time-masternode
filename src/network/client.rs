@@ -65,7 +65,7 @@ impl NetworkClient {
         blacklisted_peers: Vec<String>,
         ip_blacklist: Option<Arc<RwLock<IPBlacklist>>>,
     ) -> Self {
-        let reserved_masternode_slots = (max_peers * 40 / 100).clamp(20, 30);
+        let reserved_masternode_slots = (max_peers * 40 / 100).clamp(20, 100);
 
         // Default AI-powered reconnection system (immediately overridden by set_reconnection_ai in main.rs).
         // Use an ephemeral DB for this throwaway instance — it is never actually queried.
