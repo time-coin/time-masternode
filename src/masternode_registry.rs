@@ -1418,6 +1418,7 @@ impl MasternodeRegistry {
             if !existing.is_active && should_activate {
                 existing.is_active = true;
                 existing.uptime_start = now;
+                existing.last_seen_at = now;
                 debug!(
                     "✅ Registered masternode {} (total: {}) - Tier: {:?}, now ACTIVE at timestamp {}",
                     masternode.address,
@@ -1426,6 +1427,7 @@ impl MasternodeRegistry {
                     now
                 );
             } else if should_activate {
+                existing.last_seen_at = now;
                 tracing::debug!(
                     "♻️  Connection from {} - Tier: {:?}, Active at: {}, Now: {}",
                     masternode.address,
@@ -3158,8 +3160,18 @@ impl MasternodeRegistry {
             // gossip counts are a secondary signal for nodes we aren't directly
             // connected to. Never flip is_active to false while we have a live
             // connection, regardless of how many gossip reporters we have.
+            //
+            // Grace window: paid-tier masternodes that were recently connected
+            // (last_seen_at within 120 s) keep is_active=true even when gossip
+            // counts are temporarily insufficient.  This prevents a cascading
+            // deactivation storm when connections cycle rapidly (e.g. the
+            // network has more masternodes than any single node's old peer limit).
             let is_directly_connected = connected_peers.contains(addr.as_str());
-            info.is_active = is_directly_connected || (meets_count && meets_diversity);
+            const ACTIVE_GRACE_SECS: u64 = 120;
+            let within_grace = !matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
+                && info.last_seen_at > 0
+                && now.saturating_sub(info.last_seen_at) < ACTIVE_GRACE_SECS;
+            info.is_active = is_directly_connected || within_grace || (meets_count && meets_diversity);
 
             if was_active != info.is_active {
                 status_changes += 1;

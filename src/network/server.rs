@@ -1224,10 +1224,15 @@ async fn handle_peer(
                                         // send a PeerExchange of less-loaded alternatives and
                                         // close.  MIN_CONNECTIONS ensures the network never
                                         // fractures — we always keep at least that many inbound.
+                                        // Registered masternodes are never redirected — they
+                                        // are trusted peers that must stay connected for consensus.
                                         const INBOUND_REDIRECT_THRESHOLD: usize = 175; // 70 % of MAX_INBOUND_CONNECTIONS
                                         const MIN_CONNECTIONS: usize = 8;
                                         let cur_inbound = peer_registry.inbound_count();
+                                        let is_registered_masternode =
+                                            masternode_registry.get(&ip_str).await.is_some();
                                         if !is_whitelisted
+                                            && !is_registered_masternode
                                             && cur_inbound > INBOUND_REDIRECT_THRESHOLD
                                         {
                                             let alternatives =
