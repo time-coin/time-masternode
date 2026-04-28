@@ -1103,6 +1103,29 @@ impl PeerConnection {
                         }
                         Err(e) => {
                             error!("❌ [{:?}] Error reading from {}: {}", self.direction, self.peer_ip, e);
+                            // Clearly malicious oversized frames (>100 MB) — ban the sender,
+                            // mirroring the inbound-side logic in server.rs.
+                            if e.contains("Frame too large") {
+                                const MALICIOUS_FRAME_BYTES: u64 = 100 * 1024 * 1024;
+                                let frame_bytes: Option<u64> = e
+                                    .split_whitespace()
+                                    .find_map(|w| {
+                                        w.trim_end_matches("bytes")
+                                            .trim_end_matches(':')
+                                            .parse::<u64>()
+                                            .ok()
+                                    });
+                                if frame_bytes.is_some_and(|b| b > MALICIOUS_FRAME_BYTES) {
+                                    if let Ok(ip) = self.peer_ip.parse::<std::net::IpAddr>() {
+                                        if let Some(ref bl) = config.blacklist {
+                                            bl.write().await.record_frame_bomb_violation(ip, &e);
+                                        }
+                                        if let Some(ref ai) = config.ai_system {
+                                            ai.attack_detector.record_frame_bomb(&self.peer_ip);
+                                        }
+                                    }
+                                }
+                            }
                             break;
                         }
                     }
