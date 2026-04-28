@@ -1083,6 +1083,8 @@ impl PeerConnection {
         // Create handler once per connection (reused across all messages)
         let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
 
+        let mut messages_received: u32 = 0;
+
         // Main message loop
         loop {
             tokio::select! {
@@ -1097,10 +1099,15 @@ impl PeerConnection {
                     };
                     match result {
                         Ok(None) => {
-                            info!("🔌 [{:?}] Connection closed by {}", self.direction, self.peer_ip);
+                            if messages_received == 0 {
+                                info!("🔌 [{:?}] Connection closed by {} after 0 messages (immediate rejection)", self.direction, self.peer_ip);
+                            } else {
+                                info!("🔌 [{:?}] Connection closed by {} (received {} message(s))", self.direction, self.peer_ip, messages_received);
+                            }
                             break;
                         }
                         Ok(Some(message)) => {
+                            messages_received += 1;
                             // Use unified message handler
                             let handle_result = self.handle_message_unified(message, &config, &handler).await;
 
