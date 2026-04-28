@@ -1,8 +1,8 @@
 #!/bin/bash
-# Usage: sudo ./update.sh [mainnet|testnet|both]
-# Default: both
-
-NETWORK="${1:-both}"
+# Usage:
+#   sudo ./update.sh [mainnet|testnet|both]           — build + deploy update
+#   sudo ./update.sh reindex [mainnet|testnet|both]   — reindex running daemon(s)
+# Default network: both
 
 # Ensure cargo is in PATH (sudo doesn't inherit user's PATH).
 # install-masternode.sh installs Rust to /root/.cargo/, so check there first.
@@ -18,6 +18,27 @@ export PATH="/root/.cargo/bin:$HOME/.cargo/bin:$PATH"
 service_name() {
     [[ "$1" == "testnet" ]] && echo "timetd" || echo "timed"
 }
+
+# Rebuild UTXOs + tx index on a running daemon via RPC
+do_reindex() {
+    local net="$1"
+    local flag=""
+    [[ "$net" == "testnet" ]] && flag="--testnet"
+    echo "==> Reindexing $net (synchronous — waits for completion)..."
+    time-cli $flag reindex
+}
+
+# If first arg is "reindex", run reindex against live daemon(s) and exit
+if [[ "$1" == "reindex" ]]; then
+    NETWORK="${2:-both}"
+    for NET in mainnet testnet; do
+        [[ "$NETWORK" != "both" && "$NETWORK" != "$NET" ]] && continue
+        do_reindex "$NET"
+    done
+    exit 0
+fi
+
+NETWORK="${1:-both}"
 
 cd ~/time-masternode
 # Discard any local modifications (e.g. CRLF line-ending differences that
