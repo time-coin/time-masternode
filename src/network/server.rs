@@ -1089,9 +1089,16 @@ async fn handle_peer(
                                 ai.attack_detector.record_frame_bomb(&ip_str);
                             }
                             if is_whitelisted {
+                                // Apply a temporary ban even for trusted peers — frame bombs are
+                                // never legitimate. Short durations (5 min → 1 hour) let an
+                                // operator-owned node recover once it is upgraded.
+                                blacklist.write().await.record_frame_bomb_violation(
+                                    ip,
+                                    &format!("Oversized frame from whitelisted peer: {}", e),
+                                );
                                 tracing::warn!(
                                     "🔌 Oversized frame ({} bytes) from whitelisted peer {} — \
-                                     recorded for gossip filtering; will reconnect on next PHASE3-MN cycle",
+                                     temp ban applied; recorded for gossip filtering",
                                     frame_bytes.unwrap_or(0), peer.addr
                                 );
                             } else {

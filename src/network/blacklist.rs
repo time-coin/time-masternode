@@ -498,6 +498,42 @@ impl IPBlacklist {
         }
     }
 
+    /// Record an oversized-frame (frame bomb) violation.
+    ///
+    /// Unlike `record_violation`, this applies to **all** peers including whitelisted ones —
+    /// frame bombs are never legitimate traffic. Bans are temporary and never escalate to
+    /// permanent, so an operator-owned node can recover after an upgrade.
+    ///
+    /// 1st offence → 5-minute ban. 2nd+ offence → 1-hour ban, cycling.
+    pub fn record_frame_bomb_violation(&mut self, ip: IpAddr, reason: &str) -> bool {
+        let now = Instant::now();
+        let (count, last_time) = self.violations.entry(ip).or_insert((0, now));
+
+        if now.duration_since(*last_time) > Duration::from_secs(3600) {
+            *count = 0;
+        }
+
+        *count += 1;
+        *last_time = now;
+        let count_snap = *count;
+        self.persist_violation(ip, count_snap);
+
+        if count_snap == 1 {
+            self.add_temp_ban(ip, Duration::from_secs(300), reason);
+            tracing::warn!(
+                "🚫 Frame bomb from {} — temp ban 5 min (offence #{})",
+                ip, count_snap
+            );
+        } else {
+            self.add_temp_ban(ip, Duration::from_secs(3600), reason);
+            tracing::warn!(
+                "🚫 Frame bomb from {} — temp ban 1 hour (offence #{})",
+                ip, count_snap
+            );
+        }
+        true
+    }
+
     /// Add a temporary ban
     pub fn add_temp_ban(&mut self, ip: IpAddr, duration: Duration, reason: &str) {
         let expiry = Instant::now() + duration;
