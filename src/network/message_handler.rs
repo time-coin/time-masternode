@@ -1660,6 +1660,24 @@ impl MessageHandler {
         let all_masternodes = context.masternode_registry.list_all().await;
         let mn_data: Vec<crate::network::message::MasternodeAnnouncementData> = all_masternodes
             .iter()
+            .filter(|mn_info| {
+                // Never relay peers that have sent oversized frames — even whitelisted
+                // friendly nodes running old code should not be propagated to the network
+                // while they are frame-bombing. They will re-appear once they upgrade.
+                if let Some(ai) = &context.ai_system {
+                    let ip = mn_info
+                        .masternode
+                        .address
+                        .split(':')
+                        .next()
+                        .unwrap_or(&mn_info.masternode.address);
+                    if ai.attack_detector.is_known_frame_bomber(ip) {
+                        debug!("Excluding known frame-bomber {} from MasternodesResponse", ip);
+                        return false;
+                    }
+                }
+                true
+            })
             .map(|mn_info| {
                 // Strip port from address to ensure consistency
                 let ip_only = mn_info

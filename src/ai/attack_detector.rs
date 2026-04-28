@@ -1162,6 +1162,13 @@ impl AttackDetector {
         }
     }
 
+    /// Returns true if `ip` has sent at least one oversized frame within the tracking window.
+    /// Used by the gossip layer to suppress relaying known frame-bombing peers.
+    pub fn is_known_frame_bomber(&self, ip: &str) -> bool {
+        let map = self.frame_bomb_times.read();
+        map.get(ip).map(|t| !t.is_empty()).unwrap_or(false)
+    }
+
     /// Record a sustained ping rate-limit exceedance from `addr`.
     /// ≥3 excess events within 10 s → PingFlood → BlockPeer.
     pub fn record_ping_flood(&self, addr: &str) {

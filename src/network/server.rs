@@ -1083,12 +1083,15 @@ async fn handle_peer(
                         };
                         let clearly_malicious = frame_bytes.is_some_and(|b| b > MALICIOUS_FRAME_BYTES);
                         if is_large_frame && (!handshake_done || clearly_malicious) {
+                            // Always record in AI so gossip filtering suppresses this peer,
+                            // even when it is whitelisted (e.g. a friendly old-code node).
+                            if let Some(ai) = &ai_system {
+                                ai.attack_detector.record_frame_bomb(&ip_str);
+                            }
                             if is_whitelisted {
-                                // Trusted masternode sending oversized frames — log at WARN
-                                // so operators can investigate; never penalise/ban whitelisted peers.
                                 tracing::warn!(
                                     "🔌 Oversized frame ({} bytes) from whitelisted peer {} — \
-                                     connection reset; will reconnect on next PHASE3-MN cycle",
+                                     recorded for gossip filtering; will reconnect on next PHASE3-MN cycle",
                                     frame_bytes.unwrap_or(0), peer.addr
                                 );
                             } else {
@@ -1096,9 +1099,6 @@ async fn handle_peer(
                                     ip,
                                     &format!("Oversized frame header: {}", e),
                                 );
-                                if let Some(ai) = &ai_system {
-                                    ai.attack_detector.record_frame_bomb(&ip_str);
-                                }
                             }
                         } else if e.contains("Message flood detected") {
                             if is_whitelisted {
