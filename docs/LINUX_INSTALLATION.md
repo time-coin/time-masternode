@@ -546,6 +546,18 @@ sudo bash scripts/update.sh testnet
 sudo bash scripts/update.sh mainnet
 ```
 
+#### Deep fork recovery
+
+If a node is stuck on a minority fork after an update, use the `resync` subcommand to roll back to genesis and re-download the canonical chain from whitelisted peers:
+
+```bash
+sudo bash scripts/update.sh resync           # both networks
+sudo bash scripts/update.sh resync mainnet   # mainnet only
+sudo bash scripts/update.sh resync testnet   # testnet only
+```
+
+The daemon must be running (the script starts it automatically if not). This calls `resetfinalitylock 0` followed by `resyncfromwhitelist 0`, bypassing the normal 100-block reorg limit.
+
 ### With the install script
 
 Re-running the install script on an existing installation upgrades in place

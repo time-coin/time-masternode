@@ -612,6 +612,8 @@ ShutdownManager::cancel()
 
 ### Transaction Finality Flow (TimeVote Consensus)
 
+For submitting a single transaction:
+
 ```
 User submits transaction (RPC sendrawtransaction)
     │
@@ -654,6 +656,23 @@ TimeLock Block Production (every 10 minutes)
     ▼
 Transaction in blockchain (permanent checkpoint)
 ```
+
+For submitting multiple independent transactions in parallel:
+
+```
+ConsensusEngine::batch_submit_transactions(Arc<Self>, Vec<Transaction>)
+    │
+    ├─→ partition_non_conflicting(txs)
+    │       Groups transactions with disjoint UTXO inputs into independent sets.
+    │       Transactions sharing an input (double-spends) land in separate groups
+    │       and are rejected at the UTXO lock step.
+    │
+    └─→ tokio::spawn one task per transaction (all concurrent)
+            Each task calls submit_transaction() independently.
+            Total finality time = ~750ms (one round), not N × 750ms.
+```
+
+`batch_submit_transactions` is a non-consensus optimization: the 67% finality threshold, `TimeProof` structure, and on-chain serialization are all unchanged. It is safe to call from any async context via `Arc<ConsensusEngine>`.
 
 **TimeVote Parameters:**
 - **Sample size (k):** 20 validators per round

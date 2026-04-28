@@ -361,6 +361,54 @@ Stops the daemon gracefully.
 
 ---
 
+### Chain Maintenance & Recovery
+
+These commands are for operators who need to repair state or recover from a fork. All run against the **live daemon** via RPC.
+
+#### Reindex (UTXO + Transaction Index)
+```bash
+time-cli reindex
+```
+Rebuilds the UTXO set and transaction index by replaying all blocks from genesis. Use this to fix stale balances after chain corruption. Runs synchronously — the CLI waits for completion.
+
+```bash
+time-cli reindextransactions
+```
+Rebuilds only the transaction index in the background (returns immediately).
+
+#### Deep Fork Recovery
+If a node is stuck on a minority fork more than 100 blocks deep, normal reorg logic is blocked by the finality guard. Use the two-step recovery sequence:
+
+```bash
+# Step 1 — clear the BFT finality lock
+time-cli resetfinalitylock 0
+
+# Step 2 — roll back to genesis and resync from whitelisted peers
+time-cli resyncfromwhitelist 0
+```
+
+`resyncfromwhitelist` bypasses the MAX_REORG_DEPTH (100-block) limit and re-downloads the canonical chain from trusted peers. Requires at least one whitelisted peer to be connected.
+
+The `update.sh` script wraps this as a single command:
+```bash
+sudo ./scripts/update.sh resync           # both networks
+sudo ./scripts/update.sh resync mainnet   # mainnet only
+```
+
+#### Full Chain Reset
+```bash
+time-cli rollbacktoblock0
+```
+**Danger.** Deletes all blocks above genesis, clears UTXOs, and resets chain height to 0. The node will re-download the entire chain from peers on restart. Use only when `resyncfromwhitelist` fails (e.g. no whitelisted peers reachable).
+
+#### Rollback to Height
+```bash
+time-cli rollbacktoheight <height>
+```
+**Danger.** Rolls back the chain to a specific height (max 100 blocks, enforced by the finality guard). Use `resyncfromwhitelist` for deeper rollbacks.
+
+---
+
 ### Memory Pool
 
 #### Get Mempool Info

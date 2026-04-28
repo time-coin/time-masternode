@@ -965,6 +965,17 @@ sudo bash scripts/update.sh testnet
 sudo bash scripts/update.sh mainnet
 ```
 
+#### Deep fork recovery (Linux)
+
+If your node ends up on a minority fork after an update, run:
+
+```bash
+sudo bash scripts/update.sh resync           # both networks
+sudo bash scripts/update.sh resync mainnet   # mainnet only
+```
+
+This resets the BFT finality lock and resyncs the full chain from whitelisted peers. The daemon must be running (started automatically if not).
+
 ### Windows
 
 ```
