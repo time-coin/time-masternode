@@ -241,8 +241,9 @@ impl TransactionPool {
     /// Returns true if the transaction was found in pending and confirmed.
     pub fn confirm_transaction(&self, txid: Hash256) -> bool {
         if let Some((_, entry)) = self.pending.remove(&txid) {
-            // Remove from sled mempool — no longer visible to peers via mempool sync
-            self.sled_remove(&txid);
+            // Update sled entry to is_finalized=true so the TX survives a daemon restart
+            // while waiting for block archival. Removed from sled in archive_confirmed_txs.
+            self.sled_persist(&txid, &entry.tx, entry.fee, true);
             self.confirmed.insert(txid, entry.clone());
             self.pending_count.fetch_sub(1, Ordering::Relaxed);
             self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
@@ -365,6 +366,7 @@ impl TransactionPool {
         let mut evicted_pending = 0;
         for txid in txids {
             if self.confirmed.remove(txid).is_some() {
+                self.sled_remove(txid);
                 archived += 1;
             }
             if let Some((_, entry)) = self.pending.remove(txid) {
