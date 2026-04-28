@@ -3452,6 +3452,10 @@ impl MessageHandler {
             // Verify collateral UTXO on-chain (skip during initial sync)
             if !still_syncing {
                 if let Some(utxo_manager) = &context.utxo_manager {
+                    // Track whether the UTXO was found locally so the locking section below
+                    // can skip the lock attempt when it's missing (avoids a NotFound rejection
+                    // for nodes whose UTXO is genuinely on-chain but not yet in our local set).
+                    let mut utxo_in_local_set = true;
                     match utxo_manager.get_utxo(&outpoint).await {
                         Ok(utxo) => {
                             let required = tier.collateral();
@@ -4081,11 +4085,42 @@ impl MessageHandler {
                             );
                         }
                         Err(_) => {
-                            warn!(
-                            "❌ [{}] Rejecting {:?} masternode from {} — collateral UTXO not found on-chain",
-                            self.direction, tier, peer_ip
-                        );
-                            return Ok(None);
+                            utxo_in_local_set = false;
+                            // UTXO not found in local set.  This can happen when:
+                            //   (a) the collateral tx is unconfirmed (not yet in a block we've processed)
+                            //   (b) the UTXO reindex hasn't run yet / is incomplete
+                            //   (c) the node announced a UTXO that genuinely doesn't exist
+                            //
+                            // For direct connections we allow through rather than silently rejecting,
+                            // since a UTXO miss is most likely transient (cases a/b).  Squatters using
+                            // a fake outpoint lose nothing by being let through — their reward address
+                            // won't match the actual UTXO owner once the UTXO appears, and they'll be
+                            // evicted at that point.  For relayed announcements we still reject to
+                            // limit unauthenticated gossip spread.
+                            static UTXO_MISS_WARN: std::sync::OnceLock<
+                                dashmap::DashMap<String, std::time::Instant>,
+                            > = std::sync::OnceLock::new();
+                            let wm = UTXO_MISS_WARN.get_or_init(dashmap::DashMap::new);
+                            if is_relayed {
+                                if should_warn_now(wm, &masternode_ip, 300) {
+                                    warn!(
+                                        "⚠️ [{}] Skipping relayed {:?} masternode {} — collateral UTXO not yet in local set",
+                                        self.direction, tier, masternode_ip
+                                    );
+                                }
+                                return Ok(None);
+                            } else {
+                                // Direct connection — allow through, skip collateral lock below.
+                                // The node will be re-verified on next announcement once the UTXO
+                                // appears in our set.
+                                if should_warn_now(wm, &masternode_ip, 300) {
+                                    warn!(
+                                        "⚠️ [{}] Allowing direct {:?} masternode {} — collateral UTXO not yet in local set (will re-verify on next announcement)",
+                                        self.direction, tier, masternode_ip
+                                    );
+                                }
+                                // Skip the collateral lock — fall through to registration.
+                            }
                         }
                     }
 
@@ -4097,11 +4132,14 @@ impl MessageHandler {
                     // `is_collateral_locked` above returns false and the V4 eviction block
                     // is bypassed.  This second check ensures the registry is always clean
                     // before we attempt to register the new node.
-                    if let Some(registry_squatter) = context
-                        .masternode_registry
-                        .get_registered_ip_for_collateral(&outpoint)
-                        .await
-                    {
+                    if let Some(registry_squatter) = if utxo_in_local_set {
+                        context
+                            .masternode_registry
+                            .get_registered_ip_for_collateral(&outpoint)
+                            .await
+                    } else {
+                        None
+                    } {
                         if registry_squatter != masternode_ip {
                             // Re-fetch UTXO for address comparison.
                             let utxo_addr_opt = utxo_manager
@@ -4430,26 +4468,28 @@ impl MessageHandler {
                         }
                     }
 
-                    let lock_height = context.blockchain.get_height();
-                    if let Err(e) = utxo_manager.lock_collateral(
-                        outpoint.clone(),
-                        masternode_ip.clone(),
-                        lock_height,
-                        tier.collateral(),
-                    ) {
-                        if matches!(e, crate::utxo_manager::UtxoError::LockedAsCollateral) {
-                            // Already locked (e.g., rebuilt on startup or peer reconnected) — this is fine
-                            tracing::debug!(
-                                "🔒 [{}] Collateral for {} already locked — proceeding",
-                                self.direction,
-                                masternode_ip
+                    if utxo_in_local_set {
+                        let lock_height = context.blockchain.get_height();
+                        if let Err(e) = utxo_manager.lock_collateral(
+                            outpoint.clone(),
+                            masternode_ip.clone(),
+                            lock_height,
+                            tier.collateral(),
+                        ) {
+                            if matches!(e, crate::utxo_manager::UtxoError::LockedAsCollateral) {
+                                // Already locked (e.g., rebuilt on startup or peer reconnected) — this is fine
+                                tracing::debug!(
+                                    "🔒 [{}] Collateral for {} already locked — proceeding",
+                                    self.direction,
+                                    masternode_ip
+                                );
+                            } else {
+                                warn!(
+                                "❌ [{}] Rejecting {:?} masternode from {} — failed to lock collateral: {:?}",
+                                self.direction, tier, masternode_ip, e
                             );
-                        } else {
-                            warn!(
-                            "❌ [{}] Rejecting {:?} masternode from {} — failed to lock collateral: {:?}",
-                            self.direction, tier, masternode_ip, e
-                        );
-                            return Ok(None);
+                                return Ok(None);
+                            }
                         }
                     }
                 } else {
