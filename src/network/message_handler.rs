@@ -5829,12 +5829,16 @@ impl MessageHandler {
                 let all_peers = context.peer_registry.get_compatible_peers().await;
                 let mut our_chain_count = 1; // Count ourselves
                 let mut peer_chain_count = 0;
+                let mut counted_ips = std::collections::HashSet::new();
 
                 for peer_addr in &all_peers {
                     if let Some((peer_h, p_hash)) =
                         context.peer_registry.get_peer_chain_tip(peer_addr).await
                     {
                         if peer_h == our_height {
+                            let ip_only =
+                                peer_addr.split(':').next().unwrap_or(peer_addr).to_string();
+                            counted_ips.insert(ip_only);
                             if p_hash == our_hash {
                                 our_chain_count += 1;
                             } else if p_hash == peer_hash {
@@ -5844,11 +5848,36 @@ impl MessageHandler {
                     }
                 }
 
+                // Supplement with recently-disconnected peer tips (same 5-min window
+                // used by compare_chain_with_peers).  This prevents a minority-fork
+                // node from falsely declaring "we have consensus" based on only 2 live
+                // peers and sending erroneous ForkAlerts to canonical-chain peers,
+                // which would trigger their AV30 counter and get us banned.
+                const FORK_ALERT_RECENT_SECS: u64 = 300;
+                let recent_tips = context
+                    .peer_registry
+                    .get_recent_chain_tips(FORK_ALERT_RECENT_SECS)
+                    .await;
+                for (tip_ip, tip_height, tip_hash) in &recent_tips {
+                    let ip_only = tip_ip.split(':').next().unwrap_or(tip_ip).to_string();
+                    if counted_ips.contains(&ip_only) {
+                        continue; // already counted from live connection
+                    }
+                    if *tip_height == our_height {
+                        counted_ips.insert(ip_only);
+                        if *tip_hash == our_hash {
+                            our_chain_count += 1;
+                        } else if *tip_hash == peer_hash {
+                            peer_chain_count += 1;
+                        }
+                    }
+                }
+
                 // If we have consensus and peer is on minority fork, send alert.
-                // Threshold lowered from 3 to 2: with small networks the canonical
-                // chain may only have 2 visible supporters (us + 1 peer) yet the
-                // minority node needs to know so it can reconcile.
-                if our_chain_count > peer_chain_count && our_chain_count >= 2 {
+                // Require >= 3 distinct evidence sources (us + 2 others) before
+                // declaring consensus — prevents a minority-fork node with only 2
+                // live connections from falsely alerting canonical peers.
+                if our_chain_count > peer_chain_count && our_chain_count >= 3 {
                     info!(
                         "📢 [{}] We have consensus ({} vs {} peers) at height {} - sending fork alert to {}",
                         self.direction, our_chain_count, peer_chain_count, peer_height, self.peer_ip
@@ -6584,10 +6613,19 @@ impl MessageHandler {
             );
 
             // ── AV30: Record rejected fork-alert cycle ───────────────────────
-            // Increment the rejected-cycle counter so handle_fork_alert() can
-            // suppress further GetBlocks responses until the cooldown expires or
-            // the peer has accumulated enough cycles to trigger a ban violation.
-            {
+            // Only count as a "rejected cycle" for peers that are NOT
+            // genesis-confirmed.  A genesis-confirmed peer is on the same chain
+            // (same genesis block) but a different branch — that is recoverable
+            // fork divergence, not a fork-bomb attack.  Counting it here would
+            // eventually ban legitimate canonical-chain peers when we are the
+            // node on the minority fork, creating the self-perpetuating isolation
+            // cycle the user observed.  AV30 protection is reserved for peers
+            // whose genesis is unknown or different (potential attackers).
+            let peer_is_genesis_confirmed = context
+                .peer_registry
+                .is_genesis_confirmed(&self.peer_ip)
+                .await;
+            if !peer_is_genesis_confirmed {
                 let now = Instant::now();
                 let tracker = incoming_fork_alert_tracker();
                 let mut entry = tracker
@@ -6599,8 +6637,13 @@ impl MessageHandler {
                 let new_window = if in_window { window_start } else { now };
                 *entry = (last_sent, new_cycles, new_window);
                 debug!(
-                    "🔄 [AV30] Recorded rejected fork-alert cycle {}/{} for {}",
+                    "🔄 [AV30] Recorded rejected fork-alert cycle {}/{} for {} (unconfirmed genesis)",
                     new_cycles, FORK_ALERT_BAN_THRESHOLD, self.peer_ip
+                );
+            } else {
+                debug!(
+                    "🔀 [AV30] Fork divergence from genesis-confirmed peer {} — skipping AV30 (legitimate fork, not attack)",
+                    self.peer_ip
                 );
             }
             // ── End AV30 cycle recording ─────────────────────────────────────
