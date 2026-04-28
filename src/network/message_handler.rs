@@ -5017,10 +5017,13 @@ impl MessageHandler {
                     self.direction, registered
                 );
             } else {
-                debug!(
-                    "✓ [{}] Registered {} masternode(s) from peer exchange",
+                info!(
+                    "✓ [{}] Registered {} masternode(s) from peer exchange — waking PHASE3",
                     self.direction, registered
                 );
+                // Wake PHASE3 immediately so it dials newly discovered masternodes instead
+                // of waiting up to 30 s for the next scheduled tick.
+                context.masternode_registry.priority_reconnect_notify().notify_one();
             }
         }
 

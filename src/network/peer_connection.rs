@@ -1065,6 +1065,18 @@ impl PeerConnection {
             }
         }
 
+        // Outbound connections proactively request the remote's peer and masternode lists.
+        // The inbound path (server.rs) does the same when a peer connects to us.
+        // Without this, fresh nodes never learn about the full network from their bootstrap peers.
+        if self.direction == ConnectionDirection::Outbound {
+            let _ = Self::send_message(&self.writer_tx, &NetworkMessage::GetPeers);
+            let _ = Self::send_message(&self.writer_tx, &NetworkMessage::GetMasternodes);
+            debug!(
+                "📤 [Outbound] Sent GetPeers + GetMasternodes to {} for peer discovery",
+                self.peer_ip
+            );
+        }
+
         // Extract broadcast_rx before the loop to avoid borrow checker issues
         let mut broadcast_rx = config.broadcast_rx.take();
 

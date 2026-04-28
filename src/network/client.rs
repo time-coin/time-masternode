@@ -621,7 +621,7 @@ impl NetworkClient {
                             };
                             *subnet_active_counts.entry(subnet).or_insert(0) += 1;
                         }
-                        sleep(Duration::from_millis(100)).await;
+                        sleep(Duration::from_millis(10)).await;
                     }
 
                     if reconnected > 0 {
@@ -699,7 +699,7 @@ impl NetworkClient {
                         }
                         tracing::debug!("🔗 [PHASE3-PEER] Connecting to: {}", ip);
                         res.spawn(ip.clone(), false);
-                        sleep(Duration::from_millis(100)).await;
+                        sleep(Duration::from_millis(10)).await;
                     }
                 }
 
