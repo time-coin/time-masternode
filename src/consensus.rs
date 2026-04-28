@@ -3551,6 +3551,47 @@ impl ConsensusEngine {
         self.submit_transaction(tx).await
     }
 
+    /// Submit a batch of transactions concurrently.  Non-conflicting transactions
+    /// (different UTXO inputs) are finalized in parallel rather than serially,
+    /// collapsing N × ~750 ms into a single ~750 ms round for independent payments.
+    ///
+    /// Results are returned in the same order as the input slice.  Conflicting
+    /// transactions (double-spends) still fail — the UTXO lock rejects the
+    /// second attempt with the same error as a single-TX submission.
+    pub async fn batch_submit_transactions(
+        engine: Arc<Self>,
+        txs: Vec<Transaction>,
+    ) -> Vec<Result<Hash256, String>> {
+        if txs.is_empty() {
+            return vec![];
+        }
+
+        let n = txs.len();
+        tracing::info!("🚀 batch_submit: {} transactions", n);
+
+        let indexed_handles: Vec<(usize, tokio::task::JoinHandle<Result<Hash256, String>>)> = txs
+            .into_iter()
+            .enumerate()
+            .map(|(idx, tx)| {
+                let engine = Arc::clone(&engine);
+                (
+                    idx,
+                    tokio::spawn(async move { engine.submit_transaction(tx).await }),
+                )
+            })
+            .collect();
+
+        let mut results: Vec<Result<Hash256, String>> =
+            (0..n).map(|_| Err("not submitted".to_string())).collect();
+
+        for (idx, handle) in indexed_handles {
+            results[idx] = handle
+                .await
+                .unwrap_or_else(|e| Err(format!("task panicked: {}", e)));
+        }
+        results
+    }
+
     /// Cleanup old finalized transactions from TimeVote consensus
     /// Prevents unbounded memory growth by removing old finalized state
     pub fn cleanup_old_finalized(&self, retention_secs: u64) -> usize {
@@ -5228,6 +5269,39 @@ impl ConsensusEngine {
     }
 }
 
+/// Partition a list of transactions into groups of mutually non-conflicting sets.
+///
+/// Within each returned group every transaction has a disjoint set of UTXO inputs,
+/// so the entire group can be submitted concurrently via `batch_submit_transactions`
+/// without any UTXO lock contention.  Transactions that share inputs (potential
+/// double-spends) are placed in separate groups so callers can detect or order them.
+pub fn partition_non_conflicting(txs: Vec<Transaction>) -> Vec<Vec<Transaction>> {
+    let mut groups: Vec<Vec<Transaction>> = Vec::new();
+    let mut group_inputs: Vec<std::collections::HashSet<OutPoint>> = Vec::new();
+
+    'next_tx: for tx in txs {
+        let tx_inputs: std::collections::HashSet<OutPoint> = tx
+            .inputs
+            .iter()
+            .map(|i| i.previous_output.clone())
+            .collect();
+
+        for (i, existing) in group_inputs.iter_mut().enumerate() {
+            if existing.is_disjoint(&tx_inputs) {
+                existing.extend(tx_inputs);
+                groups[i].push(tx);
+                continue 'next_tx;
+            }
+        }
+
+        // No compatible group found — open a new one
+        group_inputs.push(tx_inputs);
+        groups.push(vec![tx]);
+    }
+
+    groups
+}
+
 #[cfg(test)]
 fn create_test_registry() -> Arc<MasternodeRegistry> {
     let db = Arc::new(sled::Config::new().temporary(true).open().unwrap());
@@ -5240,6 +5314,82 @@ mod tests {
 
     fn test_txid(byte: u8) -> Hash256 {
         [byte; 32]
+    }
+
+    fn make_tx(inputs: &[(u8, u32)]) -> Transaction {
+        Transaction {
+            version: 1,
+            inputs: inputs
+                .iter()
+                .map(|(txid_byte, vout)| TxInput {
+                    previous_output: OutPoint {
+                        txid: [*txid_byte; 32],
+                        vout: *vout,
+                    },
+                    script_sig: vec![],
+                    sequence: 0,
+                })
+                .collect(),
+            outputs: vec![],
+            lock_time: 0,
+            timestamp: 0,
+            special_data: None,
+            encrypted_memo: None,
+        }
+    }
+
+    #[test]
+    fn test_partition_all_independent() {
+        // A, B, C each spend different UTXOs → all land in one group
+        let txs = vec![make_tx(&[(1, 0)]), make_tx(&[(2, 0)]), make_tx(&[(3, 0)])];
+        let groups = partition_non_conflicting(txs);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 3);
+    }
+
+    #[test]
+    fn test_partition_conflict_splits_groups() {
+        // A and B both spend UTXO (1, 0) → must land in different groups
+        let tx_a = make_tx(&[(1, 0)]);
+        let tx_b = make_tx(&[(1, 0)]);
+        let tx_c = make_tx(&[(2, 0)]);
+        let groups = partition_non_conflicting(vec![tx_a, tx_b, tx_c]);
+        assert_eq!(groups.len(), 2);
+        // Group 0 gets A and C (C is disjoint from A); Group 1 gets B
+        assert_eq!(groups[0].len(), 2);
+        assert_eq!(groups[1].len(), 1);
+    }
+
+    #[test]
+    fn test_partition_empty() {
+        let groups = partition_non_conflicting(vec![]);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn test_partition_single_tx() {
+        let groups = partition_non_conflicting(vec![make_tx(&[(1, 0)])]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 1);
+    }
+
+    #[test]
+    fn test_partition_multi_input_tx() {
+        // TX A spends (1,0) and (2,0); TX B spends (3,0) → no conflict → one group
+        let tx_a = make_tx(&[(1, 0), (2, 0)]);
+        let tx_b = make_tx(&[(3, 0)]);
+        let groups = partition_non_conflicting(vec![tx_a, tx_b]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 2);
+    }
+
+    #[test]
+    fn test_partition_multi_input_conflict() {
+        // TX A spends (1,0) and (2,0); TX B spends (2,0) → conflict on (2,0)
+        let tx_a = make_tx(&[(1, 0), (2, 0)]);
+        let tx_b = make_tx(&[(2, 0)]);
+        let groups = partition_non_conflicting(vec![tx_a, tx_b]);
+        assert_eq!(groups.len(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread")]
