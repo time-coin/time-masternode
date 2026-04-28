@@ -209,6 +209,7 @@ const PUBLIC_METHODS: &[&str] = &[
     "waittransactionfinality",
     // Transaction submission (signature is the authentication)
     "sendrawtransaction",
+    "rebroadcasttransaction",
     // Wallet / balance queries
     "getbalance",
     "getbalances",

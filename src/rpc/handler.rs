@@ -190,6 +190,7 @@ impl RpcHandler {
             "getrawtransaction" => self.get_raw_transaction(&params_array).await,
             "gettransaction" => self.get_transaction(&params_array).await,
             "sendrawtransaction" => self.send_raw_transaction(&params_array).await,
+            "rebroadcasttransaction" => self.rebroadcast_transaction(&params_array).await,
             "createrawtransaction" => self.create_raw_transaction(&params_array).await,
             "decoderawtransaction" => self.decode_raw_transaction(&params_array).await,
             "getbalance" => self.get_balance(&params_array).await,
@@ -1153,6 +1154,41 @@ impl RpcHandler {
         }
 
         Ok(json!(txid_hex))
+    }
+
+    async fn rebroadcast_transaction(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let txid_str = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected txid".to_string(),
+            })?;
+
+        let txid_bytes = hex::decode(txid_str).map_err(|_| RpcError {
+            code: -8,
+            message: "Invalid txid format".to_string(),
+        })?;
+        if txid_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -8,
+                message: "Invalid txid length".to_string(),
+            });
+        }
+        let mut txid = [0u8; 32];
+        txid.copy_from_slice(&txid_bytes);
+
+        if self.consensus.rebroadcast_transaction(txid).await {
+            Ok(json!({
+                "txid": txid_str,
+                "result": "rebroadcast"
+            }))
+        } else {
+            Err(RpcError {
+                code: -5,
+                message: "Transaction not found in finalized pool (may already be archived in a block, or not yet finalized)".to_string(),
+            })
+        }
     }
 
     async fn create_raw_transaction(&self, params: &[Value]) -> Result<Value, RpcError> {

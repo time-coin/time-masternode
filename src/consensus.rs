@@ -3496,6 +3496,25 @@ impl ConsensusEngine {
         self.tx_pool.get_stale_finalized(min_age)
     }
 
+    /// Immediately re-broadcast a specific finalized transaction to all connected peers.
+    /// Returns true if the txid was found in the finalized pool and the broadcast was sent.
+    pub async fn rebroadcast_transaction(&self, txid: Hash256) -> bool {
+        let tx = match self.tx_pool.get_transaction(&txid) {
+            Some(tx) => tx,
+            None => return false,
+        };
+        if !self.tx_pool.is_finalized(&txid) {
+            return false;
+        }
+        let cb = self.broadcast_callback.read().await;
+        if let Some(ref broadcast) = *cb {
+            broadcast(crate::network::message::NetworkMessage::TransactionFinalized { txid, tx });
+            true
+        } else {
+            false
+        }
+    }
+
     #[allow(dead_code)]
     pub fn clear_finalized_transactions(&self) {
         self.tx_pool.clear_finalized();

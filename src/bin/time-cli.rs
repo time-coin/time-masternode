@@ -64,6 +64,7 @@ Commands:
     createrawtransaction   Create a new transaction
     decoderawtransaction   Decode a raw transaction
     sendrawtransaction     Send a raw transaction
+    rebroadcasttransaction Re-broadcast a finalized transaction to peers
     gettransactionfinality Get finality status for a transaction
     estimatesmartfee       Estimate fee for a target confirmation speed
   Masternode
@@ -549,6 +550,13 @@ enum Commands {
     SendRawTransaction {
         /// Hex-encoded transaction
         hex: String,
+    },
+
+    /// Re-broadcast a finalized transaction to all connected peers
+    #[command(next_help_heading = "Transaction")]
+    RebroadcastTransaction {
+        /// Transaction ID (hex)
+        txid: String,
     },
 
     /// Get finality status for a transaction
@@ -1314,6 +1322,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             ("getrawtransaction", json!([txid, verbose]))
         }
         Commands::SendRawTransaction { hex } => ("sendrawtransaction", json!([hex])),
+        Commands::RebroadcastTransaction { txid } => ("rebroadcasttransaction", json!([txid])),
         Commands::GetTransactionFinality { txid } => ("gettransactionfinality", json!([txid])),
         Commands::EstimateSmartFee { conf_target } => ("estimatesmartfee", json!([conf_target])),
         Commands::CreateRawTransaction { inputs, outputs } => {
