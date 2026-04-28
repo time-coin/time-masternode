@@ -197,6 +197,7 @@ impl RpcHandler {
             "getnewaddress" => self.get_new_address(&params_array).await,
             "getwalletinfo" => self.get_wallet_info().await,
             "masternodelist" => self.masternode_list(&params_array).await,
+            "masternoderemove" => self.masternode_remove(&params_array).await,
             "masternodestatus" => self.masternode_status().await,
             "checkcollateral" => self.check_collateral().await,
             "findcollateral" => self.find_collateral(&params_array).await,
@@ -2481,6 +2482,38 @@ impl RpcHandler {
             "transactions": transactions,
             "chain_height": chain_height,
         }))
+    }
+
+    /// Remove a masternode from the in-memory registry and persistent sled storage.
+    /// Takes one parameter: the `address` field (IP:port) as shown in `masternodelist`.
+    /// The node will not re-appear unless it reconnects and re-announces.
+    async fn masternode_remove(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let address = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected: masternoderemove \"<ip:port>\"".to_string(),
+            })?;
+
+        match self.registry.unregister(address).await {
+            Ok(Some(info)) => {
+                tracing::info!("RPC masternoderemove: removed {} ({})", address, info.masternode.wallet_address);
+                Ok(serde_json::json!({
+                    "result": "removed",
+                    "address": address,
+                    "wallet": info.masternode.wallet_address,
+                }))
+            }
+            Ok(None) => Ok(serde_json::json!({
+                "result": "not_found",
+                "address": address,
+            })),
+            Err(e) => Err(RpcError {
+                code: -1,
+                message: format!("Registry error: {}", e),
+            }),
+        }
     }
 
     async fn masternode_status(&self) -> Result<Value, RpcError> {
