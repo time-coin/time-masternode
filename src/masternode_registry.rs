@@ -3152,27 +3152,28 @@ impl MasternodeRegistry {
             // multi-subnet witnesses are actually achievable (≥3 connected peers).
             // With <3 connections reporters may all share a subnet even for a fully
             // healthy masternode.
-            let meets_diversity = if total_masternodes > 12 && connected_peers.len() >= 3 && report_count >= 2 {
-                // Require witnesses from at least 2 distinct /16 subnets to prevent
-                // targeted DDoS against a node's witnesses on the same subnet.
-                // Only enforce for larger networks (>12 nodes) — small networks with
-                // co-located infrastructure (shared /16 subnets) would otherwise have
-                // nodes stuck inactive despite being fully online and reachable.
-                let mut subnets = std::collections::HashSet::new();
-                for entry in info.peer_reports.iter() {
-                    let peer_addr: &String = entry.key();
-                    // Extract /16 prefix from IP address (e.g., "192.168" from "192.168.1.1:24000")
-                    if let Some(ip_part) = peer_addr.split(':').next() {
-                        let octets: Vec<&str> = ip_part.split('.').collect();
-                        if octets.len() >= 2 {
-                            subnets.insert(format!("{}.{}", octets[0], octets[1]));
+            let meets_diversity =
+                if total_masternodes > 12 && connected_peers.len() >= 3 && report_count >= 2 {
+                    // Require witnesses from at least 2 distinct /16 subnets to prevent
+                    // targeted DDoS against a node's witnesses on the same subnet.
+                    // Only enforce for larger networks (>12 nodes) — small networks with
+                    // co-located infrastructure (shared /16 subnets) would otherwise have
+                    // nodes stuck inactive despite being fully online and reachable.
+                    let mut subnets = std::collections::HashSet::new();
+                    for entry in info.peer_reports.iter() {
+                        let peer_addr: &String = entry.key();
+                        // Extract /16 prefix from IP address (e.g., "192.168" from "192.168.1.1:24000")
+                        if let Some(ip_part) = peer_addr.split(':').next() {
+                            let octets: Vec<&str> = ip_part.split('.').collect();
+                            if octets.len() >= 2 {
+                                subnets.insert(format!("{}.{}", octets[0], octets[1]));
+                            }
                         }
                     }
-                }
-                subnets.len() >= 2
-            } else {
-                true // Small networks or under-connected state exempt from diversity requirement
-            };
+                    subnets.len() >= 2
+                } else {
+                    true // Small networks or under-connected state exempt from diversity requirement
+                };
             // A direct TCP connection is authoritative proof of liveness —
             // gossip counts are a secondary signal for nodes we aren't directly
             // connected to. Never flip is_active to false while we have a live
@@ -3188,7 +3189,8 @@ impl MasternodeRegistry {
             let within_grace = !matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
                 && info.last_seen_at > 0
                 && now.saturating_sub(info.last_seen_at) < ACTIVE_GRACE_SECS;
-            info.is_active = is_directly_connected || within_grace || (meets_count && meets_diversity);
+            info.is_active =
+                is_directly_connected || within_grace || (meets_count && meets_diversity);
 
             if was_active != info.is_active {
                 status_changes += 1;

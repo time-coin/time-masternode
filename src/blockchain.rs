@@ -4006,19 +4006,20 @@ impl Blockchain {
             // This gives attack-resilience for momentary disconnects while still
             // excluding genuinely offline nodes after two rounds.
             let prev_height = next_height.saturating_sub(1);
-            let prev_round_voters_count = if let Ok(prev_block) = self.get_block_by_height(prev_height).await {
-                let prev_voters = self
-                    .masternode_registry
-                    .get_active_from_bitmap(&prev_block.header.active_masternodes_bitmap)
-                    .await;
-                let count = prev_voters.len();
-                for mn in prev_voters {
-                    voters_set.insert(mn.masternode.address);
-                }
-                count
-            } else {
-                0
-            };
+            let prev_round_voters_count =
+                if let Ok(prev_block) = self.get_block_by_height(prev_height).await {
+                    let prev_voters = self
+                        .masternode_registry
+                        .get_active_from_bitmap(&prev_block.header.active_masternodes_bitmap)
+                        .await;
+                    let count = prev_voters.len();
+                    for mn in prev_voters {
+                        voters_set.insert(mn.masternode.address);
+                    }
+                    count
+                } else {
+                    0
+                };
 
             if voters_set.is_empty() {
                 // Emergency: no votes in either recent round — last resort gossip-active.
@@ -8569,6 +8570,29 @@ impl Blockchain {
             }
         }
 
+        // Supplement with recently-disconnected peer tips (5-minute window).
+        // In the minority-fork trap, majority-chain peers connect, detect the fork, and
+        // disconnect within seconds — before GetChainTip can complete. Without this,
+        // compare_chain_with_peers() can never accumulate the MIN_PEERS_FOR_FORK_SWITCH
+        // quorum needed to trigger recovery.
+        const RECENT_TIP_EVIDENCE_SECS: u64 = 300;
+        let recent_tips = registry
+            .get_recent_chain_tips(RECENT_TIP_EVIDENCE_SECS)
+            .await;
+        let mut supplemented_from_recent = 0usize;
+        for (peer_ip, height, hash) in &recent_tips {
+            if !peer_tips.contains_key(peer_ip) {
+                peer_tips.insert(peer_ip.clone(), (*height, *hash));
+                supplemented_from_recent += 1;
+            }
+        }
+        if supplemented_from_recent > 0 {
+            tracing::debug!(
+                "📚 Supplemented chain tip evidence with {} recently-disconnected peer tip(s)",
+                supplemented_from_recent
+            );
+        }
+
         if peer_tips.is_empty() {
             tracing::warn!(
                 "⚠️  No peer chain tip responses received from {} peers!",
@@ -8581,10 +8605,12 @@ impl Blockchain {
         // Normal mode: 50%+ of peers must respond.
         // Chain restart (height 0): relax to 25% — after banning old-code nodes,
         // most compatible peers may not have chain tips cached yet.
+        // Exception: when supplemented evidence brings us to 3+ distinct sources, skip the
+        // rate gate — "waiting for more responses" is futile in the minority-fork trap.
         let our_height = self.get_height();
         let min_response_rate = if our_height == 0 { 0.25 } else { 0.5 };
-        let response_rate = peer_tips.len() as f64 / connected_peers.len() as f64;
-        if response_rate < min_response_rate {
+        let response_rate = peer_tips.len() as f64 / connected_peers.len().max(1) as f64;
+        if response_rate < min_response_rate && peer_tips.len() < 3 {
             tracing::debug!(
                 "⚠️  Low peer response rate: {}/{} responded ({:.1}%) - waiting for more responses before consensus decision",
                 peer_tips.len(),
@@ -8808,7 +8834,18 @@ impl Blockchain {
             })
             .map(|((height, hash), peers)| (*height, *hash, peers.clone()))?;
 
-        let (consensus_height, consensus_hash, consensus_peers) = consensus_chain;
+        let (consensus_height, consensus_hash, consensus_peers_all) = consensus_chain;
+        // For sync target selection, only use currently-connected peers — we can't sync
+        // from a recently-disconnected peer. consensus_peers_all (which includes recent tips)
+        // is used for the evidence count / MIN_PEERS threshold checks below.
+        let connected_set: std::collections::HashSet<&str> =
+            connected_peers.iter().map(|s| s.as_str()).collect();
+        let consensus_peers: Vec<String> = consensus_peers_all
+            .iter()
+            .filter(|ip| connected_set.contains(ip.as_str()))
+            .cloned()
+            .collect();
+        let consensus_evidence_count = consensus_peers_all.len();
 
         // Check weighted stake support for the consensus chain
         let mut consensus_weight = 0u64;
@@ -8819,7 +8856,7 @@ impl Blockchain {
                 None => crate::types::MasternodeTier::Free.sampling_weight(),
             };
             total_responding_weight += peer_weight;
-            if consensus_peers.contains(peer_ip) {
+            if consensus_peers_all.contains(peer_ip) {
                 consensus_weight += peer_weight;
             }
         }
@@ -8852,12 +8889,13 @@ impl Blockchain {
             let weighted_ratio = consensus_weight as f64 / total_responding_weight as f64;
             tracing::info!(
                 "🔀 Same-height fork at {}: consensus chain (lower hash) has {:.1}% weighted stake \
-                ({}/{}, {} peers) — applying hash tiebreaker",
+                ({}/{}, {} peers/{} evidence) — applying hash tiebreaker",
                 consensus_height,
                 weighted_ratio * 100.0,
                 consensus_weight,
                 total_responding_weight,
                 consensus_peers.len(),
+                consensus_evidence_count,
             );
         } else {
             // Longest chain is strictly taller — it wins by longest chain rule
@@ -8911,7 +8949,7 @@ impl Blockchain {
             / heights.len() as f64)
             .sqrt();
 
-        let peer_agreement_ratio = consensus_peers.len() as f64 / peer_tips.len() as f64;
+        let peer_agreement_ratio = consensus_evidence_count as f64 / peer_tips.len() as f64;
         // Only count chains near the tip as forks — syncing peers (far behind) are not forks
         let max_h = chain_counts.keys().map(|(h, _)| *h).max().unwrap_or(0);
         let fork_count = chain_counts
@@ -9005,17 +9043,18 @@ impl Blockchain {
         // The consensus chain was already selected by peer count (majority wins).
         // If our hash doesn't match, we're in the minority — switch, subject to guards below.
         if consensus_height == our_height && consensus_hash != our_hash {
-            // Guard 1: Require at least 3 peers supporting the alternate chain.
-            // 1–2 peers with a different hash are more likely to be on a minority fork
-            // (especially when other peers are temporarily unresponsive to chain-tip queries).
-            // Returning None here lets the node count as a vote for its own chain so that
-            // the disagreeing peers — not us — eventually get the fork alert.
+            // Guard 1: Require at least 3 distinct sources supporting the alternate chain.
+            // This counts both currently-connected peers AND recently-disconnected peers whose
+            // tips were preserved in the recent_chain_tip_cache (5-minute window). Without the
+            // recent-tip supplement, majority-chain peers that disconnect on fork detection
+            // (the minority-fork trap) would never allow the counter to reach 3.
             const MIN_PEERS_FOR_FORK_SWITCH: usize = 3;
-            if consensus_peers.len() < MIN_PEERS_FOR_FORK_SWITCH {
+            if consensus_evidence_count < MIN_PEERS_FOR_FORK_SWITCH {
                 tracing::debug!(
-                    "🔀 Same-height fork at {}: only {} peer(s) on alternate chain — \
+                    "🔀 Same-height fork at {}: only {}/{} evidence for alternate chain — \
                      need {} to switch (our hash {}, theirs {})",
                     consensus_height,
+                    consensus_evidence_count,
                     consensus_peers.len(),
                     MIN_PEERS_FOR_FORK_SWITCH,
                     hex::encode(&our_hash[..8]),
@@ -9066,10 +9105,21 @@ impl Blockchain {
             *self.same_height_fork_cooldown.write().await =
                 Some((consensus_height, consensus_hash, std::time::Instant::now()));
 
+            if consensus_peers.is_empty() {
+                // Evidence comes from recently-disconnected peers but no connected peer is
+                // currently available to sync from. Wait for one to reconnect.
+                tracing::debug!(
+                    "🔀 Same-height fork at {}: {} evidence sources but 0 connected — waiting for reconnect",
+                    consensus_height,
+                    consensus_evidence_count,
+                );
+                return None;
+            }
             warn!(
-                "🔀 Same-height fork at {}: switching to consensus chain ({} peers). Our hash {} vs consensus {}",
+                "🔀 Same-height fork at {}: switching to consensus chain ({} connected, {} evidence). Our hash {} vs consensus {}",
                 consensus_height,
                 consensus_peers.len(),
+                consensus_evidence_count,
                 hex::encode(&our_hash[..8]),
                 hex::encode(&consensus_hash[..8]),
             );

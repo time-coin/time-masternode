@@ -108,6 +108,11 @@ pub struct PeerConnectionRegistry {
     // After a timeout we don't retry for GENESIS_CHECK_COOLDOWN_SECS to avoid
     // permanently flooding old-code nodes that never respond to GetBlockHash(0).
     genesis_check_last_attempt: Arc<dashmap::DashMap<String, std::time::Instant>>,
+    // Time-stamped chain tip evidence from any peer, kept for 5 minutes past disconnect.
+    // Prevents the minority-fork trap where majority-chain peers disconnect immediately
+    // after detecting the fork — erasing their evidence before compare_chain_with_peers()
+    // can accumulate the MIN_PEERS_FOR_FORK_SWITCH quorum.
+    recent_chain_tip_cache: Arc<RwLock<HashMap<String, (u64, [u8; 32], std::time::Instant)>>>,
 }
 
 fn extract_ip(addr: &str) -> &str {
@@ -149,6 +154,7 @@ impl PeerConnectionRegistry {
             genesis_confirmed_peers: Arc::new(RwLock::new(HashSet::new())),
             pending_genesis_checks: Arc::new(dashmap::DashSet::new()),
             genesis_check_last_attempt: Arc::new(dashmap::DashMap::new()),
+            recent_chain_tip_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -1175,6 +1181,18 @@ impl PeerConnectionRegistry {
         }
         tips.insert(ip_only.to_string(), (height, hash));
         drop(tips);
+        // Keep a time-stamped copy that survives disconnect for up to 5 minutes.
+        let mut recent = self.recent_chain_tip_cache.write().await;
+        let should_update = recent
+            .get(ip_only)
+            .map_or(true, |(cached_h, _, _)| height >= *cached_h);
+        if should_update {
+            recent.insert(
+                ip_only.to_string(),
+                (height, hash, std::time::Instant::now()),
+            );
+        }
+        drop(recent);
         self.chain_tip_updated.notify_waiters();
     }
 
@@ -1183,6 +1201,22 @@ impl PeerConnectionRegistry {
         let ip_only = extract_ip(peer_ip);
         let tips = self.peer_chain_tips.read().await;
         tips.get(ip_only).copied()
+    }
+
+    /// Returns chain tips from peers seen in the last `max_age_secs` seconds, including
+    /// recently-disconnected peers. Used by compare_chain_with_peers() to count fork evidence
+    /// from peers that disconnected immediately after detecting a fork (minority-fork trap).
+    pub async fn get_recent_chain_tips(&self, max_age_secs: u64) -> Vec<(String, u64, [u8; 32])> {
+        let now = std::time::Instant::now();
+        let cache = self.recent_chain_tip_cache.read().await;
+        cache
+            .iter()
+            .filter(|(_, (_, _, t))| {
+                now.checked_duration_since(*t)
+                    .map_or(false, |age| age.as_secs() <= max_age_secs)
+            })
+            .map(|(ip, (h, hash, _))| (ip.clone(), *h, *hash))
+            .collect()
     }
 
     /// Get the chain tip update signal (notified when any peer reports a new chain tip)

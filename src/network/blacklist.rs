@@ -522,13 +522,15 @@ impl IPBlacklist {
             self.add_temp_ban(ip, Duration::from_secs(300), reason);
             tracing::warn!(
                 "🚫 Frame bomb from {} — temp ban 5 min (offence #{})",
-                ip, count_snap
+                ip,
+                count_snap
             );
         } else {
             self.add_temp_ban(ip, Duration::from_secs(3600), reason);
             tracing::warn!(
                 "🚫 Frame bomb from {} — temp ban 1 hour (offence #{})",
-                ip, count_snap
+                ip,
+                count_snap
             );
         }
         true

@@ -1672,7 +1672,10 @@ impl MessageHandler {
                         .next()
                         .unwrap_or(&mn_info.masternode.address);
                     if ai.attack_detector.is_known_frame_bomber(ip) {
-                        debug!("Excluding known frame-bomber {} from MasternodesResponse", ip);
+                        debug!(
+                            "Excluding known frame-bomber {} from MasternodesResponse",
+                            ip
+                        );
                         return false;
                     }
                 }

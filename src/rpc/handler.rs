@@ -2498,7 +2498,11 @@ impl RpcHandler {
 
         match self.registry.unregister(address).await {
             Ok(Some(info)) => {
-                tracing::info!("RPC masternoderemove: removed {} ({})", address, info.masternode.wallet_address);
+                tracing::info!(
+                    "RPC masternoderemove: removed {} ({})",
+                    address,
+                    info.masternode.wallet_address
+                );
                 Ok(serde_json::json!({
                     "result": "removed",
                     "address": address,

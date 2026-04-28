@@ -444,7 +444,11 @@ impl AdaptiveReconnectionAI {
         // preventing consensus even after the root cause is fixed.
         if profile.consecutive_failures >= self.config.max_consecutive_failures {
             let extra_cycles = profile.consecutive_failures - self.config.max_consecutive_failures;
-            let max_cooldown = if profile.is_masternode { 120.0 } else { 86_400.0 };
+            let max_cooldown = if profile.is_masternode {
+                120.0
+            } else {
+                86_400.0
+            };
             let effective_cooldown = (self.config.cooldown_period_secs as f64
                 * 2_f64.powi(extra_cycles.min(8) as i32)) // cap at 2^8 = 256× base
             .min(max_cooldown) as u64;

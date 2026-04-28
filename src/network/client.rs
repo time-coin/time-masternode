@@ -295,7 +295,11 @@ impl NetworkClient {
                             .iter()
                             .map(|m| m.masternode.address.clone())
                             .collect();
-                        let silver_limit = if t.is_empty() { silver_nodes.len() } else { SILVER_LATERAL };
+                        let silver_limit = if t.is_empty() {
+                            silver_nodes.len()
+                        } else {
+                            SILVER_LATERAL
+                        };
                         t.extend(
                             silver_nodes
                                 .iter()
@@ -316,7 +320,11 @@ impl NetworkClient {
                         if t.is_empty() {
                             t.extend(gold_nodes.iter().map(|m| m.masternode.address.clone()));
                         }
-                        let bronze_limit = if t.is_empty() { bronze_nodes.len() } else { BRONZE_LATERAL };
+                        let bronze_limit = if t.is_empty() {
+                            bronze_nodes.len()
+                        } else {
+                            BRONZE_LATERAL
+                        };
                         t.extend(
                             bronze_nodes
                                 .iter()
@@ -570,7 +578,10 @@ impl NetworkClient {
                             mn_info.registration_source,
                             crate::masternode_registry::RegistrationSource::OnChain(_)
                         );
-                        if mn_info.masternode.tier == MasternodeTier::Free && !is_onchain && !mn_is_whitelisted {
+                        if mn_info.masternode.tier == MasternodeTier::Free
+                            && !is_onchain
+                            && !mn_is_whitelisted
+                        {
                             let ip = mn_ip.split(':').next().unwrap_or(mn_ip);
                             let parts: Vec<&str> = ip.split('.').collect();
                             let subnet = if parts.len() >= 3 {

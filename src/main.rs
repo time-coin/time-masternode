@@ -747,7 +747,10 @@ async fn main() {
 
     // Enable persistent spent-UTXO tombstone storage (must be before initialize_states)
     if let Err(e) = utxo_mgr.enable_spent_persistence(&block_storage) {
-        tracing::warn!("⚠️ Failed to enable spent UTXO tombstone persistence: {:?}", e);
+        tracing::warn!(
+            "⚠️ Failed to enable spent UTXO tombstone persistence: {:?}",
+            e
+        );
     }
 
     let utxo_mgr = Arc::new(utxo_mgr);
