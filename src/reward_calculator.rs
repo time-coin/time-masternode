@@ -73,7 +73,6 @@ pub async fn compute(
     input: &RewardInput<'_>,
     utxo_manager: &UTXOStateManager,
 ) -> Vec<(String, u64)> {
-    let _ = input.height; // kept in RewardInput for logging/debugging only
     let producer_wallet = input.producer_wallet;
     let active_nodes = input.active_nodes;
     let fairness_map = input.fairness_map;
@@ -113,7 +112,7 @@ pub async fn compute(
         // ── All-Free mode ──────────────────────────────────────────────────────
         // 95 TIME (= total_reward) split equally among the top-N Free nodes
         // sorted by fairness bonus.  Mirrors produce_block_at_height All-Free path.
-        let mut free_nodes: Vec<(&MasternodeInfo, u64)> = active_nodes
+        let free_nodes: Vec<(&MasternodeInfo, u64)> = active_nodes
             .iter()
             .filter(|mn| mn.masternode.tier == MasternodeTier::Free)
             .filter(|mn| !payout_addr(mn).is_empty())
@@ -132,6 +131,28 @@ pub async fn compute(
                 (mn, bonus_for(blocks_without))
             })
             .collect();
+
+        // Sybil protection: one slot per unique payout address, keeping the highest
+        // fairness bonus among nodes sharing that address (AV-FREE-SYBIL).
+        let mut free_nodes =
+            if input.height >= crate::constants::fork_heights::FREE_TIER_SYBIL_FORK_HEIGHT {
+                let mut seen: HashMap<&str, usize> = HashMap::new();
+                let mut deduped: Vec<(&MasternodeInfo, u64)> = Vec::new();
+                for (mn, bonus) in free_nodes {
+                    let addr = payout_addr(mn);
+                    if let Some(&idx) = seen.get(addr) {
+                        if bonus > deduped[idx].1 {
+                            deduped[idx] = (mn, bonus);
+                        }
+                    } else {
+                        seen.insert(addr, deduped.len());
+                        deduped.push((mn, bonus));
+                    }
+                }
+                deduped
+            } else {
+                free_nodes
+            };
 
         free_nodes.sort_by(|a, b| {
             b.1.cmp(&a.1)
@@ -184,7 +205,7 @@ pub async fn compute(
         let tier_pool = tier.pool_allocation();
         let is_free = matches!(tier, MasternodeTier::Free);
 
-        let mut tier_nodes: Vec<(&MasternodeInfo, u64)> = active_nodes
+        let tier_nodes: Vec<(&MasternodeInfo, u64)> = active_nodes
             .iter()
             .filter(|mn| mn.masternode.tier == *tier)
             // Skip nodes with no payout address (empty wallet + empty reward_address).
@@ -215,6 +236,29 @@ pub async fn compute(
                 (mn, bonus_for(blocks_without))
             })
             .collect();
+
+        // Sybil protection for Free tier: deduplicate by payout address before slot
+        // selection so one entity cannot hold multiple fairness-rotation slots (AV-FREE-SYBIL).
+        let mut tier_nodes = if is_free
+            && input.height >= crate::constants::fork_heights::FREE_TIER_SYBIL_FORK_HEIGHT
+        {
+            let mut seen: HashMap<&str, usize> = HashMap::new();
+            let mut deduped: Vec<(&MasternodeInfo, u64)> = Vec::new();
+            for (mn, bonus) in tier_nodes {
+                let addr = payout_addr(mn);
+                if let Some(&idx) = seen.get(addr) {
+                    if bonus > deduped[idx].1 {
+                        deduped[idx] = (mn, bonus);
+                    }
+                } else {
+                    seen.insert(addr, deduped.len());
+                    deduped.push((mn, bonus));
+                }
+            }
+            deduped
+        } else {
+            tier_nodes
+        };
 
         if tier_nodes.is_empty() {
             // Empty tier — full pool rolls up to producer.

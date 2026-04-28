@@ -189,6 +189,17 @@ pub mod fork_heights {
     /// Verify the current mainnet height before deploying.
     pub const COLLATERAL_OWNERSHIP_FORK_HEIGHT: u64 = 1_200;
 
+    /// Height at which Free-tier reward Sybil protection activates.
+    ///
+    /// Before this height: multiple Free-tier nodes sharing a payout address each
+    /// occupy a separate slot in the MAX_FREE_TIER_RECIPIENTS fairness rotation,
+    /// allowing one entity to capture a disproportionate share of the Free pool.
+    ///
+    /// From this height onward: Free-tier nodes are deduplicated by payout address
+    /// before slot selection — one slot per unique address, keeping the highest
+    /// `blocks_without_reward` counter among nodes sharing that address.
+    pub const FREE_TIER_SYBIL_FORK_HEIGHT: u64 = 1_950;
+
     /// Height at which cross-chain replay protection activates (AV-REPLAY).
     ///
     /// From this height onward all transaction inputs MUST be signed using
