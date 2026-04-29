@@ -3116,30 +3116,37 @@ impl ConsensusEngine {
         // Use validators from consensus engine (which queries masternode registry)
         let validators_for_consensus = self.timevote.get_validators();
 
-        tracing::warn!(
-            "🔄 Starting TimeVote consensus for TX {} with {} validators: {:?}",
-            hex::encode(txid),
-            validators_for_consensus.len(),
-            validators_for_consensus
-                .iter()
-                .map(|v| &v.address)
-                .collect::<Vec<_>>()
-        );
+        // Conflict-only voting: check if any other pending TX is spending the same UTXOs.
+        // If no conflict, auto-finalize immediately — 67% consensus is only needed when two
+        // transactions compete for the same UTXO (genuine double-spend scenario).
+        // Special TXs (masternode ops) have no inputs and are always conflict-free.
+        let has_conflict = self.tx_pool.has_conflicting_transaction(&tx.inputs, &txid);
 
-        // BYPASS: Auto-finalize for single-node or low-validator scenarios
-        // In production with <3 active validators, skip consensus and finalize immediately
-        // This handles development/testing and bootstrap scenarios
-        //
-        // ALSO: If TIMECOIN_DEV_MODE=1 is set, auto-finalize regardless of validator count
+        if has_conflict {
+            tracing::warn!(
+                "⚠️ TX {} conflicts with a pending double-spend — initiating TimeVote consensus",
+                hex::encode(txid)
+            );
+        } else {
+            tracing::info!(
+                "✅ TX {} has no competing double-spend — auto-finalizing (conflict-only voting)",
+                hex::encode(txid)
+            );
+        }
+
+        // BYPASS: Auto-finalize when:
+        //   (a) No double-spend conflict detected (conflict-only voting)
+        //   (b) Insufficient active validators (<3) for consensus to function
+        //   (c) TIMECOIN_DEV_MODE=1 is set
         let dev_mode = std::env::var("TIMECOIN_DEV_MODE").unwrap_or_default() == "1";
 
-        if validators_for_consensus.len() < 3 || dev_mode {
+        if !has_conflict || validators_for_consensus.len() < 3 || dev_mode {
             if dev_mode {
                 tracing::warn!(
                     "⚡ DEV MODE: Auto-finalizing TX {} (TIMECOIN_DEV_MODE=1)",
                     hex::encode(txid)
                 );
-            } else {
+            } else if validators_for_consensus.len() < 3 {
                 tracing::warn!(
                     "⚡ Auto-finalizing TX {} - insufficient validators ({} < 3) for consensus",
                     hex::encode(txid),

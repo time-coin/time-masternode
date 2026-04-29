@@ -1544,15 +1544,16 @@ async fn handle_peer(
                                     check_message_size!(MAX_TX_SIZE, "Transaction");
                                     check_rate_limit!("tx");
 
-                                    // Skip during sync: UTXOs are not yet indexed, initiating
-                                    // TimeVote consensus from a syncing node wastes network resources
-                                    // and can confuse validators. The peer will re-broadcast once
-                                    // we are caught up.
-                                    if blockchain.is_syncing() {
+                                    // AV40: Structural check before dedup — block null TXs
+                                    // at the gate so we never gossip structurally invalid payloads.
+                                    if tx.inputs.is_empty() || tx.outputs.is_empty() {
                                         tracing::debug!(
-                                            "⏭️ Skipping TransactionBroadcast from {} — node is syncing",
+                                            "🗑️ Null TX from {} rejected (0 inputs or 0 outputs)",
                                             peer.addr
                                         );
+                                        if let Some(ref ai) = ai_system {
+                                            ai.attack_detector.record_null_tx_flood(&ip_str);
+                                        }
                                         continue;
                                     }
 
@@ -1567,7 +1568,32 @@ async fn handle_peer(
 
                                     tracing::info!("📥 Received new transaction {} from {}", hex::encode(txid), peer.addr);
 
-                                    // Process transaction (validates and initiates voting if we're a masternode)
+                                    // Avalanche-style gossip: relay immediately before local processing.
+                                    // Transactions spread even if this node temporarily rejects them
+                                    // (e.g., UTXO not yet indexed during sync catch-up). The
+                                    // seen_transactions bloom filter prevents relay loops.
+                                    match broadcast_tx.send(msg.clone()) {
+                                        Ok(receivers) => {
+                                            tracing::debug!("🔄 Gossiped transaction {} to {} peer(s)", hex::encode(txid), receivers.saturating_sub(1));
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!("Failed to gossip transaction: {}", e);
+                                        }
+                                    }
+
+                                    // Skip local mempool processing while syncing — UTXOs are not
+                                    // yet indexed so consensus would reject the TX anyway. We have
+                                    // already gossiped above, so the TX continues to spread.
+                                    if blockchain.is_syncing() {
+                                        tracing::debug!(
+                                            "⏭️ Skipping local TX processing from {} — node is syncing",
+                                            peer.addr
+                                        );
+                                        continue;
+                                    }
+
+                                    // Process transaction locally (validates, adds to mempool,
+                                    // initiates TimeVote if we are a masternode).
                                     match consensus.process_transaction(tx.clone(), None).await {
                                         Ok(_) => {
                                             tracing::debug!("✅ Transaction {} processed", hex::encode(txid));
@@ -1600,37 +1626,23 @@ async fn handle_peer(
                                                     Err(_) => tracing::warn!("📡 WS tx_notification (server.rs) failed: no receivers"),
                                                 }
                                             }
-
-                                            // Gossip to other peers
-                                            match broadcast_tx.send(msg.clone()) {
-                                                Ok(receivers) => {
-                                                    tracing::debug!("🔄 Gossiped transaction {} to {} peer(s)", hex::encode(txid), receivers.saturating_sub(1));
-                                                }
-                                                Err(e) => {
-                                                    tracing::debug!("Failed to gossip transaction: {}", e);
-                                                }
-                                            }
                                         }
                                         Err(e) => {
                                             let err_str = e.to_string();
                                             if err_str.contains("already in pool") || err_str.contains("Already") {
                                                 tracing::debug!("🔁 Transaction {} already in pool (from {})", hex::encode(txid), peer.addr);
                                             } else if err_str.contains("no inputs") || err_str.contains("no outputs") {
-                                                // AV40: null transaction (0 inputs / 0 outputs).
-                                                // Do NOT record a blacklist violation here — the peer may be
-                                                // an innocent relay that forwarded the TX before our structural
-                                                // check could stop it.  The AI sliding-window detector
-                                                // (record_null_tx_flood) only escalates after ≥3 such TXs
-                                                // within 60 s, which innocent relays never reach.
+                                                // Structural check above should have caught this —
+                                                // log for diagnostics but don't penalise the relayer.
                                                 tracing::debug!(
-                                                    "🗑️ Null TX {} from {} rejected ({})",
+                                                    "🗑️ Null TX {} from {} rejected locally ({})",
                                                     hex::encode(txid), peer.addr, err_str
                                                 );
                                                 if let Some(ref ai) = ai_system {
                                                     ai.attack_detector.record_null_tx_flood(&ip_str);
                                                 }
                                             } else {
-                                                tracing::warn!("❌ Transaction {} rejected: {}", hex::encode(txid), e);
+                                                tracing::warn!("❌ Transaction {} rejected locally: {}", hex::encode(txid), e);
 
                                                 // Phase 2.2: Record violation for invalid transaction
                                                 let mut blacklist_guard = blacklist.write().await;

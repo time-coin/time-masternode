@@ -448,6 +448,31 @@ impl TransactionPool {
             .collect()
     }
 
+    /// Check if any other pending transaction spends the same UTXOs as `inputs`.
+    /// `exclude_txid` is the current transaction — excluded so it doesn't match itself.
+    /// Returns `true` when a double-spend conflict exists, `false` when inputs are uncontested.
+    pub fn has_conflicting_transaction(
+        &self,
+        inputs: &[crate::types::TxInput],
+        exclude_txid: &Hash256,
+    ) -> bool {
+        if inputs.is_empty() {
+            return false;
+        }
+        let input_set: std::collections::HashSet<(Hash256, u32)> = inputs
+            .iter()
+            .map(|i| (i.previous_output.txid, i.previous_output.vout))
+            .collect();
+        self.pending.iter().any(|entry| {
+            if entry.key() == exclude_txid {
+                return false;
+            }
+            entry.value().tx.inputs.iter().any(|i| {
+                input_set.contains(&(i.previous_output.txid, i.previous_output.vout))
+            })
+        })
+    }
+
     /// Check if transaction is pending
     pub fn is_pending(&self, txid: &Hash256) -> bool {
         self.pending.contains_key(txid)
