@@ -254,6 +254,7 @@ impl RpcHandler {
             "masternodereginfo" => self.masternode_reg_info().await,
             "masternoderegstatus" => self.masternode_reg_status(&params_array).await,
             "clearstucktransactions" => self.clear_stuck_transactions().await,
+            "droptransaction" => self.drop_transaction(&params_array).await,
             "createpaymentrequest" => self.create_payment_request(&params_array).await,
             "paypaymentrequest" => self.pay_payment_request(&params_array).await,
             "sendpaymentrequest" => self.send_payment_request(&params_array).await,
@@ -5600,6 +5601,85 @@ impl RpcHandler {
             "message": format!(
                 "Cleared {} stuck transactions (skipped {}), restored {} inputs (value: {}), removed {} outputs (value: {})",
                 cleared_txids.len(), skipped_txids.len(), inputs_restored, total_input_value, outputs_removed, total_output_value
+            )
+        }))
+    }
+
+    /// Drop a specific pending transaction from the mempool and release its UTXO locks.
+    /// Only works on transactions that are still pending (not yet finalized).
+    /// For finalized transactions use clearstucktransactions instead.
+    /// Params: [txid]
+    async fn drop_transaction(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let txid_str = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Usage: droptransaction <txid>".to_string(),
+            })?;
+
+        let txid_bytes = hex::decode(txid_str).map_err(|_| RpcError {
+            code: -32602,
+            message: "Invalid txid: not valid hex".to_string(),
+        })?;
+        if txid_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -32602,
+                message: "Invalid txid: must be exactly 64 hex characters".to_string(),
+            });
+        }
+        let mut txid = [0u8; 32];
+        txid.copy_from_slice(&txid_bytes);
+
+        let tx = match self.consensus.tx_pool.get_transaction(&txid) {
+            Some(tx) => tx,
+            None => {
+                return Err(RpcError {
+                    code: -5,
+                    message: format!("Transaction {} not found in mempool", txid_str),
+                });
+            }
+        };
+
+        if self.consensus.tx_pool.is_finalized(&txid) {
+            return Err(RpcError {
+                code: -1,
+                message: "Transaction is already finalized — use clearstucktransactions to roll it back".to_string(),
+            });
+        }
+
+        // Unlock all input UTXOs that were locked by this pending tx
+        let mut unlocked = 0usize;
+        for input in &tx.inputs {
+            if self
+                .utxo_manager
+                .unlock_utxo(&input.previous_output, &txid)
+                .is_ok()
+            {
+                unlocked += 1;
+            }
+        }
+
+        // Remove from the pending pool and mark as rejected so it isn't re-accepted
+        self.consensus.tx_pool.reject_transaction(
+            txid,
+            "Manually dropped via droptransaction RPC".to_string(),
+        );
+
+        tracing::warn!(
+            "🗑️ Dropped pending transaction {} — released {} UTXO lock(s)",
+            txid_str,
+            unlocked
+        );
+
+        Ok(json!({
+            "txid": txid_str,
+            "dropped": true,
+            "inputs_unlocked": unlocked,
+            "message": format!(
+                "Dropped pending transaction {} and released {} UTXO lock(s). \
+                 You can now create a new transaction spending the same UTXOs.",
+                txid_str, unlocked
             )
         }))
     }

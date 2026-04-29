@@ -860,6 +860,13 @@ enum Commands {
     /// Clear stuck finalized transactions and revert their UTXO changes
     #[command(next_help_heading = "Utility")]
     ClearStuckTransactions,
+
+    /// Drop a pending (not yet finalized) transaction and release its UTXO locks
+    #[command(next_help_heading = "Utility")]
+    DropTransaction {
+        /// Transaction ID to drop (64 hex chars)
+        txid: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1414,6 +1421,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::UnlockOrphanedUTXOs => ("unlockorphanedutxos", json!([])),
         Commands::ForceUnlockAll => ("forceunlockall", json!([])),
         Commands::ClearStuckTransactions => ("clearstucktransactions", json!([])),
+        Commands::DropTransaction { txid } => ("droptransaction", json!([txid])),
         Commands::GetMempoolInfo => ("getmempoolinfo", json!([])),
         Commands::GetRawMempool { verbose } => ("getrawmempool", json!([verbose])),
         Commands::GetMempoolVerbose => ("getmempoolverbose", json!([])),
@@ -2221,6 +2229,23 @@ fn print_human_readable(
                         }
                     }
                 }
+            }
+        }
+        Commands::DropTransaction { .. } => {
+            let message = result
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Done");
+            let unlocked = result
+                .get("inputs_unlocked")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            println!("🗑️  {}", message);
+            if unlocked > 0 {
+                println!(
+                    "   {} UTXO lock(s) released — inputs are now spendable again.",
+                    unlocked
+                );
             }
         }
         Commands::MasternodeStatus => {
