@@ -506,6 +506,12 @@ impl NetworkClient {
                         if should_skip(mn_ip) {
                             continue;
                         }
+                        // First connection wins: if they already have an inbound connection
+                        // to us, skip the outbound dial. Both sides apply the same rule so
+                        // they agree on which connection is kept, stopping the collision loop.
+                        if peer_registry.is_connected(mn_ip) {
+                            continue;
+                        }
                         if peer_registry.is_incompatible(mn_ip).await {
                             continue;
                         }
@@ -786,7 +792,7 @@ impl ConnectionResources {
             }
 
             let connect_start = std::time::Instant::now();
-            let connection_was_live = match maintain_peer_connection(
+            let connect_duration: Option<std::time::Duration> = match maintain_peer_connection(
                 &ip,
                 res.port,
                 res.connection_manager.clone(),
@@ -829,18 +835,19 @@ impl ConnectionResources {
                         );
                         tracing::info!("{} Connection to {} ended gracefully", tag, ip);
                     }
-                    true
+                    Some(elapsed)
                 }
                 Err(e) => {
                     res.reconnection_ai
                         .record_connection_failure(&ip, is_masternode, &e);
                     tracing::debug!("{} Connection to {} failed: {}", tag, ip, e);
-                    false
+                    None
                 }
             };
 
             res.connection_manager.mark_disconnected(&ip);
 
+            let connection_was_live = connect_duration.is_some();
             // AV3/Coordinated disconnect: only count connections that were actually live
             // (Ok path), not failed attempts (Err path). During partition recovery a node
             // tries hundreds of masternodes in rapid succession; counting those failures
@@ -857,7 +864,7 @@ impl ConnectionResources {
             if is_masternode && !res.peer_registry.is_connected(&ip) {
                 if let Err(e) = res
                     .masternode_registry
-                    .mark_inactive_on_disconnect(&ip)
+                    .mark_inactive_on_disconnect_with_duration(&ip, connect_duration)
                     .await
                 {
                     tracing::debug!("Could not mark masternode {} as inactive: {:?}", ip, e);

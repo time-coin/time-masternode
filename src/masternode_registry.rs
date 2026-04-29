@@ -1598,6 +1598,14 @@ impl MasternodeRegistry {
     /// Mark a masternode as inactive when connection is lost
     /// This ensures disconnected nodes don't receive rewards
     pub async fn mark_inactive_on_disconnect(&self, address: &str) -> Result<(), RegistryError> {
+        self.mark_inactive_on_disconnect_with_duration(address, None).await
+    }
+
+    pub async fn mark_inactive_on_disconnect_with_duration(
+        &self,
+        address: &str,
+        connection_duration: Option<std::time::Duration>,
+    ) -> Result<(), RegistryError> {
         // SAFETY: Never remove or deactivate the local masternode on a peer
         // disconnect event. The local node is always running and its entry
         // must persist.
@@ -1725,9 +1733,16 @@ impl MasternodeRegistry {
             // masternodes.write() across an async boundary.
             drop(masternodes);
 
-            // Fire the PHASE3 priority-reconnect signal so the reconnect loop wakes
-            // immediately instead of waiting up to 30 s for the next PHASE3 tick.
-            self.priority_reconnect_notify.notify_one();
+            // Fire the PHASE3 priority-reconnect signal only for genuine disconnects
+            // (connections that stayed up ≥10s). Quick drops (<10s) are collision
+            // rejections or rate-limit kicks — firing priority_notify for these
+            // causes an immediate retry storm that repeats the collision.
+            let was_real_disconnect = connection_duration
+                .map(|d| d >= std::time::Duration::from_secs(10))
+                .unwrap_or(true); // no duration info → assume real disconnect
+            if was_real_disconnect {
+                self.priority_reconnect_notify.notify_one();
+            }
 
             if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
                 let _ = tx.send(
