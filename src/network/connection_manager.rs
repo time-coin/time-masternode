@@ -278,35 +278,47 @@ impl ConnectionManager {
             return false;
         }
 
+        let new_info = ConnectionInfo {
+            state: PeerConnectionState::Connected,
+            direction: ConnectionDirection::Inbound,
+            connected_at: Some(Instant::now()),
+            disconnected_at: None,
+            connection_count: 1,
+            last_message_at: Some(Instant::now()),
+            bytes_sent: 0,
+            bytes_received: 0,
+            messages_sent: 0,
+            messages_received: 0,
+            is_whitelisted,
+        };
+
         match self.connections.entry(peer_ip.to_string()) {
             Entry::Vacant(e) => {
-                e.insert(ConnectionInfo {
-                    state: PeerConnectionState::Connected,
-                    direction: ConnectionDirection::Inbound,
-                    connected_at: Some(Instant::now()),
-                    disconnected_at: None,
-                    connection_count: 1,
-                    last_message_at: Some(Instant::now()),
-                    bytes_sent: 0,
-                    bytes_received: 0,
-                    messages_sent: 0,
-                    messages_received: 0,
-                    is_whitelisted,
-                });
+                e.insert(new_info);
                 self.record_new_connection(peer_ip);
                 self.connected_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.inbound_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 true
             }
-            Entry::Occupied(e) => {
-                // Any existing state (Connecting/Connected/Reconnecting) means we
-                // already have or are establishing a connection — reject the duplicate.
-                tracing::debug!(
-                    "🔄 Rejecting inbound from {} — already {:?} (ConnectionManager)",
-                    peer_ip,
-                    e.get().state
-                );
-                false
+            Entry::Occupied(mut e) => {
+                if e.get().state == PeerConnectionState::Disconnected {
+                    // Previously connected peer reconnecting as inbound — allow it.
+                    // Disconnected state does not hold a slot in connected_count, so
+                    // we only increment the counters, not decrement first.
+                    e.insert(new_info);
+                    self.record_new_connection(peer_ip);
+                    self.connected_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.inbound_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    true
+                } else {
+                    // Connecting / Connected / Reconnecting — active session already exists.
+                    tracing::debug!(
+                        "🔄 Rejecting inbound from {} — already {:?} (ConnectionManager)",
+                        peer_ip,
+                        e.get().state
+                    );
+                    false
+                }
             }
         }
     }

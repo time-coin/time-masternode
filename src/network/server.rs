@@ -1215,20 +1215,10 @@ async fn handle_peer(
                                         );
                                         handshake_done = true;
 
-                                        // Atomically register inbound connection to prevent race conditions
-                                        // This ensures only ONE inbound connection succeeds if multiple arrive simultaneously
-                                        if !peer_registry.try_register_inbound(&ip_str) {
-                                            tracing::info!(
-                                                "🔄 Rejecting duplicate inbound from {} (already registered)",
-                                                peer.addr
-                                            );
-                                            break; // Close this new inbound connection
-                                        }
-
-                                        // Also mark in connection_manager for DoS protection tracking
-                                        connection_manager.mark_inbound(&ip_str);
-
-                                        // Register write channel in peer registry after successful handshake
+                                        // ConnectionManager is the single authority — accept_inbound()
+                                        // already ran at the top of handle_peer() and is the only
+                                        // gate needed.  register_peer() below wires the writer channel
+                                        // into PeerConnectionRegistry (the message router).
                                         tracing::info!("📝 Registering {} in PeerConnectionRegistry (peer.addr: {})", ip_str, peer.addr);
                                         peer_registry.register_peer(ip_str.clone(), writer_tx.clone()).await;
                                         tracing::debug!("✅ Successfully registered {} in registry", ip_str);
@@ -1322,8 +1312,27 @@ async fn handle_peer(
                                         let get_mn_msg = NetworkMessage::GetMasternodes;
                                         let _ = peer_registry.send_to_peer(&ip_str, get_mn_msg).await;
 
-                                        // Request full mempool state so we can resume
-                                        // processing any transactions the peer already has
+                                        // Push our local mempool to the new peer so they immediately
+                                        // learn about finalized + pending transactions without waiting
+                                        // for the 2-minute rebroadcast loop.  Finalized first (most
+                                        // important), then pending.  Cap at 100 each to prevent
+                                        // flooding a reconnecting peer on a large backlog.
+                                        {
+                                            let finalized = consensus.get_finalized_transactions_for_block();
+                                            for tx in finalized.into_iter().take(100) {
+                                                let txid = tx.txid();
+                                                let msg = NetworkMessage::TransactionFinalized { txid, tx };
+                                                let _ = peer_registry.send_to_peer(&ip_str, msg).await;
+                                            }
+                                            let pending = consensus.tx_pool.get_stale_pending(std::time::Duration::ZERO);
+                                            for (_txid, tx) in pending.into_iter().take(100) {
+                                                let msg = NetworkMessage::TransactionBroadcast(tx);
+                                                let _ = peer_registry.send_to_peer(&ip_str, msg).await;
+                                            }
+                                        }
+
+                                        // Also ask the peer for their mempool so we learn about any
+                                        // transactions they have that we don't.
                                         let mempool_req = NetworkMessage::MempoolSyncRequest;
                                         let _ = peer_registry.send_to_peer(&ip_str, mempool_req).await;
 
@@ -2126,6 +2135,29 @@ async fn handle_peer(
                                         Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("🔌 Disconnecting {} — {}", peer.addr, e); break; }
                                         _ => {}
                                     }
+                                }
+                                NetworkMessage::MempoolSyncRequest => {
+                                    // Peer is asking for our current pool contents.
+                                    // Push finalized transactions first (they are the most critical),
+                                    // then pending.  Rate-limited via the general bucket.
+                                    check_rate_limit!("general");
+                                    let finalized = consensus.get_finalized_transactions_for_block();
+                                    let count_f = finalized.len().min(100);
+                                    for tx in finalized.into_iter().take(100) {
+                                        let txid = tx.txid();
+                                        let msg = NetworkMessage::TransactionFinalized { txid, tx };
+                                        let _ = peer_registry.send_to_peer(&ip_str, msg).await;
+                                    }
+                                    let pending = consensus.tx_pool.get_stale_pending(std::time::Duration::ZERO);
+                                    let count_p = pending.len().min(100);
+                                    for (_txid, tx) in pending.into_iter().take(100) {
+                                        let msg = NetworkMessage::TransactionBroadcast(tx);
+                                        let _ = peer_registry.send_to_peer(&ip_str, msg).await;
+                                    }
+                                    tracing::debug!(
+                                        "📤 Sent mempool to {}: {} finalized + {} pending",
+                                        peer.addr, count_f, count_p
+                                    );
                                 }
                                 NetworkMessage::GetPeers => {
                                     check_rate_limit!("get_peers");
