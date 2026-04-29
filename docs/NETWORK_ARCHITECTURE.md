@@ -1,8 +1,42 @@
 # Network Architecture - TIME Coin Protocol v6.2
 
-**Document Version:** 1.4
-**Last Updated:** March 16, 2026
+**Document Version:** 1.5
+**Last Updated:** April 28, 2026
 **Status:** Production-Ready
+
+---
+
+## Recent Changes (April 28, 2026)
+
+### ConnectionManager as Single Authority for Inbound + Outbound
+
+`ConnectionManager` now tracks **all** connections regardless of direction. Previously only outbound connections were registered (via `mark_connecting` / `mark_connected`), so `is_connected()` returned `false` for inbound sessions. This caused PHASE3 in `client.rs` to see an inbound peer as "not connected" and dial it again, creating simultaneous-connection collisions.
+
+**New API:**
+```rust
+pub fn accept_inbound(&self, peer_ip: &str, is_whitelisted: bool) -> bool
+```
+- Called at the top of `server.rs::handle_peer()`, before any message work.
+- Atomically registers the inbound session; returns `false` (drop the connection) if the peer is already in any state (Connecting/Connected/Reconnecting) or inbound capacity is full.
+- Increments `inbound_count` and calls `record_new_connection()` on success.
+
+**PHASE3 change:** `client.rs` PHASE3 now checks `connection_manager.is_connected(mn_ip)` (both directions) instead of `peer_registry.is_connected(mn_ip)` (outbound-only). All connection-count and subnet-count (AV25) checks in `client.rs` were migrated to use only `ConnectionManager`.
+
+**Role separation:**
+- `ConnectionManager` — authoritative connection state (Disconnected / Connecting / Connected / Reconnecting), capacity enforcement, direction tracking.
+- `PeerConnectionRegistry` — writer-channel router (peer_ip → PeerWriterTx), broadcast/gossip delivery. No longer used as a connection state source.
+
+### Conflict-Only TimeVote Voting
+
+Transactions that have no competing spender in the mempool are auto-finalized immediately instead of waiting for 67% stake-weighted vote accumulation. Only genuine double-spend conflicts trigger a full TimeVote round. This eliminates the root cause of transactions sitting in the mempool for hours when connectivity is degraded and vote collection stalls.
+
+### Avalanche-Style Transaction Gossip
+
+`TransactionBroadcast` is now relayed to all peers **before** local `process_transaction()` is called. Nodes that are still syncing relay the transaction but skip local processing. This ensures a transaction propagates through the full network even if some intermediate nodes are in a state that would cause them to reject it locally.
+
+### Connection Collision Fix
+
+`priority_reconnect_notify` now fires only when a disconnected session lasted ≥ 10 seconds. Collision-dropped connections (very short lifetime) exit quietly without triggering an immediate re-dial, preventing the reconnect storm where both sides perpetually dropped and re-created the same collision.
 
 ---
 
@@ -72,13 +106,15 @@ Excess pings are now dropped silently (`check_rate_limit_soft!`) rather than rec
 
 **Methods:**
 ```rust
-pub fn is_connected(&self, peer_ip: &str) -> bool
-pub fn mark_connecting(&self, peer_ip: &str) -> bool
-pub fn mark_connected(&self, peer_ip: &str) -> bool
+pub fn is_connected(&self, peer_ip: &str) -> bool          // inbound OR outbound
+pub fn accept_inbound(&self, peer_ip: &str, is_whitelisted: bool) -> bool  // register inbound; drop on conflict
+pub fn mark_connecting(&self, peer_ip: &str) -> bool       // outbound dial initiated
+pub fn mark_connected(&self, peer_ip: &str) -> bool        // outbound handshake complete
 pub fn is_reconnecting(&self, peer_ip: &str) -> bool
 pub fn mark_reconnecting(&self, peer_ip: &str, retry_delay, failures)
 pub fn clear_reconnecting(&self, peer_ip: &str)
 pub fn connected_count(&self) -> usize
+pub fn inbound_count(&self) -> usize
 pub fn get_connected_peers(&self) -> Vec<String>
 ```
 

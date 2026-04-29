@@ -2,7 +2,7 @@
 
 This document outlines the development roadmap for TimeCoin.
 
-## Current Version: v1.4.34
+## Current Version: v1.5.0
 
 ---
 
@@ -33,6 +33,15 @@ This document outlines the development roadmap for TimeCoin.
 - Post-handshake-only connected peer tracking
 - IP blacklisting, rate limiting, dedup filter
 - TLS support (optional, wired but not enforced)
+- **ConnectionManager as single authority** — inbound connections registered via `accept_inbound()`, PHASE3 uses CM for both directions, duplicate inbounds dropped atomically
+- **Conflict-only TimeVote** — non-contested transactions auto-finalize immediately; full 67% vote only for genuine double-spends
+- **Avalanche-style gossip** — `TransactionBroadcast` relayed before local processing; syncing nodes relay but skip local validation
+- **UTXO state sync fix** — mid-block reconciliation now includes `Locked` and `SpentPending` UTXOs, not just `Unspent`
+- **Connection collision fix** — `priority_reconnect_notify` fires only for sessions ≥ 10s, preventing reconnect storms on collision drops
+- **Finalized TX persistence** — finalized pool survives daemon restarts via sled
+- **Approved/pending TX eviction protection** — transactions at approval status never age-evicted from mempool
+- **Whitelisted peers exempt from normal bans** — violation accumulation skipped for whitelisted masternodes
+- **`rebroadcasttransaction` RPC/CLI** — manually rebroadcast a stuck pending/finalized transaction
 
 ### AI Modules (7 active)
 - **Adaptive reconnection** — learns optimal retry timing from historical patterns
@@ -137,4 +146,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get involved.
 
 ---
 
-*Last updated: March 2026*
+*Last updated: April 28, 2026*

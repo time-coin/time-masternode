@@ -1,7 +1,61 @@
 # TimeCoin Architecture Overview
 
-**Last Updated:** 2026-04-26
-**Version:** 1.5.0 (Spent UTXO tombstone, peer finalization UTXO fix, wallet-gui consolidation race condition)
+**Last Updated:** 2026-04-28
+**Version:** 1.5.0 (Connection unification, conflict-only voting, Avalanche gossip, UTXO state sync)
+
+---
+
+## Recent Updates (v1.5.x - April 28, 2026)
+
+### ConnectionManager as Single Authority
+
+All connection state — inbound and outbound — is now exclusively tracked in `ConnectionManager`. Previously, inbound connections were registered only in `PeerConnectionRegistry`'s writer-channel map, so `ConnectionManager.is_connected()` returned `false` for inbound peers. PHASE3 in `client.rs` would then see the peer as "not connected" and dial it again, creating a collision storm.
+
+**Changes:**
+- `accept_inbound(peer_ip, is_whitelisted) -> bool` added to `ConnectionManager`: atomically registers an inbound connection, rejects any existing state (Connecting/Connected/Reconnecting), and increments `inbound_count`. Returns `false` (drop the connection) if the peer already exists in any state or inbound capacity is at limit.
+- `server.rs` calls `connection_manager.accept_inbound()` at the top of `handle_peer()`, before any message work. Duplicate inbounds are silently dropped.
+- PHASE3 in `client.rs` checks `connection_manager.is_connected()` (covers both directions) instead of `peer_registry.is_connected()` (outbound-only).
+- All connection-count and AV25 subnet checks in `client.rs` use only `ConnectionManager`.
+- `PeerConnectionRegistry` remains the writer-channel router (peer_ip → PeerWriterTx) but is no longer an authoritative connection state source.
+
+### Conflict-Only TimeVote Voting
+
+The consensus engine no longer runs 67% stake-weighted TimeVote for every transaction. It auto-finalizes immediately unless another mempool transaction is spending the same UTXOs.
+
+**Before:** Every transaction required vote accumulation — could take seconds or stall entirely on a degraded network, causing transactions to sit in the mempool indefinitely.
+
+**After:** Only genuine double-spend conflicts trigger a full TimeVote round. Transactions with no competing spender are finalized as soon as they pass basic validation.
+
+**Implementation:** `TransactionPool::has_conflicting_transaction(inputs, exclude_txid) -> bool` was added. `ConsensusEngine::submit_transaction()` calls it before initiating TimeVote; with no conflict (or <3 active validators, or dev mode) the transaction auto-finalizes immediately.
+
+### Avalanche-Style Transaction Gossip
+
+Transaction gossip now fires **before** local processing. Previously, `TransactionBroadcast` was relayed only inside the `Ok(_)` arm of `process_transaction()`. If a node rejected a transaction locally (e.g., UTXO not yet synced), propagation stopped at that node — causing partition-dependent tx visibility.
+
+**Fix in `server.rs`:**
+- Structural validity check (0 inputs / 0 outputs) gates gossip.
+- `broadcast_tx.send()` fires before `process_transaction()`.
+- Nodes that are syncing still relay but skip local processing, so transactions propagate through the entire network even during sync.
+
+### UTXO State Sync Fix (Locked/SpentPending)
+
+Mid-block UTXO reconciliation (300s hash comparison → divergence → full set diff → state sync) was querying only `Unspent` UTXOs when requesting state updates from peers. UTXOs in `Locked` or `SpentPending` state — representing transactions in flight when connectivity broke — were invisible and never recovered.
+
+**Fix in `message_handler.rs`:** The post-reconciliation UTXO filter now includes `Unspent | Locked { .. } | SpentPending { .. }`, ensuring all active non-archived UTXOs are included in state sync requests.
+
+### Connection Collision Fix
+
+When two nodes dial each other simultaneously, one connection must be dropped. `priority_reconnect_notify` previously fired unconditionally on any disconnect, causing reconnect storms where both sides immediately re-dialed the dropped collision connection.
+
+**Fix in `masternode_registry.rs`:** `priority_reconnect_notify` now fires only when the disconnected session lasted ≥ 10 seconds (genuine unintended disconnect). Collision-dropped connections (very short lifetime) exit quietly without triggering a re-dial.
+
+### Transaction Persistence and Reliability
+
+- **Finalized TX persistence** (`d2c02b8`): finalized transactions are written to sled and restored on startup so they survive restarts and can be included in the next block.
+- **Pending TX silent expiry fix** (`eefd54d`): transactions with `approved` or `pending` status are never evicted due to age — only removed via block inclusion.
+- **Approved/pending eviction protection** (`e85605f`): fee-based pool eviction also skips transactions that have reached approval status.
+- **Whitelisted peers never banned** (`cf32e44`): normal violation accumulation is now skipped for whitelisted masternodes.
+- **`rebroadcasttransaction <txid>` RPC/CLI** (`9f99a5a`): looks up a pending or finalized transaction and rebroadcasts it to all peers — useful for rescuing transactions stuck due to missed propagation.
 
 ---
 
