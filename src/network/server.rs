@@ -636,7 +636,7 @@ impl NetworkServer {
             }
 
             tracing::debug!(
-                "✅ Accepting inbound connection from {} (total: {}, inbound: {}, whitelisted: {})",
+                "✅ Spawning inbound handler for {} (total: {}, inbound: {}, whitelisted: {})",
                 ip,
                 self.connection_manager.connected_count(),
                 self.connection_manager.inbound_count(),
@@ -1010,6 +1010,19 @@ async fn handle_peer(
             }
             tracing::debug!("📝 Writer task exiting for {}", peer_addr2);
         });
+    }
+
+    // ConnectionManager is the single authority for both inbound and outbound state.
+    // Reject here — after TLS succeeds but before any message work — so that:
+    //   (a) TLS failures / SNI rejections never consume a CM slot
+    //   (b) duplicate connections are dropped before the writer channel is registered
+    //   (c) can_accept_inbound (capacity only) in the accept loop stays a fast pre-check
+    if !connection_manager.accept_inbound(&ip_str, is_whitelisted) {
+        tracing::debug!(
+            "🔄 Dropping duplicate inbound from {} — ConnectionManager already has a connection",
+            peer.addr
+        );
+        return Ok(());
     }
 
     let mut handshake_done = false;

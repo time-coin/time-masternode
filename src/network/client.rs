@@ -164,8 +164,9 @@ impl NetworkClient {
                 if blacklisted_peers.contains(ip) {
                     return true;
                 }
-                // Skip if already connected, connecting, or reconnecting
-                if connection_manager.is_active(ip) || peer_registry.is_connected(ip) {
+                // ConnectionManager is authoritative for both directions — is_active
+                // covers Connecting/Connected/Reconnecting for inbound and outbound.
+                if connection_manager.is_active(ip) {
                     return true;
                 }
                 false
@@ -369,7 +370,7 @@ impl NetworkClient {
             let mut masternode_connections = 0;
             for ip in targets.iter().take(reserved_masternode_slots) {
                 if should_skip(ip) {
-                    if connection_manager.is_connected(ip) || peer_registry.is_connected(ip) {
+                    if connection_manager.is_connected(ip) {
                         masternode_connections += 1;
                     }
                     continue;
@@ -488,8 +489,7 @@ impl NetworkClient {
                         std::collections::HashMap::new();
                     for mn_info in &all_masternodes {
                         let addr = &mn_info.masternode.address;
-                        if connection_manager.is_connected(addr) || peer_registry.is_connected(addr)
-                        {
+                        if connection_manager.is_connected(addr) {
                             let ip = addr.split(':').next().unwrap_or(addr);
                             let parts: Vec<&str> = ip.split('.').collect();
                             let subnet = if parts.len() >= 3 {
@@ -506,10 +506,10 @@ impl NetworkClient {
                         if should_skip(mn_ip) {
                             continue;
                         }
-                        // First connection wins: if they already have an inbound connection
-                        // to us, skip the outbound dial. Both sides apply the same rule so
-                        // they agree on which connection is kept, stopping the collision loop.
-                        if peer_registry.is_connected(mn_ip) {
+                        // First connection wins: skip outbound dial if any connection already
+                        // exists. ConnectionManager tracks both inbound and outbound so this
+                        // correctly catches the case where the peer connected to us first.
+                        if connection_manager.is_connected(mn_ip) {
                             continue;
                         }
                         if peer_registry.is_incompatible(mn_ip).await {

@@ -260,6 +260,57 @@ impl ConnectionManager {
                 .unwrap_or(false)
     }
 
+    /// Accept an inbound connection — the single authority for inbound registration.
+    ///
+    /// Atomically registers the peer as Connected/Inbound and returns `true`.
+    /// Returns `false` (caller must close the socket immediately) if:
+    ///   - The peer already has any connection (inbound or outbound) in any state.
+    ///   - The connection would exceed capacity limits (unless whitelisted).
+    ///
+    /// This is the counterpart to `mark_connecting` for outbound. All inbound
+    /// connections MUST go through this method so ConnectionManager is the
+    /// single source of truth for both directions.
+    pub fn accept_inbound(&self, peer_ip: &str, is_whitelisted: bool) -> bool {
+        use dashmap::mapref::entry::Entry;
+
+        // Check capacity before touching the map (fast path for overload)
+        if let Err(_e) = self.can_accept_inbound(peer_ip, is_whitelisted) {
+            return false;
+        }
+
+        match self.connections.entry(peer_ip.to_string()) {
+            Entry::Vacant(e) => {
+                e.insert(ConnectionInfo {
+                    state: PeerConnectionState::Connected,
+                    direction: ConnectionDirection::Inbound,
+                    connected_at: Some(Instant::now()),
+                    disconnected_at: None,
+                    connection_count: 1,
+                    last_message_at: Some(Instant::now()),
+                    bytes_sent: 0,
+                    bytes_received: 0,
+                    messages_sent: 0,
+                    messages_received: 0,
+                    is_whitelisted,
+                });
+                self.record_new_connection(peer_ip);
+                self.connected_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.inbound_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                true
+            }
+            Entry::Occupied(e) => {
+                // Any existing state (Connecting/Connected/Reconnecting) means we
+                // already have or are establishing a connection — reject the duplicate.
+                tracing::debug!(
+                    "🔄 Rejecting inbound from {} — already {:?} (ConnectionManager)",
+                    peer_ip,
+                    e.get().state
+                );
+                false
+            }
+        }
+    }
+
     /// Mark a peer as connected (inbound connection)
     pub fn mark_inbound(&self, peer_ip: &str) -> bool {
         self.record_new_connection(peer_ip);
@@ -290,7 +341,7 @@ impl ConnectionManager {
                 bytes_received: 0,
                 messages_sent: 0,
                 messages_received: 0,
-                is_whitelisted: false, // Will be updated if peer is whitelisted
+                is_whitelisted: false,
             };
             self.connections.insert(peer_ip.to_string(), info);
             self.connected_count
