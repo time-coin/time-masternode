@@ -2399,8 +2399,21 @@ impl RpcHandler {
             }
 
             if sent > 0 || received > 0 {
-                let category = if sent > 0 { "send" } else { "receive" };
-                let net_amount = if category == "send" {
+                let outputs_all_to_self = received > 0
+                    && tx.outputs.iter().all(|o| {
+                        let addr = String::from_utf8_lossy(&o.script_pubkey).to_string();
+                        addr_set.contains(&addr)
+                    });
+                let category = if sent > 0 && outputs_all_to_self {
+                    "consolidate"
+                } else if sent > 0 {
+                    "send"
+                } else {
+                    "receive"
+                };
+                let net_amount = if category == "consolidate" {
+                    received as f64 / 100_000_000.0
+                } else if category == "send" {
                     -((sent.saturating_sub(received)) as f64 / 100_000_000.0)
                 } else {
                     received as f64 / 100_000_000.0
@@ -2491,8 +2504,21 @@ impl RpcHandler {
             }
 
             if sent > 0 || received > 0 {
-                let category = if sent > 0 { "send" } else { "receive" };
-                let net_amount = if category == "send" {
+                let outputs_all_to_self = received > 0
+                    && tx.outputs.iter().all(|o| {
+                        let addr = String::from_utf8_lossy(&o.script_pubkey).to_string();
+                        addr_set.contains(&addr)
+                    });
+                let category = if sent > 0 && outputs_all_to_self {
+                    "consolidate"
+                } else if sent > 0 {
+                    "send"
+                } else {
+                    "receive"
+                };
+                let net_amount = if category == "consolidate" {
+                    received as f64 / 100_000_000.0
+                } else if category == "send" {
                     -((sent.saturating_sub(received)) as f64 / 100_000_000.0)
                 } else {
                     received as f64 / 100_000_000.0
@@ -4987,6 +5013,88 @@ impl RpcHandler {
                 });
             }
         };
+
+        // Step 1.5: Re-apply finalized-but-unarchived transactions.
+        // reindex_utxos wipes everything and only restores UTXOs from blocks.
+        // Transactions finalized by TimeVote but not yet in a block have their
+        // output UTXOs added to the confirmed set at finalization time (in consensus.rs).
+        // We must restore those outputs here and re-tombstone their inputs so the
+        // UTXO set reflects the true post-finalization state.
+        {
+            let utxo_mgr = &self.consensus.utxo_manager;
+            let finalized_txs = self.consensus.tx_pool.get_finalized_transactions();
+
+            if !finalized_txs.is_empty() {
+                tracing::info!(
+                    "🔄 Re-applying {} finalized-but-unarchived transaction(s) after reindex",
+                    finalized_txs.len()
+                );
+
+                // Pass 1: add output UTXOs for all finalized transactions.
+                // Done before tombstoning inputs so chains within the finalized pool
+                // (tx A produces an output that tx B consumes) are handled correctly.
+                for tx in &finalized_txs {
+                    let txid = tx.txid();
+                    for (idx, output) in tx.outputs.iter().enumerate() {
+                        let outpoint = crate::types::OutPoint {
+                            txid,
+                            vout: idx as u32,
+                        };
+                        let address =
+                            String::from_utf8_lossy(&output.script_pubkey).to_string();
+                        let utxo = crate::types::UTXO {
+                            outpoint: outpoint.clone(),
+                            value: output.value,
+                            script_pubkey: output.script_pubkey.clone(),
+                            address,
+                            masternode_key: None,
+                        };
+                        if let Err(e) = utxo_mgr.add_utxo(utxo).await {
+                            tracing::debug!(
+                                "Skipped re-adding finalized UTXO {}:{}: {:?}",
+                                hex::encode(txid),
+                                idx,
+                                e
+                            );
+                        }
+                    }
+                }
+
+                // Pass 2: tombstone all inputs of finalized transactions so they
+                // are removed from the live UTXO set and sled.
+                for tx in &finalized_txs {
+                    let txid = tx.txid();
+                    for input in &tx.inputs {
+                        utxo_mgr
+                            .mark_timevote_finalized(&input.previous_output, txid)
+                            .await;
+                    }
+                }
+
+                tracing::info!("✅ Finalized transactions re-applied after reindex");
+            }
+
+            // Re-lock inputs of pending (not yet finalized) transactions so they
+            // don't appear as double-spendable while the node is running.
+            let pending_txs = self.consensus.tx_pool.get_pending_transactions();
+            if !pending_txs.is_empty() {
+                let mut relocked = 0usize;
+                for tx in &pending_txs {
+                    let txid = tx.txid();
+                    for input in &tx.inputs {
+                        if utxo_mgr.lock_utxo(&input.previous_output, txid).is_ok() {
+                            relocked += 1;
+                        }
+                    }
+                }
+                if relocked > 0 {
+                    tracing::info!(
+                        "🔒 Re-locked {} pending transaction input(s) after reindex",
+                        relocked
+                    );
+                }
+            }
+        }
 
         // Step 2: Rebuild transaction index
         let tx_indexed = match blockchain.build_tx_index().await {
