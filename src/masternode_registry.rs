@@ -1598,7 +1598,8 @@ impl MasternodeRegistry {
     /// Mark a masternode as inactive when connection is lost
     /// This ensures disconnected nodes don't receive rewards
     pub async fn mark_inactive_on_disconnect(&self, address: &str) -> Result<(), RegistryError> {
-        self.mark_inactive_on_disconnect_with_duration(address, None).await
+        self.mark_inactive_on_disconnect_with_duration(address, None)
+            .await
     }
 
     pub async fn mark_inactive_on_disconnect_with_duration(

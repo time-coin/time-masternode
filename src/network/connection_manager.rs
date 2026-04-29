@@ -296,8 +296,10 @@ impl ConnectionManager {
             Entry::Vacant(e) => {
                 e.insert(new_info);
                 self.record_new_connection(peer_ip);
-                self.connected_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.inbound_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.connected_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.inbound_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 true
             }
             Entry::Occupied(mut e) => {
@@ -307,8 +309,10 @@ impl ConnectionManager {
                     // we only increment the counters, not decrement first.
                     e.insert(new_info);
                     self.record_new_connection(peer_ip);
-                    self.connected_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    self.inbound_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.connected_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.inbound_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     true
                 } else {
                     // Connecting / Connected / Reconnecting — active session already exists.

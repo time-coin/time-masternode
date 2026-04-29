@@ -240,7 +240,17 @@ impl UTXOStateManager {
             count
         );
 
+        let mut tombstone_cleaned = 0usize;
         for utxo in utxos {
+            // If this outpoint has a spent tombstone, the sled removal may not have
+            // persisted (e.g. the process crashed between mark_timevote_finalized's
+            // sled removal and tombstone write).  Remove it now and skip — letting it
+            // enter the address index as Unspent would inflate the wallet balance.
+            if self.spent_tombstones.contains(&utxo.outpoint) {
+                let _ = self.storage.remove_utxo(&utxo.outpoint).await;
+                tombstone_cleaned += 1;
+                continue;
+            }
             // Only initialize if not already in state map
             if !self.utxo_states.contains_key(&utxo.outpoint) {
                 self.utxo_states
@@ -251,6 +261,12 @@ impl UTXOStateManager {
                 .entry(utxo.address.clone())
                 .or_default()
                 .insert(utxo.outpoint);
+        }
+        if tombstone_cleaned > 0 {
+            tracing::warn!(
+                "🪦 Removed {} tombstoned UTXO(s) from sled during initialization (stale from prior crash)",
+                tombstone_cleaned
+            );
         }
 
         tracing::info!(

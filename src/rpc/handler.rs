@@ -777,7 +777,12 @@ impl RpcHandler {
                 }
                 // 2. Live UTXO manager — covers unarchived (pending/finalized) inputs
                 if !found {
-                    if let Ok(utxo) = self.consensus.utxo_manager.get_utxo(&input.previous_output).await {
+                    if let Ok(utxo) = self
+                        .consensus
+                        .utxo_manager
+                        .get_utxo(&input.previous_output)
+                        .await
+                    {
                         input_sum += utxo.value;
                         if local_address.as_deref() == Some(utxo.address.as_str()) {
                             wallet_input += utxo.value;

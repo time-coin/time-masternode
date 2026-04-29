@@ -467,9 +467,12 @@ impl TransactionPool {
             if entry.key() == exclude_txid {
                 return false;
             }
-            entry.value().tx.inputs.iter().any(|i| {
-                input_set.contains(&(i.previous_output.txid, i.previous_output.vout))
-            })
+            entry
+                .value()
+                .tx
+                .inputs
+                .iter()
+                .any(|i| input_set.contains(&(i.previous_output.txid, i.previous_output.vout)))
         })
     }
 
