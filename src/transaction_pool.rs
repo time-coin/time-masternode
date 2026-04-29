@@ -435,6 +435,19 @@ impl TransactionPool {
         evicted
     }
 
+    /// Return pending transactions older than min_age without removing them.
+    /// Used by the re-broadcast loop to relay transactions that are stuck
+    /// in pending state because TimeVote couldn't reach quorum (e.g. during
+    /// a connectivity incident). Returns (txid, tx) pairs.
+    pub fn get_stale_pending(&self, min_age: std::time::Duration) -> Vec<(Hash256, Transaction)> {
+        let now = Instant::now();
+        self.pending
+            .iter()
+            .filter(|e| now.duration_since(e.value().added_at) > min_age)
+            .map(|e| (*e.key(), e.value().tx.clone()))
+            .collect()
+    }
+
     /// Check if transaction is pending
     pub fn is_pending(&self, txid: &Hash256) -> bool {
         self.pending.contains_key(txid)

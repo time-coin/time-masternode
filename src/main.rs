@@ -4789,11 +4789,13 @@ async fn main() {
                 tracing::info!("🧹 Cleaned {} expired UTXO locks", cleaned_locks);
             }
 
-            // Clean up stale pending transactions (older than 5 minutes)
-            // These are transactions that never reached TimeVote consensus
+            // Clean up stale pending transactions (older than 30 minutes).
+            // Must be longer than BLOCK_TIME_SECONDS (600s) to survive a connectivity
+            // incident lasting one block slot. 1800s (3 blocks) gives enough margin
+            // that transient partitions don't silently discard user transactions.
             let stale_txs = cleanup_consensus
                 .tx_pool
-                .cleanup_stale_pending(std::time::Duration::from_secs(300));
+                .cleanup_stale_pending(std::time::Duration::from_secs(1800));
             if !stale_txs.is_empty() {
                 // Revert UTXO states for evicted transactions: SpentPending/Locked → Unspent
                 for tx in &stale_txs {
@@ -4851,17 +4853,40 @@ async fn main() {
                     break;
                 }
                 _ = interval.tick() => {
-                    let stale = rebroadcast_consensus
+                    let stale_finalized = rebroadcast_consensus
                         .get_stale_finalized(std::time::Duration::from_secs(60));
-                    if stale.is_empty() {
+                    let stale_pending = rebroadcast_consensus
+                        .tx_pool
+                        .get_stale_pending(std::time::Duration::from_secs(60));
+
+                    if stale_finalized.is_empty() && stale_pending.is_empty() {
                         continue;
                     }
                     let peer_count = rebroadcast_peers.connected_count();
                     if peer_count == 0 {
                         tracing::warn!(
-                            "📡 {} orphaned finalized TX(s) but no peers to re-broadcast to",
-                            stale.len()
+                            "📡 {} orphaned finalized + {} orphaned pending TX(s) but no peers to re-broadcast to",
+                            stale_finalized.len(), stale_pending.len()
                         );
+                        continue;
+                    }
+
+                    // Re-broadcast pending transactions that are stuck waiting for TimeVote.
+                    // These are transactions that peers may have missed (e.g. during a partition).
+                    if !stale_pending.is_empty() {
+                        tracing::info!(
+                            "📡 Re-broadcasting {} orphaned pending TX(s) to {} peer(s)",
+                            stale_pending.len(),
+                            peer_count
+                        );
+                        for (_txid, tx) in stale_pending {
+                            let msg = crate::network::message::NetworkMessage::TransactionBroadcast(tx);
+                            rebroadcast_peers.broadcast(msg).await;
+                        }
+                    }
+
+                    let stale = stale_finalized;
+                    if stale.is_empty() {
                         continue;
                     }
 
