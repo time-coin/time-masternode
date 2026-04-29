@@ -749,10 +749,15 @@ impl RpcHandler {
                 }
             }
 
-            // Try to calculate fee from input UTXOs
+            // Try to calculate fee from input UTXOs.
+            // Check tx_index (archived) first, then fall back to the live UTXO manager
+            // for inputs that haven't been archived in a block yet.  Without the fallback,
+            // pending transactions always show fee = 0 because their inputs are unarchived.
             let mut input_sum: u64 = 0;
-            if let Some(ref txi) = self.blockchain.tx_index {
-                for input in &tx.inputs {
+            for input in &tx.inputs {
+                let mut found = false;
+                // 1. tx_index — fastest, covers archived inputs
+                if let Some(ref txi) = self.blockchain.tx_index {
                     if let Some(src_loc) = txi.get_location(&input.previous_output.txid) {
                         if let Ok(src_block) = self.blockchain.get_block(src_loc.block_height) {
                             if let Some(src_tx) = src_block.transactions.get(src_loc.tx_index) {
@@ -764,18 +769,24 @@ impl RpcHandler {
                                     if local_address.as_deref() == Some(src_addr.as_ref()) {
                                         wallet_input += src_out.value;
                                     }
+                                    found = true;
                                 }
                             }
                         }
                     }
                 }
+                // 2. Live UTXO manager — covers unarchived (pending/finalized) inputs
+                if !found {
+                    if let Ok(utxo) = self.consensus.utxo_manager.get_utxo(&input.previous_output).await {
+                        input_sum += utxo.value;
+                        if local_address.as_deref() == Some(utxo.address.as_str()) {
+                            wallet_input += utxo.value;
+                        }
+                    }
+                }
             }
 
-            let fee = if input_sum > 0 {
-                input_sum.saturating_sub(output_sum)
-            } else {
-                0
-            };
+            let fee = input_sum.saturating_sub(output_sum);
 
             let net_amount = if wallet_input > 0 {
                 (wallet_output as i64) - (wallet_input as i64)
