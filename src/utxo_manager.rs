@@ -129,6 +129,12 @@ impl UTXOStateManager {
         Ok(())
     }
 
+    /// Returns true if this outpoint has a spent tombstone — i.e. it was finalized by
+    /// TimeVote but may not yet be archived in a block.
+    pub fn is_tombstoned(&self, outpoint: &OutPoint) -> bool {
+        self.spent_tombstones.contains(outpoint)
+    }
+
     /// Record an outpoint as permanently spent.  Writes to both the in-memory tombstone
     /// set and the sled tree so the guard survives node restarts.
     fn record_spent(&self, outpoint: &OutPoint) {

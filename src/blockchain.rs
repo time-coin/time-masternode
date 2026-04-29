@@ -11321,8 +11321,15 @@ impl Blockchain {
                         vout: vout as u32,
                     };
 
-                    // Legitimately spent — skip.
+                    // Legitimately spent (archived) — skip.
                     if spent.contains(&outpoint) {
+                        continue;
+                    }
+
+                    // Finalized by TimeVote but not yet archived in a block — the spending
+                    // TX is still in the finalized pool.  The tombstone means the UTXO was
+                    // correctly removed from the live set; do NOT re-add it.
+                    if self.utxo_manager.is_tombstoned(&outpoint) {
                         continue;
                     }
 
