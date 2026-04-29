@@ -5458,26 +5458,35 @@ impl MessageHandler {
             );
         }
 
-        // After UTXO set reconciliation, also sync states for our currently-Unspent
-        // UTXOs.  The UTXO diff only detects existence changes; two nodes can agree on
-        // the exact same UTXO set while one thinks a UTXO is Unspent and the other has
-        // it as SpentFinalized — causing balance discrepancies.  Querying the peer for
-        // those states lets us advance any stale Unspent entries to their true state.
-        let unspent_outpoints: Vec<crate::types::OutPoint> = utxo_mgr
+        // After UTXO set reconciliation, also sync states for UTXOs in any
+        // intermediate state. The UTXO diff only detects existence changes; two nodes
+        // can agree on the exact same UTXO set while disagreeing on state:
+        //   - Unspent on us vs SpentFinalized on peer: balance discrepancy
+        //   - Locked on us vs SpentFinalized on peer: TX stuck in pending forever
+        //   - SpentPending on us vs SpentFinalized on peer: stale vote state
+        // Querying the peer for all non-Archived states lets us advance stale entries.
+        let in_flight_outpoints: Vec<crate::types::OutPoint> = utxo_mgr
             .utxo_states
             .iter()
-            .filter(|e| matches!(e.value(), crate::types::UTXOState::Unspent))
+            .filter(|e| {
+                matches!(
+                    e.value(),
+                    crate::types::UTXOState::Unspent
+                        | crate::types::UTXOState::Locked { .. }
+                        | crate::types::UTXOState::SpentPending { .. }
+                )
+            })
             .map(|e| e.key().clone())
             .collect();
 
-        if !unspent_outpoints.is_empty() {
+        if !in_flight_outpoints.is_empty() {
             debug!(
-                "🔍 [{}] Querying {} Unspent UTXO states from {} for cross-node sync",
+                "🔍 [{}] Querying {} in-flight UTXO states from {} for cross-node sync",
                 self.direction,
-                unspent_outpoints.len(),
+                in_flight_outpoints.len(),
                 self.peer_ip
             );
-            return Ok(Some(NetworkMessage::UTXOStateQuery(unspent_outpoints)));
+            return Ok(Some(NetworkMessage::UTXOStateQuery(in_flight_outpoints)));
         }
 
         Ok(None)
