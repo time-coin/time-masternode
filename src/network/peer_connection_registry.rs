@@ -112,6 +112,7 @@ pub struct PeerConnectionRegistry {
     // Prevents the minority-fork trap where majority-chain peers disconnect immediately
     // after detecting the fork — erasing their evidence before compare_chain_with_peers()
     // can accumulate the MIN_PEERS_FOR_FORK_SWITCH quorum.
+    #[allow(clippy::type_complexity)]
     recent_chain_tip_cache: Arc<RwLock<HashMap<String, (u64, [u8; 32], std::time::Instant)>>>,
 }
 
@@ -1213,7 +1214,7 @@ impl PeerConnectionRegistry {
             .iter()
             .filter(|(_, (_, _, t))| {
                 now.checked_duration_since(*t)
-                    .map_or(false, |age| age.as_secs() <= max_age_secs)
+                    .is_some_and(|age| age.as_secs() <= max_age_secs)
             })
             .map(|(ip, (h, hash, _))| (ip.clone(), *h, *hash))
             .collect()

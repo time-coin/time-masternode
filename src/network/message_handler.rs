@@ -80,6 +80,48 @@ fn utxo_divergence_rounds() -> &'static std::sync::atomic::AtomicU32 {
     INSTANCE.get_or_init(|| std::sync::atomic::AtomicU32::new(0))
 }
 
+/// Per-peer accumulator for in-progress UTXOSetChunk transfers (from GetUTXOSet).
+fn utxo_set_chunk_buf() -> &'static dashmap::DashMap<String, Vec<crate::types::UTXO>> {
+    static INSTANCE: std::sync::OnceLock<dashmap::DashMap<String, Vec<crate::types::UTXO>>> =
+        std::sync::OnceLock::new();
+    INSTANCE.get_or_init(dashmap::DashMap::new)
+}
+
+/// Per-peer accumulator for in-progress UtxoReconciliationChunk transfers.
+/// Value is (at_height, accumulated UTXOs).
+fn utxo_reconcil_chunk_buf() -> &'static dashmap::DashMap<String, (u64, Vec<crate::types::UTXO>)> {
+    static INSTANCE: std::sync::OnceLock<dashmap::DashMap<String, (u64, Vec<crate::types::UTXO>)>> =
+        std::sync::OnceLock::new();
+    INSTANCE.get_or_init(dashmap::DashMap::new)
+}
+
+/// Split a UTXO list into chunks that each serialise below 7 MiB.
+/// Each UTXO is serialised with bincode to get an accurate byte count before
+/// packing it into the current chunk.
+fn split_utxos_into_chunks(utxos: Vec<crate::types::UTXO>) -> Vec<Vec<crate::types::UTXO>> {
+    const MAX_CHUNK_BYTES: usize = 7 * 1024 * 1024;
+    let mut chunks: Vec<Vec<crate::types::UTXO>> = Vec::new();
+    let mut current: Vec<crate::types::UTXO> = Vec::new();
+    // 8 bytes = bincode Vec<T> length prefix
+    let mut current_bytes: usize = 8;
+    for utxo in utxos {
+        let utxo_bytes = bincode::serialize(&utxo).map(|v| v.len()).unwrap_or(400);
+        if current_bytes + utxo_bytes > MAX_CHUNK_BYTES && !current.is_empty() {
+            chunks.push(std::mem::take(&mut current));
+            current_bytes = 8;
+        }
+        current_bytes += utxo_bytes;
+        current.push(utxo);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    if chunks.is_empty() {
+        chunks.push(Vec::new());
+    }
+    chunks
+}
+
 /// Max age for cached peer UTXO hashes (10 minutes = 2 sync check cycles).
 const UTXO_HASH_CACHE_TTL: Duration = Duration::from_secs(600);
 
@@ -1365,16 +1407,40 @@ impl MessageHandler {
                     return Ok(None);
                 }
                 let utxos = context.blockchain.utxo_manager.list_all_utxos().await;
+                let utxo_count = utxos.len();
+                let height = *at_height;
+                let chunks = split_utxos_into_chunks(utxos);
+                let total = chunks.len() as u32;
+
                 info!(
-                    "[{}] Serving UTXO reconciliation snapshot ({} UTXOs) to {} for height {}",
-                    self.direction,
-                    utxos.len(),
-                    self.peer_ip,
-                    at_height
+                    "[{}] Serving UTXO reconciliation snapshot ({} UTXOs → {} chunk(s)) to {} for height {}",
+                    self.direction, utxo_count, total, self.peer_ip, height
                 );
-                Ok(Some(NetworkMessage::UtxoReconciliationResponse {
-                    at_height: *at_height,
-                    utxos,
+
+                if total == 1 {
+                    return Ok(Some(NetworkMessage::UtxoReconciliationResponse {
+                        at_height: height,
+                        utxos: chunks.into_iter().next().unwrap_or_default(),
+                    }));
+                }
+
+                // Multi-chunk: stream all but the last chunk directly.
+                for (i, chunk) in chunks.iter().enumerate().take((total - 1) as usize) {
+                    let msg = NetworkMessage::UtxoReconciliationChunk {
+                        at_height: height,
+                        index: i as u32,
+                        total,
+                        utxos: chunk.clone(),
+                    };
+                    let _ = context.peer_registry.send_to_peer(&self.peer_ip, msg).await;
+                }
+
+                let last_chunk = chunks.into_iter().last().unwrap_or_default();
+                Ok(Some(NetworkMessage::UtxoReconciliationChunk {
+                    at_height: height,
+                    index: total - 1,
+                    total,
+                    utxos: last_chunk,
                 }))
             }
 
@@ -1412,6 +1478,31 @@ impl MessageHandler {
                     self.direction, applied, self.peer_ip
                 );
                 Ok(None)
+            }
+
+            NetworkMessage::UTXOSetChunk {
+                index,
+                total,
+                utxos,
+            } => {
+                self.handle_utxo_set_chunk(*index, *total, utxos.clone(), context)
+                    .await
+            }
+
+            NetworkMessage::UtxoReconciliationChunk {
+                at_height,
+                index,
+                total,
+                utxos,
+            } => {
+                self.handle_utxo_reconciliation_chunk(
+                    *at_height,
+                    *index,
+                    *total,
+                    utxos.clone(),
+                    context,
+                )
+                .await
             }
 
             // === Messages not handled here ===
@@ -3421,8 +3512,9 @@ impl MessageHandler {
         // If not found or zero value → strip the outpoint so it registers cleanly as Free.
         let (tier, collateral_outpoint) =
             if tier == crate::types::MasternodeTier::Free && collateral_outpoint.is_some() {
-                if let Some(utxo_manager) = &context.utxo_manager {
-                    let op = collateral_outpoint.as_ref().unwrap();
+                if let (Some(utxo_manager), Some(op)) =
+                    (&context.utxo_manager, collateral_outpoint.as_ref())
+                {
                     match utxo_manager.get_utxo(op).await {
                         Ok(utxo) if utxo.value > 0 => {
                             if let Some(derived) =
@@ -5271,19 +5363,50 @@ impl MessageHandler {
         }))
     }
 
-    /// Handle GetUTXOSet
+    /// Handle GetUTXOSet — stream the full UTXO set, chunked if it exceeds the
+    /// 8 MiB frame limit.  When the set fits in one frame the legacy
+    /// `UTXOSetResponse` type is used so that older nodes still work.
     async fn handle_get_utxo_set(
         &self,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         let utxos = context.blockchain.get_all_utxos().await;
+        let utxo_count = utxos.len();
+        let chunks = split_utxos_into_chunks(utxos);
+        let total = chunks.len() as u32;
+
+        if total == 1 {
+            info!(
+                "📤 [{}] Sending UTXO set ({} UTXOs) to {}",
+                self.direction, utxo_count, self.peer_ip
+            );
+            return Ok(Some(NetworkMessage::UTXOSetResponse(
+                chunks.into_iter().next().unwrap_or_default(),
+            )));
+        }
+
         info!(
-            "📤 [{}] Sending complete UTXO set ({} utxos) to {}",
-            self.direction,
-            utxos.len(),
-            self.peer_ip
+            "📤 [{}] UTXO set too large for one frame ({} UTXOs → {} chunks) — streaming to {}",
+            self.direction, utxo_count, total, self.peer_ip
         );
-        Ok(Some(NetworkMessage::UTXOSetResponse(utxos)))
+
+        // Stream all chunks except the last directly; return the last one as the
+        // normal handler response so the caller's send path is used for it.
+        for (i, chunk) in chunks.iter().enumerate().take((total - 1) as usize) {
+            let msg = NetworkMessage::UTXOSetChunk {
+                index: i as u32,
+                total,
+                utxos: chunk.clone(),
+            };
+            let _ = context.peer_registry.send_to_peer(&self.peer_ip, msg).await;
+        }
+
+        let last_chunk = chunks.into_iter().last().unwrap_or_default();
+        Ok(Some(NetworkMessage::UTXOSetChunk {
+            index: total - 1,
+            total,
+            utxos: last_chunk,
+        }))
     }
 
     /// Handle UTXOStateHashResponse — compare peer's UTXO hash with ours.
@@ -5509,6 +5632,117 @@ impl MessageHandler {
             return Ok(Some(NetworkMessage::UTXOStateQuery(in_flight_outpoints)));
         }
 
+        Ok(None)
+    }
+
+    /// Handle a UTXOSetChunk (one page of a multi-frame GetUTXOSet response).
+    /// Accumulates chunks until the last one arrives, then runs the full diff/reconcile.
+    async fn handle_utxo_set_chunk(
+        &self,
+        index: u32,
+        total: u32,
+        chunk: Vec<crate::types::UTXO>,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let chunk_len = chunk.len();
+        utxo_set_chunk_buf()
+            .entry(self.peer_ip.clone())
+            .or_default()
+            .extend(chunk);
+
+        if index + 1 < total {
+            debug!(
+                "📥 [{}] UTXOSetChunk {}/{} from {} ({} UTXOs in this chunk)",
+                self.direction,
+                index + 1,
+                total,
+                self.peer_ip,
+                chunk_len
+            );
+            return Ok(None);
+        }
+
+        // Final chunk — hand the assembled set to the normal response handler.
+        let all_utxos = utxo_set_chunk_buf()
+            .remove(&self.peer_ip)
+            .map(|(_, v)| v)
+            .unwrap_or_default();
+        info!(
+            "📥 [{}] UTXOSetChunk complete from {} ({} total UTXOs, {} chunks) — reconciling",
+            self.direction,
+            self.peer_ip,
+            all_utxos.len(),
+            total
+        );
+        self.handle_utxo_set_response(all_utxos, context).await
+    }
+
+    /// Handle a UtxoReconciliationChunk (one page of a multi-frame
+    /// RequestUtxoReconciliation response).
+    /// Accumulates until the last chunk, then applies the full set.
+    async fn handle_utxo_reconciliation_chunk(
+        &self,
+        at_height: u64,
+        index: u32,
+        total: u32,
+        chunk: Vec<crate::types::UTXO>,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let chunk_len = chunk.len();
+        utxo_reconcil_chunk_buf()
+            .entry(self.peer_ip.clone())
+            .or_insert_with(|| (at_height, Vec::new()))
+            .1
+            .extend(chunk);
+
+        if index + 1 < total {
+            debug!(
+                "📥 [{}] UtxoReconciliationChunk {}/{} from {} ({} UTXOs)",
+                self.direction,
+                index + 1,
+                total,
+                self.peer_ip,
+                chunk_len
+            );
+            return Ok(None);
+        }
+
+        let (stored_height, all_utxos) = utxo_reconcil_chunk_buf()
+            .remove(&self.peer_ip)
+            .map(|(_, v)| v)
+            .unwrap_or((at_height, Vec::new()));
+
+        info!(
+            "[{}] UtxoReconciliationChunk complete from {} — {} UTXOs at height {}. Applying…",
+            self.direction,
+            self.peer_ip,
+            all_utxos.len(),
+            stored_height
+        );
+        let mut applied = 0usize;
+        for utxo in all_utxos {
+            let outpoint = utxo.outpoint.clone();
+            if context
+                .blockchain
+                .utxo_manager
+                .get_utxo(&outpoint)
+                .await
+                .is_err()
+                && context
+                    .blockchain
+                    .utxo_manager
+                    .add_utxo(utxo.clone())
+                    .await
+                    .is_ok()
+            {
+                applied += 1;
+            }
+        }
+        info!(
+            "[{}] UTXO reconciliation complete — applied {} new UTXOs from {}. \
+             Node will re-enter voting on next round.",
+            self.direction, applied, self.peer_ip
+        );
         Ok(None)
     }
 

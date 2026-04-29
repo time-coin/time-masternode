@@ -114,12 +114,10 @@ impl UTXOStateManager {
             .map_err(|e| UtxoError::Storage(e.into()))?;
         // Reload tombstones that survived the last restart
         let mut loaded = 0usize;
-        for item in tree.iter() {
-            if let Ok((key, _)) = item {
-                if let Ok(op) = bincode::deserialize::<OutPoint>(&key) {
-                    self.spent_tombstones.insert(op);
-                    loaded += 1;
-                }
+        for (key, _) in tree.iter().flatten() {
+            if let Ok(op) = bincode::deserialize::<OutPoint>(&key) {
+                self.spent_tombstones.insert(op);
+                loaded += 1;
             }
         }
         if loaded > 0 {

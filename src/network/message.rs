@@ -341,6 +341,22 @@ pub enum NetworkMessage {
         at_height: u64,
         utxos: Vec<crate::types::UTXO>,
     },
+    /// One page of a multi-frame UTXOSet transfer (response to GetUTXOSet).
+    /// Sent when the full set exceeds the 8 MiB frame limit.  Receiver accumulates
+    /// all chunks (index 0 … total-1) and then runs the normal diff/reconcile logic.
+    UTXOSetChunk {
+        index: u32,
+        total: u32,
+        utxos: Vec<crate::types::UTXO>,
+    },
+    /// One page of a multi-frame UTXO reconciliation transfer (response to
+    /// RequestUtxoReconciliation).  Same chunking contract as UTXOSetChunk.
+    UtxoReconciliationChunk {
+        at_height: u64,
+        index: u32,
+        total: u32,
+        utxos: Vec<crate::types::UTXO>,
+    },
     /// Placeholder for messages from newer protocol versions that we can't parse
     UnknownMessage,
 }
@@ -526,6 +542,8 @@ impl NetworkMessage {
             NetworkMessage::MasternodeAnnouncementV4 { .. } => "MasternodeAnnouncementV4",
             NetworkMessage::RequestUtxoReconciliation { .. } => "RequestUtxoReconciliation",
             NetworkMessage::UtxoReconciliationResponse { .. } => "UtxoReconciliationResponse",
+            NetworkMessage::UTXOSetChunk { .. } => "UTXOSetChunk",
+            NetworkMessage::UtxoReconciliationChunk { .. } => "UtxoReconciliationChunk",
         }
     }
 
@@ -566,6 +584,8 @@ impl NetworkMessage {
                 | NetworkMessage::FinalityVoteResponse { .. }
                 | NetworkMessage::ChainWorkResponse { .. }
                 | NetworkMessage::ChainWorkAtResponse { .. }
+                | NetworkMessage::UTXOSetChunk { .. }
+                | NetworkMessage::UtxoReconciliationChunk { .. }
         )
     }
 

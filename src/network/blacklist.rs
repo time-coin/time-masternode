@@ -89,7 +89,8 @@ impl IPBlacklist {
             );
         }
 
-        // ── Load temp bans (skip expired, skip whitelisted) ──────────────
+        // ── Load temp bans (skip expired; preserve frame-bomb bans even for
+        //    whitelisted IPs so reconnect loops are throttled across restarts) ──
         if let Some(tree) = &self.db_temp {
             let mut loaded = 0usize;
             let mut expired = 0usize;
@@ -99,11 +100,6 @@ impl IPBlacklist {
                     .ok()
                     .and_then(|s| s.parse::<IpAddr>().ok())
                 {
-                    if self.is_whitelisted(ip) {
-                        let _ = tree.remove(k);
-                        tracing::debug!("🔓 Cleared persisted temp ban for whitelisted IP {}", ip);
-                        continue;
-                    }
                     if let Ok((expiry_unix, reason)) = bincode::deserialize::<(u64, String)>(&v) {
                         if expiry_unix <= now_unix {
                             let _ = tree.remove(k);
@@ -168,10 +164,8 @@ impl IPBlacklist {
                     .ok()
                     .and_then(|s| s.parse::<IpAddr>().ok())
                 {
-                    if self.is_whitelisted(ip) {
-                        let _ = tree.remove(k);
-                        continue;
-                    }
+                    // Whitelisted IPs keep their violation counters — the counter
+                    // feeds record_frame_bomb_violation() which can still issue temp bans.
                     if let Ok((count, last_unix)) = bincode::deserialize::<(u32, u64)>(&v) {
                         if last_unix < cutoff {
                             let _ = tree.remove(k);
@@ -327,9 +321,25 @@ impl IPBlacklist {
     }
 
     /// Check if an IP is currently blacklisted.
-    /// Whitelisted IPs are never considered blacklisted — operator-trusted nodes
-    /// must remain connectable even if they sent a bad frame during a crash loop.
+    /// Whitelisted IPs are exempt from permanent bans and subnet bans, but
+    /// temp bans from frame bombs and severe violations are still honoured —
+    /// this lets the operator's own misbehaving nodes be throttled without
+    /// being permanently locked out.
     pub fn is_blacklisted(&mut self, ip: IpAddr) -> Option<String> {
+        // Check temporary blacklist first — even whitelisted IPs can earn a temp ban
+        // via record_frame_bomb_violation() or record_severe_violation().
+        if let Some((expiry, reason)) = self.temp_blacklist.get(&ip) {
+            if Instant::now() < *expiry {
+                let remaining = expiry.duration_since(Instant::now()).as_secs();
+                return Some(format!("Temporarily banned for {}s: {}", remaining, reason));
+            } else {
+                // Expired — remove from memory and sled
+                self.temp_blacklist.remove(&ip);
+                self.remove_temp(ip);
+            }
+        }
+
+        // Whitelisted IPs are exempt from permanent and subnet bans.
         if self.is_whitelisted(ip) {
             return None;
         }
@@ -342,18 +352,6 @@ impl IPBlacklist {
         // Check subnet blacklist
         if let Some(reason) = self.in_banned_subnet(ip) {
             return Some(reason);
-        }
-
-        // Check temporary blacklist and clean up expired entries
-        if let Some((expiry, reason)) = self.temp_blacklist.get(&ip) {
-            if Instant::now() < *expiry {
-                let remaining = expiry.duration_since(Instant::now()).as_secs();
-                return Some(format!("Temporarily banned for {}s: {}", remaining, reason));
-            } else {
-                // Expired, remove from memory and sled
-                self.temp_blacklist.remove(&ip);
-                self.remove_temp(ip);
-            }
         }
 
         None
