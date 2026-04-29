@@ -3882,9 +3882,82 @@ impl Blockchain {
             });
         }
 
+        // Topological sort: ensure transactions that depend on outputs of other
+        // transactions in the same block appear AFTER those dependency transactions.
+        // Without this, a node that finalized tx B (which spends tx A's output) before
+        // it received tx A would put B first in the pool — causing block validation
+        // failures on nodes that process transactions in order.
+        {
+            use std::collections::{HashMap, VecDeque};
+            let n = valid_finalized_with_fees.len();
+            if n > 1 {
+                // Map txid → index in the current vec
+                let txid_to_idx: HashMap<Hash256, usize> = valid_finalized_with_fees
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (tx, _))| (tx.txid(), i))
+                    .collect();
+
+                // Build adjacency list: if tx B spends an output of tx A, edge A→B
+                let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+                let mut in_degree = vec![0usize; n];
+
+                for (b, (tx, _)) in valid_finalized_with_fees.iter().enumerate() {
+                    for input in &tx.inputs {
+                        if let Some(&a) = txid_to_idx.get(&input.previous_output.txid) {
+                            adj[a].push(b);
+                            in_degree[b] += 1;
+                        }
+                    }
+                }
+
+                // Kahn's algorithm
+                let mut queue: VecDeque<usize> = in_degree
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &d)| d == 0)
+                    .map(|(i, _)| i)
+                    .collect();
+
+                let mut order = Vec::with_capacity(n);
+                while let Some(i) = queue.pop_front() {
+                    order.push(i);
+                    for &j in &adj[i] {
+                        in_degree[j] -= 1;
+                        if in_degree[j] == 0 {
+                            queue.push_back(j);
+                        }
+                    }
+                }
+
+                if order.len() == n {
+                    // Reorder in-place using the sorted indices
+                    let mut tmp = valid_finalized_with_fees
+                        .into_iter()
+                        .map(Some)
+                        .collect::<Vec<_>>();
+                    valid_finalized_with_fees = order
+                        .into_iter()
+                        .map(|i| tmp[i].take().unwrap())
+                        .collect();
+                    tracing::debug!(
+                        "📐 Block {}: topologically sorted {} transactions",
+                        next_height,
+                        n
+                    );
+                } else {
+                    tracing::warn!(
+                        "⚠️ Block {}: topological sort detected a cycle among {} txs — using original order",
+                        next_height,
+                        n
+                    );
+                }
+            }
+        }
+
         // Size-cap: ensure the assembled block fits within MAX_BLOCK_ASSEMBLY_SIZE.
         // Reserve 32KB for block header, masternode rewards, coinbase tx, and bincode framing.
-        // Transactions are already sorted by canonical order, so we simply truncate the tail.
+        // Transactions are already in dependency order after the topological sort above.
         {
             const BLOCK_OVERHEAD_BYTES: usize = 32_768; // 32KB for non-tx block fields
             let tx_size_budget =
