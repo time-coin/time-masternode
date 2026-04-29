@@ -3125,11 +3125,28 @@ impl MessageHandler {
         &self,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
-        let entries = if let Some(consensus) = &context.consensus {
+        let all_entries = if let Some(consensus) = &context.consensus {
             consensus.get_all_for_sync()
         } else {
             Vec::new()
         };
+
+        // Cap at 100 finalized + 100 pending to prevent large single-frame responses.
+        // The server.rs inbound handler uses the same limit. Without this cap, nodes
+        // with large mempools generate MempoolSyncResponse frames of 4MB+ per connection.
+        let mut entries: Vec<_> = all_entries
+            .iter()
+            .filter(|e| e.is_finalized)
+            .take(100)
+            .cloned()
+            .collect();
+        entries.extend(
+            all_entries
+                .iter()
+                .filter(|e| !e.is_finalized)
+                .take(100)
+                .cloned(),
+        );
 
         tracing::debug!(
             "📤 [{}] Serving mempool sync to {}: {} entries ({} finalized)",
