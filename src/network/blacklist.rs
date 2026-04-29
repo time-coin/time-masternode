@@ -326,10 +326,15 @@ impl IPBlacklist {
         self.subnet_blacklist.len()
     }
 
-    /// Check if an IP is currently blacklisted
-    /// SECURITY: Blacklist takes precedence over whitelist
+    /// Check if an IP is currently blacklisted.
+    /// Whitelisted IPs are never considered blacklisted — operator-trusted nodes
+    /// must remain connectable even if they sent a bad frame during a crash loop.
     pub fn is_blacklisted(&mut self, ip: IpAddr) -> Option<String> {
-        // Check permanent blacklist FIRST (even for whitelisted IPs)
+        if self.is_whitelisted(ip) {
+            return None;
+        }
+
+        // Check permanent blacklist
         if let Some(reason) = self.permanent_blacklist.get(&ip) {
             return Some(format!("Permanently banned: {}", reason));
         }
