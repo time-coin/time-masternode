@@ -89,8 +89,7 @@ impl IPBlacklist {
             );
         }
 
-        // ── Load temp bans (skip expired; preserve frame-bomb bans even for
-        //    whitelisted IPs so reconnect loops are throttled across restarts) ──
+        // ── Load temp bans (skip expired and whitelisted) ────────────────
         if let Some(tree) = &self.db_temp {
             let mut loaded = 0usize;
             let mut expired = 0usize;
@@ -100,6 +99,10 @@ impl IPBlacklist {
                     .ok()
                     .and_then(|s| s.parse::<IpAddr>().ok())
                 {
+                    if self.is_whitelisted(ip) {
+                        let _ = tree.remove(&k);
+                        continue;
+                    }
                     if let Ok((expiry_unix, reason)) = bincode::deserialize::<(u64, String)>(&v) {
                         if expiry_unix <= now_unix {
                             let _ = tree.remove(k);
@@ -154,7 +157,7 @@ impl IPBlacklist {
             );
         }
 
-        // ── Load violation counters (prune entries older than 1 hour, skip whitelisted) ────
+        // ── Load violation counters (prune entries older than 1 hour; skip whitelisted) ────
         if let Some(tree) = &self.db_violations {
             let cutoff = now_unix.saturating_sub(3600);
             let mut loaded = 0usize;
@@ -164,8 +167,10 @@ impl IPBlacklist {
                     .ok()
                     .and_then(|s| s.parse::<IpAddr>().ok())
                 {
-                    // Whitelisted IPs keep their violation counters — the counter
-                    // feeds record_frame_bomb_violation() which can still issue temp bans.
+                    if self.is_whitelisted(ip) {
+                        let _ = tree.remove(&k);
+                        continue;
+                    }
                     if let Ok((count, last_unix)) = bincode::deserialize::<(u32, u64)>(&v) {
                         if last_unix < cutoff {
                             let _ = tree.remove(k);
@@ -321,13 +326,14 @@ impl IPBlacklist {
     }
 
     /// Check if an IP is currently blacklisted.
-    /// Whitelisted IPs are exempt from permanent bans and subnet bans, but
-    /// temp bans from frame bombs and severe violations are still honoured —
-    /// this lets the operator's own misbehaving nodes be throttled without
-    /// being permanently locked out.
+    /// Whitelisted IPs are exempt from all bans (permanent, temporary, and subnet).
     pub fn is_blacklisted(&mut self, ip: IpAddr) -> Option<String> {
-        // Check temporary blacklist first — even whitelisted IPs can earn a temp ban
-        // via record_frame_bomb_violation() or record_severe_violation().
+        // Whitelisted IPs are exempt from all bans — check first.
+        if self.is_whitelisted(ip) {
+            return None;
+        }
+
+        // Check temporary blacklist
         if let Some((expiry, reason)) = self.temp_blacklist.get(&ip) {
             if Instant::now() < *expiry {
                 let remaining = expiry.duration_since(Instant::now()).as_secs();
@@ -337,11 +343,6 @@ impl IPBlacklist {
                 self.temp_blacklist.remove(&ip);
                 self.remove_temp(ip);
             }
-        }
-
-        // Whitelisted IPs are exempt from permanent and subnet bans.
-        if self.is_whitelisted(ip) {
-            return None;
         }
 
         // Check permanent blacklist
@@ -509,6 +510,16 @@ impl IPBlacklist {
     ///
     /// 1st offence → 5-minute ban. 2nd+ offence → 1-hour ban, cycling.
     pub fn record_frame_bomb_violation(&mut self, ip: IpAddr, reason: &str) -> bool {
+        // Whitelisted IPs are never banned — they are the operator's own nodes.
+        if self.is_whitelisted(ip) {
+            tracing::warn!(
+                "⚠️  Oversized frame from whitelisted peer {} — dropping frame, keeping connection ({})",
+                ip,
+                reason
+            );
+            return false;
+        }
+
         let now = Instant::now();
         let (count, last_time) = self.violations.entry(ip).or_insert((0, now));
 
