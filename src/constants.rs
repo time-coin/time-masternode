@@ -35,6 +35,12 @@ pub const STORAGE_VERSION: u32 = 2;
 /// Old nodes at commit 2057 are rejected by this check.
 pub const MIN_PEER_COMMIT_VERSION: u32 = 2062;
 
+/// Minimum commit count for a peer to support chunked UTXO transfer.
+/// Peers below this version respond to GetUTXOSet / RequestUtxoReconciliation
+/// with one massive frame that always exceeds MAX_FRAME_SIZE and corrupts the
+/// TCP stream.  Skip those requests to prevent the frame-bomb disconnect loop.
+pub const MIN_UTXO_CHUNK_COMMIT: u32 = 2127;
+
 /// Chain identifier included in v2 transaction signing messages.
 /// Mainnet = 1.  Any future intentional hard fork must be assigned a distinct
 /// chain_id BEFORE the fork diverges so that transactions cannot be replayed

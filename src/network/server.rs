@@ -1096,24 +1096,23 @@ async fn handle_peer(
                         };
                         let clearly_malicious = frame_bytes.is_some_and(|b| b > MALICIOUS_FRAME_BYTES);
                         if is_large_frame && (!handshake_done || clearly_malicious) {
-                            // Always record in AI so gossip filtering suppresses this peer,
-                            // even when it is whitelisted (e.g. a friendly old-code node).
                             if let Some(ai) = &ai_system {
                                 ai.attack_detector.record_frame_bomb(&ip_str);
                             }
                             if is_whitelisted {
-                                // Apply a temporary ban even for trusted peers — frame bombs are
-                                // never legitimate. Short durations (5 min → 1 hour) let an
-                                // operator-owned node recover once it is upgraded.
+                                // Whitelisted = operator's own node running old code.
+                                // record_frame_bomb_violation() is a no-op for whitelisted IPs
+                                // (logs only, no ban), but we still must close the TCP connection:
+                                // after reading a multi-GB length header the stream state is lost
+                                // and there is no way to find the next valid frame boundary.
+                                // The node will reconnect immediately (no ban applied).
                                 blacklist.write().await.record_frame_bomb_violation(
                                     ip,
                                     &format!("Oversized frame from whitelisted peer: {}", e),
                                 );
-                                tracing::warn!(
-                                    "🔌 Oversized frame ({} bytes) from whitelisted peer {} — \
-                                     temp ban applied; recorded for gossip filtering",
-                                    frame_bytes.unwrap_or(0), peer.addr
-                                );
+                                // Note: record_frame_bomb_violation is a no-op for whitelisted IPs.
+                                // We still break because the TCP stream is unrecoverable after
+                                // reading a partial multi-GB frame header.
                             } else {
                                 blacklist.write().await.record_violation(
                                     ip,

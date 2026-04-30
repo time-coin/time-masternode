@@ -3936,10 +3936,8 @@ impl Blockchain {
                         .into_iter()
                         .map(Some)
                         .collect::<Vec<_>>();
-                    valid_finalized_with_fees = order
-                        .into_iter()
-                        .map(|i| tmp[i].take().unwrap())
-                        .collect();
+                    valid_finalized_with_fees =
+                        order.into_iter().map(|i| tmp[i].take().unwrap()).collect();
                     tracing::debug!(
                         "📐 Block {}: topologically sorted {} transactions",
                         next_height,
@@ -6873,23 +6871,38 @@ impl Blockchain {
                     at_height: block_height,
                     block_hash,
                 };
-                // Send to the block producer specifically (they have the correct state).
                 let producer_ip = producer_addr
                     .split(':')
                     .next()
                     .unwrap_or(producer_addr)
                     .to_string();
-                let registry_clone = registry.clone();
-                tokio::spawn(async move {
-                    if registry_clone
-                        .send_to_peer(&producer_ip, msg.clone())
-                        .await
-                        .is_err()
-                    {
-                        // Fall back to broadcast if direct send fails.
-                        registry_clone.broadcast(msg).await;
-                    }
-                });
+                // Only request from peers that support chunked UTXO transfer.
+                // Old-code peers respond with one massive frame that exceeds MAX_FRAME_SIZE.
+                let producer_commit = registry
+                    .get_peer_commit_count(&producer_ip)
+                    .await
+                    .unwrap_or(0);
+                if producer_commit < crate::constants::MIN_UTXO_CHUNK_COMMIT {
+                    tracing::warn!(
+                        "⚠️ Skipping RequestUtxoReconciliation to producer {} — \
+                        pre-chunking code (commit {}, need ≥{}). Will reconcile \
+                        when a chunk-capable peer provides the block.",
+                        producer_ip,
+                        producer_commit,
+                        crate::constants::MIN_UTXO_CHUNK_COMMIT
+                    );
+                } else {
+                    let registry_clone = registry.clone();
+                    tokio::spawn(async move {
+                        if registry_clone
+                            .send_to_peer(&producer_ip, msg.clone())
+                            .await
+                            .is_err()
+                        {
+                            registry_clone.broadcast(msg).await;
+                        }
+                    });
+                }
             }
             // Accept the block — this node simply won't be in the next bitmap
             // until UTXO reconciliation completes and it can vote correctly.

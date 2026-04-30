@@ -5537,6 +5537,23 @@ impl MessageHandler {
 
         if should_reconcile {
             if let Some(alt_peer) = best_alt_peer {
+                // Only request from peers that support chunked UTXO transfer.
+                // Old-code peers respond with a single massive frame that exceeds
+                // MAX_FRAME_SIZE and corrupts the TCP stream (frame-bomb loop).
+                let peer_commit = context
+                    .peer_registry
+                    .get_peer_commit_count(&self.peer_ip)
+                    .await
+                    .unwrap_or(0);
+                if peer_commit < crate::constants::MIN_UTXO_CHUNK_COMMIT {
+                    warn!(
+                        "⚠️ [{}] Skipping GetUTXOSet to {} — pre-chunking code (commit {}, need ≥{}). \
+                        Will reconcile via a chunk-capable peer when one connects.",
+                        self.direction, self.peer_ip, peer_commit,
+                        crate::constants::MIN_UTXO_CHUNK_COMMIT
+                    );
+                    return Ok(None);
+                }
                 warn!(
                     "📥 [{}] We are in the MINORITY ({}/{} votes, threshold={}, round {}) — requesting UTXO set from {} for reconciliation",
                     self.direction, our_hash_votes, total_votes,
