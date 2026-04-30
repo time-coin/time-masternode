@@ -3302,7 +3302,46 @@ impl MessageHandler {
                             continue;
                         }
                     }
+                    // Add to the finalized pool.  add_finalized_direct only updates the pool;
+                    // it does NOT update UTXO state.  We must do that here so that:
+                    //   (a) block producers see inputs as SpentFinalized (valid for assembly)
+                    //   (b) subsequent TransactionFinalized broadcasts don't skip UTXO updates
+                    //       because is_finalized() already returns true (server.rs:1793)
+                    let tx = entry.tx.clone();
                     consensus.add_finalized_direct(entry.tx, entry.fee);
+                    // Update UTXO state: inputs → SpentFinalized, outputs → Unspent
+                    if let Some(utxo_manager) = &context.utxo_manager {
+                        for input in &tx.inputs {
+                            utxo_manager
+                                .mark_timevote_finalized(&input.previous_output, txid)
+                                .await;
+                        }
+                        for (idx, output) in tx.outputs.iter().enumerate() {
+                            let outpoint = crate::types::OutPoint {
+                                txid,
+                                vout: idx as u32,
+                            };
+                            let utxo = crate::types::UTXO {
+                                outpoint: outpoint.clone(),
+                                value: output.value,
+                                script_pubkey: output.script_pubkey.clone(),
+                                address: String::from_utf8(output.script_pubkey.clone())
+                                    .unwrap_or_default(),
+                                masternode_key: None,
+                            };
+                            if let Err(e) = utxo_manager.add_utxo(utxo).await {
+                                tracing::debug!(
+                                    "UTXO sync: output vout={} for TX {} already exists: {}",
+                                    idx,
+                                    hex::encode(txid),
+                                    e
+                                );
+                            } else {
+                                utxo_manager
+                                    .update_state(&outpoint, crate::types::UTXOState::Unspent);
+                            }
+                        }
+                    }
                     added_finalized += 1;
                 } else {
                     // Route through consensus so TimeVote starts for this TX.

@@ -4861,8 +4861,16 @@ async fn main() {
                     }
 
                     // Validate each TX before re-broadcasting: ensure input UTXOs
-                    // are still SpentFinalized. If not, the TX was cleared/reverted
-                    // and should be evicted, not re-broadcast.
+                    // are still in a spent/locked state (not Unspent or Archived).
+                    //
+                    // IMPORTANT: after a daemon restart, input UTXOs for finalized-but-
+                    // unarchived transactions will NOT be in utxo_states (they were removed
+                    // from sled via mark_timevote_finalized and are only in the in-memory
+                    // tombstone set). get_state() returns None for them, which is correct.
+                    // Treat tombstoned + None as equivalent to SpentFinalized — the UTXO
+                    // was legitimately spent by this TX and the tombstone proves it.
+                    // Only evict when the input is genuinely Unspent (possible double-spend
+                    // scenario, e.g. after a reindex) or Archived (already in a block).
                     let mut valid_txs = Vec::new();
                     let mut evict_txids = Vec::new();
                     for (txid, tx) in &stale {
@@ -4872,9 +4880,26 @@ async fn main() {
                                 Some(crate::types::UTXOState::SpentFinalized { .. }) => {}
                                 Some(crate::types::UTXOState::SpentPending { .. }) => {}
                                 Some(crate::types::UTXOState::Locked { .. }) => {}
+                                None => {
+                                    // None means not in state map.  If the outpoint is tombstoned
+                                    // it was properly spent via finalization — keep the TX.
+                                    // If it's genuinely missing (no record at all) it may have
+                                    // been reverted; evict to prevent infinite re-broadcast loops.
+                                    if !rebroadcast_consensus.utxo_manager.is_tombstoned(&input.previous_output) {
+                                        tracing::warn!(
+                                            "🧹 Evicting finalized TX {} from pool: input {} is missing from UTXO state and not tombstoned",
+                                            hex::encode(txid),
+                                            input.previous_output,
+                                        );
+                                        inputs_valid = false;
+                                        break;
+                                    }
+                                    // else: tombstoned = legitimately spent, keep the TX
+                                }
                                 other => {
+                                    // Unspent, Archived, or other unexpected state → evict
                                     tracing::warn!(
-                                        "🧹 Evicting finalized TX {} from pool: input {} is {:?} (expected SpentFinalized)",
+                                        "🧹 Evicting finalized TX {} from pool: input {} is {:?} (expected SpentFinalized/tombstoned)",
                                         hex::encode(txid),
                                         input.previous_output,
                                         other.as_ref().map(|s| format!("{}", s)).unwrap_or_else(|| "missing".to_string())
