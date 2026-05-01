@@ -67,7 +67,7 @@ git pull origin main
 git log -1
 
 #cargo clean
-cargo build --release --bin timed --bin time-cli
+cargo build --profile release-fast --bin timed --bin time-cli
 
 for NET in mainnet testnet; do
     [[ "$NETWORK" != "both" && "$NETWORK" != "$NET" ]] && continue
@@ -80,8 +80,8 @@ done
 
 systemctl daemon-reload
 rm -f /usr/local/bin/timed /usr/local/bin/time-cli
-cp ~/time-masternode/target/release/timed /usr/local/bin/timed
-cp ~/time-masternode/target/release/time-cli /usr/local/bin/time-cli
+cp ~/time-masternode/target/release-fast/timed /usr/local/bin/timed
+cp ~/time-masternode/target/release-fast/time-cli /usr/local/bin/time-cli
 ls -lh /usr/local/bin/timed  # Should show today's timestamp
 
 for NET in mainnet testnet; do
