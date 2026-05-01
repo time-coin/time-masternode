@@ -9904,6 +9904,16 @@ impl Blockchain {
                                     )
                                     .await;
                             }
+                            let _ = self
+                                .masternode_registry
+                                .suspend_from_consensus(
+                                    &peer_addr,
+                                    &format!(
+                                        "Genesis-level fork incompatibility: ours={}, theirs={}",
+                                        our_genesis_info, peer_genesis
+                                    ),
+                                )
+                                .await;
                         }
                         Some(peer_genesis) => {
                             // Genesis blocks match - this is a normal fork, allow it

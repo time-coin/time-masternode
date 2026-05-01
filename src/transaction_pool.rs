@@ -981,6 +981,7 @@ pub struct MemPoolPressure {
 mod tests {
     use super::*;
     use crate::types::{OutPoint, TxInput, TxOutput};
+    use std::time::Duration;
 
     fn create_test_transaction(value: u64) -> Transaction {
         Transaction {
@@ -1165,6 +1166,34 @@ mod tests {
         assert_eq!(metrics.pending_count, 50);
         assert!(metrics.pending_bytes > 0);
         assert!(metrics.total_fees_pending > 0);
+    }
+
+    #[test]
+    fn test_cleanup_stale_pending_evicts_only_old_entries() {
+        let pool = TransactionPool::new();
+        let stale_age = Duration::from_secs(61);
+        let max_age = Duration::from_secs(60);
+
+        let stale_tx = create_test_transaction(1_000);
+        let stale_txid = stale_tx.txid();
+        pool.add_pending(stale_tx, 100).unwrap();
+
+        let fresh_tx = create_test_transaction(2_000);
+        let fresh_txid = fresh_tx.txid();
+        pool.add_pending(fresh_tx, 100).unwrap();
+
+        if let Some(mut entry) = pool.pending.get_mut(&stale_txid) {
+            entry.added_at = Instant::now()
+                .checked_sub(stale_age)
+                .expect("1 minute stale offset should be representable");
+        }
+
+        let evicted = pool.cleanup_stale_pending(max_age);
+
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].txid(), stale_txid);
+        assert!(!pool.is_pending(&stale_txid));
+        assert!(pool.is_pending(&fresh_txid));
     }
 }
 

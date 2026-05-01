@@ -3317,6 +3317,14 @@ impl ConsensusEngine {
                     break;
                 }
 
+                if !consensus_engine_clone.is_transaction_still_valid(&txid) {
+                    tracing::info!(
+                        "🧹 TX {} no longer valid/present in mempool — stopping voting loop",
+                        hex::encode(txid)
+                    );
+                    break;
+                }
+
                 if start.elapsed() >= vote_deadline {
                     // Timeout: check accumulated weight from server.rs handler
                     let weight = consensus
@@ -3565,6 +3573,78 @@ impl ConsensusEngine {
     /// Returns the number of entries restored.
     pub fn load_mempool_from_sled(&self, db: &sled::Db) -> usize {
         self.tx_pool.load_from_sled(db)
+    }
+
+    /// Evict pending transactions that have been stuck longer than `max_age`.
+    ///
+    /// This is a policy/mempool cleanup path only: it releases local UTXO reservations
+    /// and clears in-memory voting state so the node stops carrying transactions that
+    /// never made it into a block. It does not alter any on-chain state.
+    pub async fn evict_stale_pending_transactions(&self, max_age: Duration) -> usize {
+        let evicted = self.tx_pool.cleanup_stale_pending(max_age);
+        if evicted.is_empty() {
+            return 0;
+        }
+
+        let evicted_count = evicted.len();
+        let mut restored_inputs = 0usize;
+
+        for tx in evicted {
+            let txid = tx.txid();
+
+            for input in &tx.inputs {
+                if self
+                    .utxo_manager
+                    .is_collateral_locked(&input.previous_output)
+                {
+                    tracing::warn!(
+                        "⚠️ Skipping collateral UTXO {} while evicting stale pending TX {}",
+                        input.previous_output,
+                        hex::encode(txid)
+                    );
+                    continue;
+                }
+
+                let should_restore = matches!(
+                    self.utxo_manager.get_state(&input.previous_output),
+                    Some(UTXOState::Locked { txid: locked_txid, .. }) if locked_txid == txid
+                ) || matches!(
+                    self.utxo_manager.get_state(&input.previous_output),
+                    Some(UTXOState::SpentPending { txid: pending_txid, .. }) if pending_txid == txid
+                );
+
+                if should_restore {
+                    self.utxo_manager
+                        .update_state(&input.previous_output, UTXOState::Unspent);
+                    restored_inputs += 1;
+                }
+            }
+
+            self.transition_to_rejected(
+                txid,
+                format!(
+                    "Pending transaction evicted after exceeding stale age ({}s)",
+                    max_age.as_secs()
+                ),
+            );
+            self.timevote.tx_state.remove(&txid);
+            self.timevote.timeproof_votes.remove(&txid);
+            self.timevote.accumulated_weight.remove(&txid);
+            self.timevote.finalized_txs.remove(&txid);
+            self.timevote.fallback_votes.remove(&txid);
+            self.timevote
+                .proposal_to_tx
+                .retain(|_, tracked_txid| *tracked_txid != txid);
+        }
+
+        tracing::warn!(
+            "🧹 Evicted {} stale pending transaction(s) older than {}s and restored {} input UTXO(s)",
+            evicted_count,
+            max_age.as_secs(),
+            restored_inputs
+        );
+
+        evicted_count
     }
 
     #[allow(dead_code)]

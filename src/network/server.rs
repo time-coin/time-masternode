@@ -1146,6 +1146,9 @@ async fn handle_peer(
                                                 ip,
                                                 &format!("Invalid magic bytes: {:?}", magic)
                                             );
+                                            let _ = masternode_registry
+                                                .suspend_from_consensus(&ip_str, "Invalid handshake magic")
+                                                .await;
                                             break;
                                         }
                                         if *protocol_version < 2 {
@@ -1154,6 +1157,12 @@ async fn handle_peer(
                                                 ip,
                                                 &format!("Protocol version {} below minimum 2", protocol_version)
                                             );
+                                            let _ = masternode_registry
+                                                .suspend_from_consensus(
+                                                    &ip_str,
+                                                    &format!("Protocol version {} below minimum 2", protocol_version),
+                                                )
+                                                .await;
                                             break;
                                         }
                                         let our_commits = env!("GIT_COMMIT_COUNT").parse::<u32>().unwrap_or(0);
@@ -1188,6 +1197,16 @@ async fn handle_peer(
                                                 ip,
                                                 &format!("Obsolete software: commit {} below minimum {}", commit_count, crate::constants::MIN_PEER_COMMIT_VERSION)
                                             );
+                                            let _ = masternode_registry
+                                                .suspend_from_consensus(
+                                                    &ip_str,
+                                                    &format!(
+                                                        "Obsolete software: commit {} below minimum {}",
+                                                        commit_count,
+                                                        crate::constants::MIN_PEER_COMMIT_VERSION
+                                                    ),
+                                                )
+                                                .await;
                                             break;
                                         }
                                         if *commit_count < our_commits {
@@ -1208,6 +1227,9 @@ async fn handle_peer(
                                             );
                                         }
                                         peer_registry.set_peer_commit_count(&ip_str, *commit_count).await;
+                                        let _ = masternode_registry
+                                            .clear_consensus_suspension(&ip_str)
+                                            .await;
                                         tracing::info!(
                                             "✅ Handshake accepted from {} (network: {}, commit: {})",
                                             peer.addr, network, commit_count

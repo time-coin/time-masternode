@@ -5041,8 +5041,7 @@ impl RpcHandler {
                             txid,
                             vout: idx as u32,
                         };
-                        let address =
-                            String::from_utf8_lossy(&output.script_pubkey).to_string();
+                        let address = String::from_utf8_lossy(&output.script_pubkey).to_string();
                         let utxo = crate::types::UTXO {
                             outpoint: outpoint.clone(),
                             value: output.value,
@@ -5097,6 +5096,8 @@ impl RpcHandler {
             }
         }
 
+        self.restore_collateral_locks_after_reindex(height).await;
+
         // Step 2: Rebuild transaction index
         let tx_indexed = match blockchain.build_tx_index().await {
             Ok(()) => {
@@ -5122,6 +5123,81 @@ impl RpcHandler {
             "utxo_count": utxos,
             "tx_index_rebuilt": tx_indexed
         }))
+    }
+
+    async fn restore_collateral_locks_after_reindex(&self, lock_height: u64) {
+        let local_address = self.registry.get_local_address().await;
+
+        if let Some(local_mn) = self.registry.get_local_masternode().await {
+            if local_mn.masternode.tier != crate::types::MasternodeTier::Free {
+                if let Some(outpoint) = local_mn.masternode.collateral_outpoint.clone() {
+                    match self.utxo_manager.lock_local_collateral(
+                        outpoint.clone(),
+                        local_mn.masternode.address.clone(),
+                        lock_height,
+                        local_mn.masternode.tier.collateral(),
+                    ) {
+                        Ok(()) => {
+                            tracing::info!(
+                                "🔒 Restored local collateral lock after reindex for {}:{}",
+                                hex::encode(outpoint.txid),
+                                outpoint.vout
+                            );
+                        }
+                        Err(crate::utxo_manager::UtxoError::LockedAsCollateral) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                "⚠️ Failed to restore local collateral lock after reindex for {}:{}: {:?}",
+                                hex::encode(outpoint.txid),
+                                outpoint.vout,
+                                e
+                            );
+                        }
+                    }
+                    self.utxo_manager
+                        .save_local_collateral_outpoint(Some(&outpoint));
+                } else {
+                    self.utxo_manager.save_local_collateral_outpoint(None);
+                }
+            } else {
+                self.utxo_manager.save_local_collateral_outpoint(None);
+            }
+        } else {
+            self.utxo_manager.save_local_collateral_outpoint(None);
+        }
+
+        let entries: Vec<_> = self
+            .registry
+            .list_all()
+            .await
+            .into_iter()
+            .filter(|info| local_address.as_deref() != Some(info.masternode.address.as_str()))
+            .filter_map(|info| {
+                info.masternode
+                    .collateral_outpoint
+                    .as_ref()
+                    .map(|outpoint| {
+                        (
+                            outpoint.clone(),
+                            info.masternode.address.clone(),
+                            lock_height,
+                            info.masternode.tier.collateral(),
+                        )
+                    })
+            })
+            .collect();
+
+        if !entries.is_empty() {
+            self.utxo_manager.rebuild_collateral_locks(entries);
+        }
+
+        let purged = self.utxo_manager.purge_stale_collateral_locks();
+        if purged > 0 {
+            tracing::warn!(
+                "🧹 [REINDEX] Purged {} stale collateral lock(s) after restore",
+                purged
+            );
+        }
     }
 
     /// Reset the BFT finality lock to a lower height so a stuck node can reorg
@@ -5644,7 +5720,9 @@ impl RpcHandler {
         if self.consensus.tx_pool.is_finalized(&txid) {
             return Err(RpcError {
                 code: -1,
-                message: "Transaction is already finalized — use clearstucktransactions to roll it back".to_string(),
+                message:
+                    "Transaction is already finalized — use clearstucktransactions to roll it back"
+                        .to_string(),
             });
         }
 
@@ -5661,10 +5739,9 @@ impl RpcHandler {
         }
 
         // Remove from the pending pool and mark as rejected so it isn't re-accepted
-        self.consensus.tx_pool.reject_transaction(
-            txid,
-            "Manually dropped via droptransaction RPC".to_string(),
-        );
+        self.consensus
+            .tx_pool
+            .reject_transaction(txid, "Manually dropped via droptransaction RPC".to_string());
 
         tracing::warn!(
             "🗑️ Dropped pending transaction {} — released {} UTXO lock(s)",
@@ -7667,4 +7744,164 @@ async fn fetch_official_peer_ips(
     }
 
     Ok(ips)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::masternode_registry::MasternodeRegistry;
+    use crate::storage::InMemoryUtxoStorage;
+    use crate::types::{Masternode, MasternodeTier, OutPoint, UTXO};
+    use crate::utxo_manager::UTXOStateManager;
+    use ed25519_dalek::SigningKey;
+
+    fn test_outpoint(byte: u8, vout: u32) -> OutPoint {
+        OutPoint {
+            txid: [byte; 32],
+            vout,
+        }
+    }
+
+    fn test_utxo(outpoint: OutPoint, address: &str, value: u64) -> UTXO {
+        UTXO {
+            outpoint,
+            value,
+            script_pubkey: address.as_bytes().to_vec(),
+            address: address.to_string(),
+            masternode_key: None,
+        }
+    }
+
+    fn test_masternode(
+        address: &str,
+        wallet_address: &str,
+        outpoint: OutPoint,
+        tier: MasternodeTier,
+        key_byte: u8,
+    ) -> Masternode {
+        let signing_key = SigningKey::from_bytes(&[key_byte; 32]);
+        Masternode::new_with_collateral(
+            address.to_string(),
+            wallet_address.to_string(),
+            tier.collateral(),
+            outpoint,
+            signing_key.verifying_key(),
+            tier,
+            1,
+        )
+    }
+
+    #[tokio::test]
+    async fn reindex_restores_collateral_locks_and_locked_balance() {
+        let storage = Arc::new(InMemoryUtxoStorage::new());
+        let mut utxo_manager = UTXOStateManager::new_with_storage(storage);
+        let db = sled::Config::new().temporary(true).open().unwrap();
+        utxo_manager.enable_collateral_persistence(&db).unwrap();
+        let utxo_manager = Arc::new(utxo_manager);
+
+        let local_outpoint = test_outpoint(1, 0);
+        let remote_outpoint = test_outpoint(2, 0);
+        let local_wallet = "time-local-wallet";
+        let remote_wallet = "time-remote-wallet";
+
+        utxo_manager
+            .add_utxo(test_utxo(
+                local_outpoint.clone(),
+                local_wallet,
+                MasternodeTier::Bronze.collateral(),
+            ))
+            .await
+            .unwrap();
+        utxo_manager
+            .add_utxo(test_utxo(
+                remote_outpoint.clone(),
+                remote_wallet,
+                MasternodeTier::Bronze.collateral(),
+            ))
+            .await
+            .unwrap();
+
+        let registry_db = Arc::new(sled::Config::new().temporary(true).open().unwrap());
+        let registry = Arc::new(MasternodeRegistry::new(
+            registry_db.clone(),
+            NetworkType::Testnet,
+        ));
+        let local_mn = test_masternode(
+            "203.0.113.10:24000",
+            local_wallet,
+            local_outpoint.clone(),
+            MasternodeTier::Bronze,
+            11,
+        );
+        let remote_mn = test_masternode(
+            "203.0.113.20:24000",
+            remote_wallet,
+            remote_outpoint.clone(),
+            MasternodeTier::Bronze,
+            22,
+        );
+
+        registry
+            .register(local_mn.clone(), local_wallet.to_string())
+            .await
+            .unwrap();
+        registry
+            .register(remote_mn.clone(), remote_wallet.to_string())
+            .await
+            .unwrap();
+        registry
+            .set_local_masternode(local_mn.address.clone())
+            .await;
+
+        let consensus = Arc::new(ConsensusEngine::new(registry.clone(), utxo_manager.clone()));
+        let blockchain = Arc::new(crate::blockchain::Blockchain::new(
+            db,
+            consensus.clone(),
+            registry.clone(),
+            utxo_manager.clone(),
+            NetworkType::Testnet,
+        ));
+        let handler = RpcHandler::new(
+            consensus,
+            utxo_manager.clone(),
+            NetworkType::Testnet,
+            registry,
+            blockchain,
+            Arc::new(tokio::sync::RwLock::new(
+                crate::network::blacklist::IPBlacklist::new(),
+            )),
+        );
+
+        utxo_manager.clear_all().await.unwrap();
+        utxo_manager
+            .add_utxo(test_utxo(
+                local_outpoint.clone(),
+                local_wallet,
+                MasternodeTier::Bronze.collateral(),
+            ))
+            .await
+            .unwrap();
+        utxo_manager
+            .add_utxo(test_utxo(
+                remote_outpoint.clone(),
+                remote_wallet,
+                MasternodeTier::Bronze.collateral(),
+            ))
+            .await
+            .unwrap();
+
+        handler.restore_collateral_locks_after_reindex(42).await;
+
+        assert!(utxo_manager.is_collateral_locked(&local_outpoint));
+        assert!(utxo_manager.is_collateral_locked(&remote_outpoint));
+        assert_eq!(
+            utxo_manager.load_local_collateral_outpoint(),
+            Some(local_outpoint.clone())
+        );
+
+        let balance = handler.get_balance(&[]).await.unwrap();
+        assert_eq!(balance["balance"], json!(1000.0));
+        assert_eq!(balance["locked"], json!(1000.0));
+        assert_eq!(balance["available"], json!(0.0));
+    }
 }

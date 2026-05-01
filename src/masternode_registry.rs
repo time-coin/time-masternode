@@ -99,6 +99,11 @@ pub struct MasternodeInfo {
     pub uptime_start: u64,      // When current uptime period started
     pub total_uptime: u64,      // Total uptime in seconds
     pub is_active: bool,
+    /// Hard local override for quorum/validator eligibility.
+    /// Set when a peer is rejected or marked incompatible and only cleared after
+    /// a clean compatible rejoin path (handshake/registration).
+    #[serde(default)]
+    pub consensus_suspended: bool,
 
     /// Unix timestamp when this masternode's daemon last started.
     /// Reported via MasternodeAnnouncementV3 and used for real remote uptime display.
@@ -363,8 +368,11 @@ impl MasternodeRegistry {
         }
 
         // Build initial sync caches from the loaded nodes.
-        let init_active: Vec<MasternodeInfo> =
-            nodes.values().filter(|i| i.is_active).cloned().collect();
+        let init_active: Vec<MasternodeInfo> = nodes
+            .values()
+            .filter(|i| Self::counts_toward_consensus(i))
+            .cloned()
+            .collect();
         let init_all: Vec<MasternodeInfo> = nodes.values().cloned().collect();
 
         // Spawn background sled-writer task. All sled inserts and removes are
@@ -494,10 +502,33 @@ impl MasternodeRegistry {
     /// Call this **while holding the `masternodes` write guard** so the cache is
     /// atomically consistent with the mutation that just completed.
     fn rebuild_node_caches(&self, nodes: &HashMap<String, MasternodeInfo>) {
-        let active: Vec<MasternodeInfo> = nodes.values().filter(|i| i.is_active).cloned().collect();
+        let active: Vec<MasternodeInfo> = nodes
+            .values()
+            .filter(|i| Self::counts_toward_consensus(i))
+            .cloned()
+            .collect();
         let all: Vec<MasternodeInfo> = nodes.values().cloned().collect();
         *self.cached_active.write() = active;
         *self.cached_all.write() = all;
+    }
+
+    fn counts_toward_consensus(info: &MasternodeInfo) -> bool {
+        info.is_active && !info.consensus_suspended
+    }
+
+    fn resolve_address_key(
+        nodes: &HashMap<String, MasternodeInfo>,
+        address: &str,
+    ) -> Option<String> {
+        if nodes.contains_key(address) {
+            return Some(address.to_string());
+        }
+
+        let address_ip = address.split(':').next().unwrap_or(address);
+        nodes
+            .keys()
+            .find(|key| key.split(':').next().unwrap_or(key.as_str()) == address_ip)
+            .cloned()
     }
 
     /// Synchronous read of active masternodes (no await required).
@@ -1436,6 +1467,7 @@ impl MasternodeRegistry {
                 existing.is_active = true;
                 existing.uptime_start = now;
                 existing.last_seen_at = now;
+                existing.consensus_suspended = false;
                 debug!(
                     "✅ Registered masternode {} (total: {}) - Tier: {:?}, now ACTIVE at timestamp {}",
                     masternode.address,
@@ -1445,6 +1477,7 @@ impl MasternodeRegistry {
                 );
             } else if should_activate {
                 existing.last_seen_at = now;
+                existing.consensus_suspended = false;
                 tracing::debug!(
                     "♻️  Connection from {} - Tier: {:?}, Active at: {}, Now: {}",
                     masternode.address,
@@ -1489,6 +1522,7 @@ impl MasternodeRegistry {
             uptime_start: now,
             total_uptime: 0,
             is_active: should_activate, // Only active if explicitly activated (true for connections, false for gossip)
+            consensus_suspended: false,
             daemon_started_at: 0,
             last_reward_height: 0,
             blocks_without_reward: 0,
@@ -1559,7 +1593,7 @@ impl MasternodeRegistry {
 
         masternodes
             .values()
-            .filter(|info| info.is_active)
+            .filter(|info| Self::counts_toward_consensus(info))
             .map(|info| (info.masternode.clone(), info.reward_address.clone()))
             .collect()
     }
@@ -1571,10 +1605,91 @@ impl MasternodeRegistry {
         masternodes
             .values()
             .filter(|info| {
-                info.is_active && Self::is_mature_for_sortition(info, current_height, self.network)
+                Self::counts_toward_consensus(info)
+                    && Self::is_mature_for_sortition(info, current_height, self.network)
             })
             .map(|info| (info.masternode.clone(), info.reward_address.clone()))
             .collect()
+    }
+
+    pub async fn suspend_from_consensus(
+        &self,
+        address: &str,
+        reason: &str,
+    ) -> Result<(), RegistryError> {
+        let is_local = self
+            .local_masternode_address
+            .read()
+            .await
+            .as_ref()
+            .map(|a| {
+                let local_ip = a.split(':').next().unwrap_or(a);
+                let addr_ip = address.split(':').next().unwrap_or(address);
+                local_ip == addr_ip
+            })
+            .unwrap_or(false);
+
+        if is_local {
+            tracing::debug!(
+                "🛡️ Ignoring consensus suspension for local masternode {}",
+                address
+            );
+            return Ok(());
+        }
+
+        let now = Self::now();
+        let mut masternodes = self.masternodes.write().await;
+        let key =
+            Self::resolve_address_key(&masternodes, address).ok_or(RegistryError::NotFound)?;
+
+        {
+            let info = masternodes.get_mut(&key).expect("resolved above");
+            if info.consensus_suspended {
+                return Ok(());
+            }
+            if info.is_active && info.uptime_start > 0 {
+                info.total_uptime += now.saturating_sub(info.uptime_start);
+            }
+            info.is_active = false;
+            info.last_seen_at = 0;
+            info.consensus_suspended = true;
+            info.peer_reports.clear();
+            self.store_masternode(&key, info)?;
+        }
+
+        self.rebuild_node_caches(&masternodes);
+        tracing::warn!(
+            "🚫 Suspended masternode {} from consensus/quorum eligibility: {}",
+            key,
+            reason
+        );
+        Ok(())
+    }
+
+    pub async fn clear_consensus_suspension(&self, address: &str) -> Result<(), RegistryError> {
+        let mut masternodes = self.masternodes.write().await;
+        let key =
+            Self::resolve_address_key(&masternodes, address).ok_or(RegistryError::NotFound)?;
+
+        let mut cleared = false;
+        {
+            let info = masternodes.get_mut(&key).expect("resolved above");
+            if info.consensus_suspended {
+                info.consensus_suspended = false;
+                self.store_masternode(&key, info)?;
+                cleared = true;
+            }
+        }
+
+        if cleared {
+            self.rebuild_node_caches(&masternodes);
+            tracing::info!(
+                "✅ Restored masternode {} to normal consensus eligibility checks",
+                key
+            );
+        }
+
+        Ok(())
     }
 
     /// Get all registered masternodes for bootstrap (blocks 0-3)
@@ -1872,7 +1987,7 @@ impl MasternodeRegistry {
             .read()
             .await
             .values()
-            .filter(|info| info.is_active)
+            .filter(|info| Self::counts_toward_consensus(info))
             .cloned()
             .collect()
     }
@@ -1941,6 +2056,9 @@ impl MasternodeRegistry {
         // divided among them rather than awarded in full to a single rotating winner.
         let free_active_window_secs: u64 = 900; // 15 minutes
         let is_free_active = |info: &MasternodeInfo| -> bool {
+            if info.consensus_suspended {
+                return false;
+            }
             if info.is_active {
                 return true; // Already active by normal gossip criteria
             }
@@ -1956,7 +2074,8 @@ impl MasternodeRegistry {
         // if the victim reconnects within one block slot.
         const ELIGIBILITY_GRACE_SECS: u64 = 90;
         let is_within_grace = |info: &MasternodeInfo| -> bool {
-            !matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
+            !info.consensus_suspended
+                && !matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
                 && info.last_seen_at > 0
                 && now.saturating_sub(info.last_seen_at) < ELIGIBILITY_GRACE_SECS
         };
@@ -2044,7 +2163,10 @@ impl MasternodeRegistry {
     pub async fn is_address_vrf_eligible(&self, address: &str, current_height: u64) -> bool {
         let nodes = self.masternodes.read().await;
         match nodes.get(address) {
-            Some(info) => Self::is_mature_for_sortition(info, current_height, self.network),
+            Some(info) => {
+                !info.consensus_suspended
+                    && Self::is_mature_for_sortition(info, current_height, self.network)
+            }
             None => true,
         }
     }
@@ -3205,8 +3327,9 @@ impl MasternodeRegistry {
             let within_grace = !matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
                 && info.last_seen_at > 0
                 && now.saturating_sub(info.last_seen_at) < ACTIVE_GRACE_SECS;
-            info.is_active =
+            let consensus_active =
                 is_directly_connected || within_grace || (meets_count && meets_diversity);
+            info.is_active = !info.consensus_suspended && consensus_active;
 
             if was_active != info.is_active {
                 status_changes += 1;
@@ -4172,6 +4295,7 @@ impl MasternodeRegistry {
             uptime_start: now,
             total_uptime: 0,
             is_active: false,
+            consensus_suspended: false,
             daemon_started_at: 0,
             last_reward_height: 0,
             blocks_without_reward: 0,
@@ -4953,6 +5077,7 @@ mod tests {
     use super::*;
     use crate::types::{MasternodeTier, OutPoint, UTXO};
     use crate::utxo_manager::UTXOStateManager;
+    use ed25519_dalek::SigningKey;
     use std::sync::Arc;
 
     fn create_test_registry() -> MasternodeRegistry {
@@ -4968,6 +5093,23 @@ mod tests {
         OutPoint {
             txid: [index as u8; 32],
             vout: index,
+        }
+    }
+
+    fn create_test_masternode(address: &str, tier: MasternodeTier) -> Masternode {
+        let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+        Masternode {
+            address: address.to_string(),
+            wallet_address: format!("wallet-{address}"),
+            reward_address: format!("reward-{address}"),
+            collateral: tier.collateral(),
+            collateral_outpoint: None,
+            locked_at: 0,
+            unlock_height: None,
+            public_key: signing_key.verifying_key(),
+            tier,
+            registered_at: 0,
+            slot_id: u32::MAX,
         }
     }
 
@@ -5000,6 +5142,50 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_consensus_suspension_excludes_until_clean_rejoin() {
+        let registry = create_test_registry();
+        let address = "10.0.0.8";
+        let masternode = create_test_masternode(address, MasternodeTier::Bronze);
+
+        registry
+            .register_internal(
+                masternode.clone(),
+                masternode.reward_address.clone(),
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(registry.active_masternodes_cached().len(), 1);
+        assert_eq!(registry.get_vrf_eligible(100).await.len(), 1);
+        assert!(registry.is_address_vrf_eligible(address, 100).await);
+
+        registry
+            .suspend_from_consensus(address, "test rejection")
+            .await
+            .unwrap();
+
+        let stored = registry.get(address).await.unwrap();
+        assert!(stored.consensus_suspended);
+        assert!(registry.active_masternodes_cached().is_empty());
+        assert!(registry.get_active_masternodes().await.is_empty());
+        assert!(registry.get_vrf_eligible(100).await.is_empty());
+        assert!(!registry.is_address_vrf_eligible(address, 100).await);
+
+        registry
+            .register_internal(masternode, "reward-rejoined".to_string(), true, true)
+            .await
+            .unwrap();
+
+        let stored = registry.get(address).await.unwrap();
+        assert!(!stored.consensus_suspended);
+        assert_eq!(registry.active_masternodes_cached().len(), 1);
+        assert_eq!(registry.get_vrf_eligible(100).await.len(), 1);
+        assert!(registry.is_address_vrf_eligible(address, 100).await);
     }
 
     #[tokio::test]

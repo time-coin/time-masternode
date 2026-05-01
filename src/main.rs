@@ -4813,6 +4813,11 @@ async fn main() {
     let rebroadcast_peers = peer_connection_registry.clone();
     let rebroadcast_shutdown = shutdown_token.clone();
     let rebroadcast_handle = tokio::spawn(async move {
+        const STALE_PENDING_REBROADCAST_AGE: std::time::Duration =
+            std::time::Duration::from_secs(60);
+        const STALE_PENDING_EVICTION_AGE: std::time::Duration =
+            std::time::Duration::from_secs(24 * 60 * 60);
+
         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120));
         interval.tick().await; // consume first immediate tick
@@ -4823,11 +4828,21 @@ async fn main() {
                     break;
                 }
                 _ = interval.tick() => {
+                    let evicted_stale_pending = rebroadcast_consensus
+                        .evict_stale_pending_transactions(STALE_PENDING_EVICTION_AGE)
+                        .await;
+                    if evicted_stale_pending > 0 {
+                        tracing::warn!(
+                            "🧹 Evicted {} stale pending transaction(s) older than one day",
+                            evicted_stale_pending
+                        );
+                    }
+
                     let stale_finalized = rebroadcast_consensus
                         .get_stale_finalized(std::time::Duration::from_secs(60));
                     let stale_pending = rebroadcast_consensus
                         .tx_pool
-                        .get_stale_pending(std::time::Duration::from_secs(60));
+                        .get_stale_pending(STALE_PENDING_REBROADCAST_AGE);
 
                     if stale_finalized.is_empty() && stale_pending.is_empty() {
                         continue;

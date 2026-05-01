@@ -220,6 +220,7 @@ fn spawn_fork_resolution(
     peer_ip: String,
     blacklist: Option<Arc<RwLock<IPBlacklist>>>,
     peer_registry: Arc<PeerConnectionRegistry>,
+    masternode_registry: Arc<MasternodeRegistry>,
 ) {
     tokio::spawn(async move {
         if let Err(e) = blockchain.handle_fork(blocks, peer_ip.clone()).await {
@@ -254,6 +255,12 @@ fn spawn_fork_resolution(
                             &peer_ip,
                             &format!("Reward-hijacking reorg chain: {}", e),
                             false, // not permanent
+                        )
+                        .await;
+                    let _ = masternode_registry
+                        .suspend_from_consensus(
+                            &peer_ip,
+                            &format!("Reward-hijacking reorg chain: {}", e),
                         )
                         .await;
                 }
@@ -653,6 +660,41 @@ impl MessageHandler {
                     return;
                 }
                 blacklist.write().await.add_permanent_ban(ip, reason);
+            }
+        }
+        self.suspend_peer_from_consensus(context, reason).await;
+    }
+
+    async fn suspend_peer_from_consensus(&self, context: &MessageContext, reason: &str) {
+        match context
+            .masternode_registry
+            .suspend_from_consensus(&self.peer_ip, reason)
+            .await
+        {
+            Ok(()) => {}
+            Err(crate::masternode_registry::RegistryError::NotFound) => {}
+            Err(e) => {
+                warn!(
+                    "⚠️ [{}] Failed to suspend {} from consensus: {}",
+                    self.direction, self.peer_ip, e
+                );
+            }
+        }
+    }
+
+    async fn clear_peer_consensus_suspension(&self, context: &MessageContext) {
+        match context
+            .masternode_registry
+            .clear_consensus_suspension(&self.peer_ip)
+            .await
+        {
+            Ok(()) => {}
+            Err(crate::masternode_registry::RegistryError::NotFound) => {}
+            Err(e) => {
+                warn!(
+                    "⚠️ [{}] Failed to clear consensus suspension for {}: {}",
+                    self.direction, self.peer_ip, e
+                );
             }
         }
     }
@@ -2518,6 +2560,11 @@ impl MessageHandler {
                     &format!("height_{}_before_genesis", block_height),
                 )
                 .await;
+            self.suspend_peer_from_consensus(
+                context,
+                &format!("Pre-launch block announcement {}", block_height),
+            )
+            .await;
             if let Some(blacklist) = &context.blacklist {
                 let bare_ip = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
                 if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
@@ -2754,6 +2801,11 @@ impl MessageHandler {
                             false, // not permanent
                         )
                         .await;
+                    self.suspend_peer_from_consensus(
+                        context,
+                        &format!("Reward-hijacking block {}: {}", block_height, e),
+                    )
+                    .await;
                     return Err(format!(
                         "Peer {} temp-banned 6h: sent invalid reward block {}",
                         self.peer_ip, block_height
@@ -2891,6 +2943,15 @@ impl MessageHandler {
                 &hex::encode(&peer_genesis_hash[..8]),
             )
             .await;
+        self.suspend_peer_from_consensus(
+            context,
+            &format!(
+                "Genesis hash mismatch: ours={}, theirs={}",
+                hex::encode(&our_genesis_hash[..8]),
+                hex::encode(&peer_genesis_hash[..8])
+            ),
+        )
+        .await;
 
         // Permanently ban the peer in the IP blacklist — a wrong genesis
         // means this peer is on a completely different chain and will never
@@ -3021,6 +3082,14 @@ impl MessageHandler {
                                 "committed_to_different_genesis",
                             )
                             .await;
+                        self.suspend_peer_from_consensus(
+                            context,
+                            &format!(
+                                "Committed to different genesis at height {}",
+                                peer_committed_height
+                            ),
+                        )
+                        .await;
                         return Err(format!(
                             "DISCONNECT: peer {} is committed to a different genesis at height {}",
                             self.peer_ip, peer_committed_height
@@ -3051,6 +3120,11 @@ impl MessageHandler {
                                 "wrong_timestamp",
                             )
                             .await;
+                        self.suspend_peer_from_consensus(
+                            context,
+                            &format!("Genesis timestamp mismatch: {}", e),
+                        )
+                        .await;
                         return Err(format!(
                             "DISCONNECT: peer {} has genesis timestamp mismatch: {}",
                             self.peer_ip, e
@@ -3096,6 +3170,11 @@ impl MessageHandler {
                                 .peer_registry
                                 .mark_genesis_incompatible(&self.peer_ip, "none", "wrong_timestamp")
                                 .await;
+                            self.suspend_peer_from_consensus(
+                                context,
+                                &format!("Wrong genesis timestamp: {}", e),
+                            )
+                            .await;
                         } else {
                             warn!("❌ [{}] Failed to add genesis block: {}", self.direction, e);
                         }
@@ -6479,6 +6558,7 @@ impl MessageHandler {
                         .peer_registry
                         .mark_incompatible(&self.peer_ip, &reason, false)
                         .await;
+                    self.suspend_peer_from_consensus(context, &reason).await;
                     return Err(format!("DISCONNECT: zombie peer ({})", self.peer_ip));
                 }
             } else {
@@ -6553,6 +6633,7 @@ impl MessageHandler {
                         self.peer_ip.clone(),
                         context.blacklist.clone(),
                         context.peer_registry.clone(),
+                        context.masternode_registry.clone(),
                     );
 
                     return Ok(None);
@@ -6634,6 +6715,7 @@ impl MessageHandler {
                             .peer_registry
                             .clear_incompatible(&self.peer_ip)
                             .await;
+                        self.clear_peer_consensus_suspension(context).await;
                     }
                 }
                 Ok(false) => {
@@ -6732,6 +6814,7 @@ impl MessageHandler {
                         self.peer_ip.clone(),
                         context.blacklist.clone(),
                         context.peer_registry.clone(),
+                        context.masternode_registry.clone(),
                     );
 
                     // Stop processing remaining blocks - let fork resolution handle it
@@ -6772,6 +6855,11 @@ impl MessageHandler {
                                 false, // NOT permanent — peer can reconnect after resetting
                             )
                             .await;
+                        self.suspend_peer_from_consensus(
+                            context,
+                            &format!("Bad block {} reward (bootstrap race): {}", block_height, e),
+                        )
+                        .await;
                     } else {
                         // SECURITY: Peer sent a reward-hijacking block on an established chain.
                         error!(
@@ -6795,6 +6883,11 @@ impl MessageHandler {
                                 true, // permanent
                             )
                             .await;
+                        self.suspend_peer_from_consensus(
+                            context,
+                            &format!("Reward-hijacking block {}: {}", block_height, e),
+                        )
+                        .await;
                     }
                     return Err(format!(
                         "Peer {} incompatible: sent bad reward-distribution block {}",
@@ -6820,6 +6913,11 @@ impl MessageHandler {
                                 false, // temporary - will be rechecked
                             )
                             .await;
+                        self.suspend_peer_from_consensus(
+                            context,
+                            &format!("Sent corrupted block {}: {}", block.header.height, e),
+                        )
+                        .await;
                     }
 
                     // Stop processing ALL blocks from this peer in this batch
