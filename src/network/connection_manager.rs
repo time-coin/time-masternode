@@ -539,6 +539,33 @@ impl ConnectionManager {
         }
     }
 
+    /// Mark an outbound connection as disconnected, but only if the current entry
+    /// still represents an outbound session.
+    ///
+    /// This prevents a late-closing outbound task from wiping out a newer inbound
+    /// replacement for the same peer, which would otherwise trigger unnecessary
+    /// reconnect churn.
+    pub fn mark_outbound_disconnected(&self, peer_ip: &str) -> bool {
+        if let Some(mut entry) = self.connections.get_mut(peer_ip) {
+            if entry.direction != ConnectionDirection::Outbound {
+                return false;
+            }
+
+            if entry.state == PeerConnectionState::Connected {
+                self.connected_count
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                self.outbound_count
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
+
+            entry.state = PeerConnectionState::Disconnected;
+            entry.disconnected_at = Some(Instant::now());
+            return true;
+        }
+
+        false
+    }
+
     /// Clear reconnecting state for a peer (allow immediate retry)
     pub fn clear_reconnecting(&self, peer_ip: &str) {
         if let Some(mut entry) = self.connections.get_mut(peer_ip) {

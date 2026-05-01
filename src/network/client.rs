@@ -845,15 +845,17 @@ impl ConnectionResources {
                 }
             };
 
-            res.connection_manager.mark_disconnected(&ip);
+            res.connection_manager.mark_outbound_disconnected(&ip);
+            let peer_still_connected = res.peer_registry.is_connected(&ip);
 
             let connection_was_live = connect_duration.is_some();
             // AV3/Coordinated disconnect: only count connections that were actually live
             // (Ok path), not failed attempts (Err path). During partition recovery a node
             // tries hundreds of masternodes in rapid succession; counting those failures
             // would flood the /16 detector and falsely block legitimate cloud-provider peers.
-            // The inbound side is wired in server.rs::handle_peer (already gated on handshake_done).
-            if is_masternode && connection_was_live {
+            // If this outbound was superseded by a live inbound replacement, the peer is
+            // still connected and this is not a real disconnect event.
+            if is_masternode && connection_was_live && !peer_still_connected {
                 if let Some(ref ad) = res.attack_detector {
                     let ip_str = ip.split(':').next().unwrap_or(&ip);
                     ad.record_synchronized_disconnect(ip_str);
@@ -861,7 +863,7 @@ impl ConnectionResources {
             }
 
             // Mark inactive on disconnect (only if no live inbound connection replaced it)
-            if is_masternode && !res.peer_registry.is_connected(&ip) {
+            if is_masternode && !peer_still_connected {
                 if let Err(e) = res
                     .masternode_registry
                     .mark_inactive_on_disconnect_with_duration(&ip, connect_duration)
@@ -986,7 +988,7 @@ async fn maintain_peer_connection(
     let result = peer_conn.run_message_loop_unified(config).await;
 
     // Clean up on disconnect in both managers
-    connection_manager.mark_disconnected(&peer_ip);
+    connection_manager.mark_outbound_disconnected(&peer_ip);
     // Only clean up peer_registry if we're still the active outbound connection.
     // If the connection was superseded by an inbound (IP tiebreaker in
     // try_register_inbound), skip cleanup to avoid corrupting the new inbound.
