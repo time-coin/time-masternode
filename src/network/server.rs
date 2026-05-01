@@ -1797,19 +1797,22 @@ async fn handle_peer(
                                         continue;
                                     }
 
-                                    // Check whether all input UTXOs are present in local storage.
-                                    // For a TransactionFinalized message the network has already
-                                    // reached consensus on this TX, so missing inputs only mean our
-                                    // local UTXO set is diverged — not that the TX is invalid.
-                                    // We still apply the outputs so wallets see the correct balance;
-                                    // missing inputs are skipped (they will be cleaned up by the
-                                    // next UTXO reconciliation round).
+                                    // Check whether all input UTXOs are accounted for locally.
+                                    // Tombstoned inputs are legitimately spent (removed from sled
+                                    // storage by mark_timevote_finalized) and must NOT be treated
+                                    // as a UTXO-set divergence — doing so caused the TX to skip
+                                    // confirmed-pool insertion, leaving it stuck forever.
+                                    // Only flag divergence when an input is neither in storage
+                                    // nor tombstoned (i.e. genuinely unknown to this node).
                                     let mut inputs_exist = true;
                                     for input in &tx.inputs {
-                                        if consensus.utxo_manager.get_utxo(&input.previous_output).await.is_err() {
+                                        let in_storage = consensus.utxo_manager.get_utxo(&input.previous_output).await.is_ok();
+                                        let tombstoned = consensus.utxo_manager.is_tombstoned(&input.previous_output);
+                                        if !in_storage && !tombstoned {
                                             tracing::warn!(
                                                 "⚠️ TransactionFinalized {} from {}: input {} not in local storage \
-                                                 (UTXO set diverged) — will apply outputs without marking inputs spent",
+                                                 and not tombstoned (UTXO set diverged) — will apply outputs without \
+                                                 marking inputs spent",
                                                 hex::encode(*txid), peer.addr, input.previous_output
                                             );
                                             inputs_exist = false;
