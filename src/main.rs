@@ -1313,6 +1313,7 @@ async fn main() {
         tracing::info!("🏠 Local public IP detected: {}", ip);
         // Set local IP in peer connection registry for deterministic direction
         peer_connection_registry.set_local_ip(ip.clone());
+        connection_manager.set_local_ip(ip.clone());
     }
 
     // Network client will be started after server is created so we can share resources

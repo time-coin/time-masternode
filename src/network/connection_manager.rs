@@ -6,7 +6,9 @@
 #![allow(dead_code)] // Public API - methods will be used by server and monitoring
 
 use dashmap::DashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 // Phase 2.1: Connection limits for DoS protection
@@ -55,6 +57,7 @@ pub struct ConnectionManager {
     connected_count: Arc<std::sync::atomic::AtomicUsize>,
     inbound_count: Arc<std::sync::atomic::AtomicUsize>,
     outbound_count: Arc<std::sync::atomic::AtomicUsize>,
+    local_ip: OnceLock<String>,
     // Phase 2.1: Connection rate limiting
     recent_connections: Arc<DashMap<Instant, String>>, // timestamp -> peer_ip
     last_cleanup: Arc<std::sync::Mutex<Instant>>,
@@ -68,8 +71,32 @@ impl ConnectionManager {
             connected_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             inbound_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             outbound_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            local_ip: OnceLock::new(),
             recent_connections: Arc::new(DashMap::new()),
             last_cleanup: Arc::new(std::sync::Mutex::new(Instant::now())),
+        }
+    }
+
+    pub fn set_local_ip(&self, ip: String) {
+        let _ = self.local_ip.set(ip);
+    }
+
+    fn should_keep_outbound(&self, peer_ip: &str) -> bool {
+        if let Some(local_ip) = self.local_ip.get() {
+            if let (Ok(local_addr), Ok(peer_addr)) =
+                (local_ip.parse::<IpAddr>(), peer_ip.parse::<IpAddr>())
+            {
+                match (local_addr, peer_addr) {
+                    (IpAddr::V4(l), IpAddr::V4(p)) => l.octets() > p.octets(),
+                    (IpAddr::V6(l), IpAddr::V6(p)) => l.octets() > p.octets(),
+                    (IpAddr::V6(_), IpAddr::V4(_)) => true,
+                    (IpAddr::V4(_), IpAddr::V6(_)) => false,
+                }
+            } else {
+                local_ip.as_str() > peer_ip
+            }
+        } else {
+            true
         }
     }
 
@@ -264,12 +291,17 @@ impl ConnectionManager {
     ///
     /// Atomically registers the peer as Connected/Inbound and returns `true`.
     /// Returns `false` (caller must close the socket immediately) if:
-    ///   - The peer already has any connection (inbound or outbound) in any state.
+    ///   - The peer already has an incompatible active connection state.
     ///   - The connection would exceed capacity limits (unless whitelisted).
     ///
     /// This is the counterpart to `mark_connecting` for outbound. All inbound
     /// connections MUST go through this method so ConnectionManager is the
     /// single source of truth for both directions.
+    ///
+    /// When we already have an outbound connection to the same peer, use a
+    /// deterministic IP tiebreaker: one side yields its outbound slot and
+    /// accepts the inbound replacement, preventing the "both peers dial each
+    /// other and both reject inbound" disconnect loop.
     pub fn accept_inbound(&self, peer_ip: &str, is_whitelisted: bool) -> bool {
         use dashmap::mapref::entry::Entry;
 
@@ -314,8 +346,46 @@ impl ConnectionManager {
                     self.inbound_count
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     true
+                } else if e.get().direction == ConnectionDirection::Outbound {
+                    if self.should_keep_outbound(peer_ip) {
+                        tracing::debug!(
+                            "🔄 Rejecting inbound from {} — keeping {:?} outbound (IP tiebreaker)",
+                            peer_ip,
+                            e.get().state
+                        );
+                        false
+                    } else {
+                        tracing::info!(
+                            "🔄 Simultaneous connection with {} — yielding {:?} outbound and accepting inbound",
+                            peer_ip,
+                            e.get().state
+                        );
+
+                        if e.get().state == PeerConnectionState::Connected {
+                            self.outbound_count
+                                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                            self.inbound_count
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+
+                        let connection_count = e.get().connection_count.saturating_add(1);
+                        e.insert(ConnectionInfo {
+                            state: PeerConnectionState::Connected,
+                            direction: ConnectionDirection::Inbound,
+                            connected_at: Some(Instant::now()),
+                            disconnected_at: None,
+                            connection_count,
+                            last_message_at: Some(Instant::now()),
+                            bytes_sent: 0,
+                            bytes_received: 0,
+                            messages_sent: 0,
+                            messages_received: 0,
+                            is_whitelisted,
+                        });
+                        true
+                    }
                 } else {
-                    // Connecting / Connected / Reconnecting — active session already exists.
+                    // Active inbound session already exists.
                     tracing::debug!(
                         "🔄 Rejecting inbound from {} — already {:?} (ConnectionManager)",
                         peer_ip,
@@ -767,5 +837,45 @@ impl ConnectionManager {
 impl Default for ConnectionManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accept_inbound_yields_outbound_when_local_ip_is_lower() {
+        let manager = ConnectionManager::new();
+        manager.set_local_ip("10.0.0.1".to_string());
+
+        assert!(manager.mark_connecting("10.0.0.2"));
+        assert!(manager.mark_connected("10.0.0.2"));
+        assert!(manager.accept_inbound("10.0.0.2", true));
+
+        let entry = manager.connections.get("10.0.0.2").unwrap();
+        assert_eq!(entry.direction, ConnectionDirection::Inbound);
+        assert_eq!(entry.state, PeerConnectionState::Connected);
+        assert!(entry.is_whitelisted);
+        assert_eq!(manager.connected_count(), 1);
+        assert_eq!(manager.outbound_count(), 0);
+        assert_eq!(manager.inbound_count(), 1);
+    }
+
+    #[test]
+    fn accept_inbound_rejects_when_local_ip_should_keep_outbound() {
+        let manager = ConnectionManager::new();
+        manager.set_local_ip("10.0.0.9".to_string());
+
+        assert!(manager.mark_connecting("10.0.0.2"));
+        assert!(manager.mark_connected("10.0.0.2"));
+        assert!(!manager.accept_inbound("10.0.0.2", true));
+
+        let entry = manager.connections.get("10.0.0.2").unwrap();
+        assert_eq!(entry.direction, ConnectionDirection::Outbound);
+        assert_eq!(entry.state, PeerConnectionState::Connected);
+        assert_eq!(manager.connected_count(), 1);
+        assert_eq!(manager.outbound_count(), 1);
+        assert_eq!(manager.inbound_count(), 0);
     }
 }
