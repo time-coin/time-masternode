@@ -3604,7 +3604,12 @@ impl ConsensusEngine {
                 match self.utxo_manager.get_utxo(&input.previous_output).await {
                     Ok(_) => existing_inputs.push(input.previous_output.clone()),
                     Err(_) => {
-                        any_missing = true;
+                        // A tombstone means this UTXO was legitimately spent (sled entry
+                        // removed during finalization). Only flag as missing when there is
+                        // no tombstone — that is the true phantom-input case.
+                        if !self.utxo_manager.is_tombstoned(&input.previous_output) {
+                            any_missing = true;
+                        }
                     }
                 }
             }

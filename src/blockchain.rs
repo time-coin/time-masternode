@@ -3780,12 +3780,16 @@ impl Blockchain {
 
             // Validate input UTXOs exist and are in a spent state (SpentFinalized/SpentPending/Locked).
             // If inputs are Unspent or missing, the TX was cleared/reverted — evict from pool.
+            // Exception: after restart, SpentFinalized entries are not in utxo_states (the sled
+            // entry was removed during finalization). A tombstone is the persisted proof that the
+            // UTXO was legitimately spent — treat None+tombstoned the same as SpentFinalized.
             let mut inputs_valid = true;
             for input in &tx.inputs {
                 match self.utxo_manager.get_state(&input.previous_output) {
                     Some(UTXOState::SpentFinalized { .. })
                     | Some(UTXOState::SpentPending { .. })
                     | Some(UTXOState::Locked { .. }) => {}
+                    None if self.utxo_manager.is_tombstoned(&input.previous_output) => {}
                     other => {
                         tracing::warn!(
                             "⚠️  Block {}: Evicting TX {} - input {} is {:?} (expected spent state)",
@@ -7610,12 +7614,20 @@ impl Blockchain {
             transactions_to_repool.len()
         );
 
-        // Return non-finalized transactions to mempool for re-mining
-        // NOTE: Requires transaction pool integration - architectural change needed
-        if !transactions_to_repool.is_empty() {
+        // Return transactions from rolled-back blocks to the finalized pool so they can
+        // be re-included in the canonical chain. In the TIME Coin protocol all
+        // value-transfer transactions achieve TimeVote finality BEFORE block inclusion,
+        // so they go back to the finalized pool (not pending). add_finalized_direct is
+        // idempotent — it silently skips TXs already present.
+        let mut repooled = 0usize;
+        for tx in &transactions_to_repool {
+            self.consensus.tx_pool.add_finalized_direct(tx.clone(), 0);
+            repooled += 1;
+        }
+        if repooled > 0 {
             tracing::info!(
-                "💡 {} non-finalized transactions need to be returned to mempool (requires transaction pool integration)",
-                transactions_to_repool.len()
+                "📋 Rollback: re-queued {} transaction(s) into finalized pool for re-inclusion",
+                repooled
             );
         }
 
