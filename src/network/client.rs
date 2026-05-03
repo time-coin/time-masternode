@@ -48,6 +48,11 @@ pub struct NetworkClient {
     network_type: NetworkType,
     /// Attack detector for recording coordinated disconnect events (outbound side of AV3).
     attack_detector: Option<Arc<crate::ai::attack_detector::AttackDetector>>,
+    /// Discovered peer IPs from time-coin.io.  When non-empty, the daemon
+    /// connects to these first on startup (Phase 0); if there is no local
+    /// genesis the pyramid expansion in Phase 1 is gated until initial
+    /// blockchain sync completes from this trusted set.
+    discovered_peer_ips: Vec<String>,
 }
 
 impl NetworkClient {
@@ -97,6 +102,7 @@ impl NetworkClient {
             tls_config: None,
             network_type,
             attack_detector: None,
+            discovered_peer_ips: Vec::new(),
         }
     }
 
@@ -116,6 +122,11 @@ impl NetworkClient {
         self.attack_detector = Some(ad);
     }
 
+    /// Seed the client with trusted discovery peers fetched at startup.
+    pub fn set_discovered_peer_ips(&mut self, peers: Vec<String>) {
+        self.discovered_peer_ips = peers;
+    }
+
     pub async fn start(&self) {
         let peer_manager = self.peer_manager.clone();
         let masternode_registry = self.masternode_registry.clone();
@@ -126,6 +137,7 @@ impl NetworkClient {
         let reserved_masternode_slots = self.reserved_masternode_slots;
         let local_ip = self.local_ip.clone();
         let blacklisted_peers = self.blacklisted_peers.clone();
+        let discovered_peer_ips = self.discovered_peer_ips.clone();
 
         let res = ConnectionResources {
             port: self.p2p_port,
@@ -191,6 +203,46 @@ impl NetworkClient {
                     })
                     .collect()
             };
+
+            // PHASE 0: When joining an existing network without local genesis, dial the
+            // trusted discovery peers first. This guarantees we have a path to the
+            // whitelist before the broader topology/reconnection logic kicks in.
+            let trusted_startup_peers = dedup_peers(discovered_peer_ips);
+            if !blockchain.has_genesis() && !trusted_startup_peers.is_empty() {
+                tracing::info!(
+                    "🔐 [PHASE0] No local genesis - connecting to {} trusted discovery peer(s) first",
+                    trusted_startup_peers.len()
+                );
+
+                let mut phase0_connections = 0usize;
+                for ip in &trusted_startup_peers {
+                    if should_skip(ip) {
+                        continue;
+                    }
+                    if let Some(ref bl) = res.ip_blacklist {
+                        if let Ok(parsed_ip) = ip.parse::<std::net::IpAddr>() {
+                            if bl.write().await.is_blacklisted(parsed_ip).is_some() {
+                                tracing::debug!("⏭️  [PHASE0] Skipping {} (blacklisted)", ip);
+                                continue;
+                            }
+                        }
+                    }
+                    if !connection_manager.mark_connecting(ip) {
+                        continue;
+                    }
+                    tracing::debug!("🔗 [PHASE0] Connecting to trusted peer {}", ip);
+                    res.spawn(ip.clone(), false);
+                    phase0_connections += 1;
+                }
+
+                if phase0_connections > 0 {
+                    tracing::info!(
+                        "✅ [PHASE0] Initiated {} trusted bootstrap connection(s)",
+                        phase0_connections
+                    );
+                    sleep(Duration::from_secs(2)).await;
+                }
+            }
 
             // PHASE 1: Pyramid-aware startup connections.
             //

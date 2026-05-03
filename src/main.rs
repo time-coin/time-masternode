@@ -2218,7 +2218,7 @@ async fn main() {
                 };
 
                 for peer_ip in &priority_peers {
-                    let msg = crate::network::message::NetworkMessage::GetBlocks(0, 0);
+                    let msg = crate::network::message::NetworkMessage::RequestGenesis;
                     let _ = peer_registry_for_sync.send_to_peer(peer_ip, msg).await;
                 }
 
@@ -2245,7 +2245,7 @@ async fn main() {
                             fallback.len()
                         );
                         for peer_ip in &fallback {
-                            let msg = crate::network::message::NetworkMessage::GetBlocks(0, 0);
+                            let msg = crate::network::message::NetworkMessage::RequestGenesis;
                             let _ = peer_registry_for_sync.send_to_peer(peer_ip, msg).await;
                         }
                         // Brief wait for fallback response
@@ -2426,9 +2426,7 @@ async fn main() {
                                     };
                                     for peer_ip in targets {
                                         let msg =
-                                            crate::network::message::NetworkMessage::GetBlocks(
-                                                0, 0,
-                                            );
+                                            crate::network::message::NetworkMessage::RequestGenesis;
                                         let _ =
                                             peer_registry_for_sync.send_to_peer(peer_ip, msg).await;
                                     }
@@ -5467,6 +5465,7 @@ async fn main() {
             if let Some(ref tls) = tls_config {
                 network_client.set_tls_config(tls.clone());
             }
+            network_client.set_discovered_peer_ips(discovered_peer_ips.clone());
             network_client.start().await;
 
             // BOOTSTRAP: At genesis, aggressively request masternode lists from all peers

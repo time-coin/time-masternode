@@ -1717,6 +1717,24 @@ impl MessageHandler {
         }
 
         let mut blocks = Vec::new();
+        if start == 0 && end == 0 {
+            match context.blockchain.get_block_by_height(0).await {
+                Ok(genesis) => {
+                    debug!(
+                        "📤 [{}] Serving genesis block to {} via legacy GetBlocks(0,0)",
+                        self.direction, self.peer_ip
+                    );
+                    return Ok(Some(NetworkMessage::BlocksResponse(vec![genesis])));
+                }
+                Err(e) => {
+                    debug!(
+                        "⚠️ [{}] Cannot serve legacy GetBlocks(0,0) to {} - no genesis yet: {}",
+                        self.direction, self.peer_ip, e
+                    );
+                    return Ok(Some(NetworkMessage::BlocksResponse(Vec::new())));
+                }
+            }
+        }
         // Send blocks we have: cap at our_height, requested end, and response limit.
         // Use MAX_BLOCKS_PER_RESPONSE (not SYNC_BATCH_SIZE) to ensure the serialized
         // response fits within the 8MB frame limit.
