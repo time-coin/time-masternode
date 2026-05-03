@@ -588,8 +588,23 @@ impl PeerConnectionRegistry {
         }
 
         let incompatible = self.incompatible_peers.read().await;
-        let all_connections: Vec<String> =
-            self.connections.iter().map(|e| e.key().clone()).collect();
+        // Use peer_writers as the source of truth for live connections — identical
+        // to get_connected_peers(). The connections DashMap can contain ghost entries
+        // (peers in "connecting" state or where cleanup raced) that have no writer,
+        // causing send_to_peer() to fail with "Peer X not connected" for every
+        // peer the sync code picks from this list.
+        let writers = self.peer_writers.read().await;
+        let all_connections: Vec<String> = self
+            .connections
+            .iter()
+            .filter(|entry| {
+                writers
+                    .get(entry.key())
+                    .map(|w| !w.is_closed())
+                    .unwrap_or(false)
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
         let compatible: Vec<String> = all_connections
             .iter()
             .filter(|ip| !incompatible.contains_key(extract_ip(ip)))
