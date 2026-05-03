@@ -2032,11 +2032,34 @@ impl RpcHandler {
             }
 
             if sent > 0 || received > 0 {
-                let category = if sent > 0 { "send" } else { "receive" };
-                let net_amount = if category == "send" {
+                let outputs_all_to_self = received > 0
+                    && tx
+                        .outputs
+                        .iter()
+                        .all(|o| String::from_utf8_lossy(&o.script_pubkey) == local_address);
+                let category = if sent > 0 && outputs_all_to_self {
+                    "consolidate"
+                } else if sent > 0 {
+                    "send"
+                } else {
+                    "receive"
+                };
+                let net_amount = if category == "consolidate" {
+                    received as f64 / 100_000_000.0
+                } else if category == "send" {
                     -((sent.saturating_sub(received)) as f64 / 100_000_000.0)
                 } else {
                     received as f64 / 100_000_000.0
+                };
+                let fee = if category == "send" || category == "consolidate" {
+                    let total_out: u64 = tx.outputs.iter().map(|o| o.value).sum();
+                    if sent > total_out {
+                        Some(-((sent - total_out) as f64 / 100_000_000.0))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
                 };
 
                 let memo = tx
@@ -2053,6 +2076,10 @@ impl RpcHandler {
                     "time": tx.timestamp,
                     "blocktime": tx.timestamp,
                 });
+
+                if let Some(f) = fee {
+                    entry["fee"] = json!(f);
+                }
 
                 if let Some(ref m) = memo {
                     entry["memo"] = json!(m);
@@ -2089,16 +2116,58 @@ impl RpcHandler {
                 }
             }
 
-            if received > 0 {
+            let mut sent: u64 = 0;
+            for input in &tx.inputs {
+                if let Ok(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
+                    if utxo.address == local_address {
+                        sent += utxo.value;
+                    }
+                }
+            }
+
+            if sent > 0 || received > 0 {
+                let outputs_all_to_self = received > 0
+                    && tx
+                        .outputs
+                        .iter()
+                        .all(|o| String::from_utf8_lossy(&o.script_pubkey) == local_address);
+                let category = if sent > 0 && outputs_all_to_self {
+                    "consolidate"
+                } else if sent > 0 {
+                    "send"
+                } else {
+                    "receive"
+                };
+                let net_amount = if category == "consolidate" {
+                    received as f64 / 100_000_000.0
+                } else if category == "send" {
+                    -((sent.saturating_sub(received)) as f64 / 100_000_000.0)
+                } else {
+                    received as f64 / 100_000_000.0
+                };
+                let fee = if category == "send" || category == "consolidate" {
+                    let total_out: u64 = tx.outputs.iter().map(|o| o.value).sum();
+                    if sent > total_out {
+                        Some(-((sent - total_out) as f64 / 100_000_000.0))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 let mut entry = json!({
                     "txid": txid,
-                    "category": "receive",
-                    "amount": received as f64 / 100_000_000.0,
+                    "category": category,
+                    "amount": net_amount,
                     "confirmations": 0,
                     "finalized": false,
                     "time": tx.timestamp,
                     "blocktime": tx.timestamp,
                 });
+                if let Some(f) = fee {
+                    entry["fee"] = json!(f);
+                }
                 if let Some(ref enc) = tx.encrypted_memo {
                     entry["encrypted_memo"] = json!(hex::encode(enc));
                 }
@@ -2421,6 +2490,16 @@ impl RpcHandler {
                 } else {
                     received as f64 / 100_000_000.0
                 };
+                let fee = if category == "send" || category == "consolidate" {
+                    let total_out: u64 = tx.outputs.iter().map(|o| o.value).sum();
+                    if sent > total_out {
+                        Some(-((sent - total_out) as f64 / 100_000_000.0))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
 
                 let (address, vout) = if category == "send" && !ext_address.is_empty() {
                     (&ext_address, ext_vout)
@@ -2441,6 +2520,10 @@ impl RpcHandler {
                     "time": tx.timestamp,
                     "blocktime": tx.timestamp,
                 });
+
+                if let Some(f) = fee {
+                    entry["fee"] = json!(f);
+                }
 
                 let memo = tx
                     .encrypted_memo
@@ -2526,6 +2609,16 @@ impl RpcHandler {
                 } else {
                     received as f64 / 100_000_000.0
                 };
+                let fee = if category == "send" || category == "consolidate" {
+                    let total_out: u64 = tx.outputs.iter().map(|o| o.value).sum();
+                    if sent > total_out {
+                        Some(-((sent - total_out) as f64 / 100_000_000.0))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let (address, vout) = if category == "send" && !ext_address.is_empty() {
                     (&ext_address, ext_vout)
                 } else if !recv_address.is_empty() {
@@ -2544,6 +2637,10 @@ impl RpcHandler {
                     "time": tx.timestamp,
                     "blocktime": tx.timestamp,
                 });
+
+                if let Some(f) = fee {
+                    entry["fee"] = json!(f);
+                }
 
                 let memo = tx
                     .encrypted_memo
