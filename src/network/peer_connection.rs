@@ -1080,6 +1080,36 @@ impl PeerConnection {
         // Extract broadcast_rx before the loop to avoid borrow checker issues
         let mut broadcast_rx = config.broadcast_rx.take();
 
+        // Spawn a background genesis compatibility check for this connection.
+        // If the peer responds with a different genesis hash we permanently ban it and
+        // disconnect immediately.  The oneshot result is polled inside the select loop
+        // using the same pattern as broadcast_rx.
+        let mut genesis_check_rx: Option<tokio::sync::oneshot::Receiver<bool>> =
+            if let Some(ref blockchain) = config.blockchain {
+                if config.peer_registry.claim_genesis_check(&self.peer_ip) {
+                    let our_genesis_hash = blockchain
+                        .get_block_by_height(0)
+                        .await
+                        .map(|b| b.hash())
+                        .unwrap_or([0u8; 32]);
+                    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+                    let registry = Arc::clone(&config.peer_registry);
+                    let peer_ip = self.peer_ip.clone();
+                    tokio::spawn(async move {
+                        let compatible = registry
+                            .verify_genesis_compatibility(&peer_ip, our_genesis_hash)
+                            .await;
+                        registry.release_genesis_check(&peer_ip);
+                        let _ = tx.send(compatible);
+                    });
+                    Some(rx)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
         // Create handler once per connection (reused across all messages)
         let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
 
@@ -1166,6 +1196,42 @@ impl PeerConnection {
                                   self.direction, self.peer_ip, e);
                             break;
                         }
+                    }
+                }
+
+                // Receive genesis compatibility check result
+                result = async {
+                    if let Some(ref mut rx) = genesis_check_rx {
+                        rx.await.unwrap_or(true) // timeout/cancelled → assume compatible
+                    } else {
+                        std::future::pending().await
+                    }
+                }, if genesis_check_rx.is_some() => {
+                    // Consume the receiver so this branch never fires again
+                    genesis_check_rx = None;
+                    if !result {
+                        // Peer replied with a different genesis hash — wrong network/fork.
+                        // Permanently ban and disconnect.
+                        warn!(
+                            "🚫 [{:?}] Disconnecting {} — genesis hash mismatch (wrong network/fork). Banning.",
+                            self.direction, self.peer_ip
+                        );
+                        if let Some(ref blacklist) = config.blacklist {
+                            let bare = self
+                                .peer_ip
+                                .split(':')
+                                .next()
+                                .unwrap_or(&self.peer_ip);
+                            if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+                                if !blacklist.read().await.is_whitelisted(ip) {
+                                    blacklist
+                                        .write()
+                                        .await
+                                        .add_permanent_ban(ip, "genesis hash mismatch");
+                                }
+                            }
+                        }
+                        break;
                     }
                 }
 
