@@ -573,6 +573,16 @@ impl RpcHandler {
         }
     }
 
+    /// Convert a raw `script_pubkey` to a human-readable address string.
+    /// Coinbase outputs use `b"BLOCK_REWARD_"` + height bytes; display them as
+    /// `"(coinbase)"` instead of letting the binary height bytes corrupt the string.
+    fn script_pubkey_to_address(script: &[u8]) -> String {
+        if script.starts_with(b"BLOCK_REWARD_") {
+            return "(coinbase)".to_string();
+        }
+        String::from_utf8_lossy(script).into_owned()
+    }
+
     async fn get_transaction(&self, params: &[Value]) -> Result<Value, RpcError> {
         let txid_str = params
             .first()
@@ -632,7 +642,7 @@ impl RpcHandler {
                         let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
 
                         for output in &tx.outputs {
-                            let addr = String::from_utf8_lossy(&output.script_pubkey);
+                            let addr = Self::script_pubkey_to_address(&output.script_pubkey);
                             if local_address.as_deref() == Some(addr.as_ref()) {
                                 wallet_output += output.value;
                             }
@@ -653,7 +663,7 @@ impl RpcHandler {
                                         {
                                             input_sum += src_out.value;
                                             let src_addr =
-                                                String::from_utf8_lossy(&src_out.script_pubkey);
+                                                Self::script_pubkey_to_address(&src_out.script_pubkey);
                                             if local_address.as_deref() == Some(src_addr.as_ref()) {
                                                 wallet_input += src_out.value;
                                             }
@@ -701,7 +711,7 @@ impl RpcHandler {
                                 }
                             })).collect::<Vec<_>>(),
                             "vout": tx.outputs.iter().enumerate().map(|(i, output)| {
-                                let addr = String::from_utf8_lossy(&output.script_pubkey).to_string();
+                                let addr = Self::script_pubkey_to_address(&output.script_pubkey).to_string();
                                 json!({
                                     "value": output.value as f64 / 100_000_000.0,
                                     "n": i,
@@ -746,7 +756,7 @@ impl RpcHandler {
             let mut wallet_output: u64 = 0;
 
             for output in &tx.outputs {
-                let addr = String::from_utf8_lossy(&output.script_pubkey);
+                let addr = Self::script_pubkey_to_address(&output.script_pubkey);
                 if local_address.as_deref() == Some(addr.as_ref()) {
                     wallet_output += output.value;
                 }
@@ -768,7 +778,7 @@ impl RpcHandler {
                                     src_tx.outputs.get(input.previous_output.vout as usize)
                                 {
                                     input_sum += src_out.value;
-                                    let src_addr = String::from_utf8_lossy(&src_out.script_pubkey);
+                                    let src_addr = Self::script_pubkey_to_address(&src_out.script_pubkey);
                                     if local_address.as_deref() == Some(src_addr.as_ref()) {
                                         wallet_input += src_out.value;
                                     }
@@ -824,7 +834,7 @@ impl RpcHandler {
                     "sequence": input.sequence
                 })).collect::<Vec<_>>(),
                 "vout": tx.outputs.iter().enumerate().map(|(i, output)| {
-                    let addr = String::from_utf8_lossy(&output.script_pubkey).to_string();
+                    let addr = Self::script_pubkey_to_address(&output.script_pubkey).to_string();
                     json!({
                         "value": output.value as f64 / 100_000_000.0,
                         "n": i,
@@ -893,7 +903,7 @@ impl RpcHandler {
                                     "n": i,
                                     "scriptPubKey": {
                                         "hex": hex::encode(&output.script_pubkey),
-                                        "address": String::from_utf8_lossy(&output.script_pubkey).to_string()
+                                        "address": Self::script_pubkey_to_address(&output.script_pubkey).to_string()
                                     }
                                 })).collect::<Vec<_>>(),
                                 "confirmations": confirmations,
@@ -1080,8 +1090,7 @@ impl RpcHandler {
                 .iter()
                 .enumerate()
                 .map(|(i, out)| {
-                    let address = String::from_utf8(out.script_pubkey.clone())
-                        .unwrap_or_else(|_| hex::encode(&out.script_pubkey));
+                    let address = Self::script_pubkey_to_address(&out.script_pubkey);
                     crate::rpc::websocket::TxOutputInfo {
                         address,
                         amount: out.value as f64 / 100_000_000.0,
@@ -1673,7 +1682,7 @@ impl RpcHandler {
             for tx in &finalized_txs {
                 let txid = tx.txid();
                 for (vout, output) in tx.outputs.iter().enumerate() {
-                    let output_address = String::from_utf8_lossy(&output.script_pubkey).to_string();
+                    let output_address = Self::script_pubkey_to_address(&output.script_pubkey).to_string();
                     if !addr_set.contains(output_address.as_str()) {
                         continue;
                     }
@@ -1875,7 +1884,7 @@ impl RpcHandler {
                 // Check if any output goes to our address (receive)
                 let mut received: u64 = 0;
                 for output in &tx.outputs {
-                    let addr = String::from_utf8_lossy(&output.script_pubkey);
+                    let addr = Self::script_pubkey_to_address(&output.script_pubkey);
                     if addr == local_address {
                         received += output.value;
                     }
@@ -1897,7 +1906,7 @@ impl RpcHandler {
                                         src_tx.outputs.get(spent_vout as usize)
                                     {
                                         let src_addr =
-                                            String::from_utf8_lossy(&src_output.script_pubkey);
+                                            Self::script_pubkey_to_address(&src_output.script_pubkey);
                                         if src_addr == local_address {
                                             sent += src_output.value;
                                         }
@@ -1915,7 +1924,7 @@ impl RpcHandler {
                         && tx
                             .outputs
                             .iter()
-                            .all(|o| String::from_utf8_lossy(&o.script_pubkey) == local_address);
+                            .all(|o| Self::script_pubkey_to_address(&o.script_pubkey) == local_address);
 
                     // Try to decrypt encrypted memo if present
                     let memo = tx
@@ -2016,7 +2025,7 @@ impl RpcHandler {
 
             let mut received: u64 = 0;
             for output in &tx.outputs {
-                let addr = String::from_utf8_lossy(&output.script_pubkey);
+                let addr = Self::script_pubkey_to_address(&output.script_pubkey);
                 if addr == local_address {
                     received += output.value;
                 }
@@ -2036,7 +2045,7 @@ impl RpcHandler {
                     && tx
                         .outputs
                         .iter()
-                        .all(|o| String::from_utf8_lossy(&o.script_pubkey) == local_address);
+                        .all(|o| Self::script_pubkey_to_address(&o.script_pubkey) == local_address);
                 let category = if sent > 0 && outputs_all_to_self {
                     "consolidate"
                 } else if sent > 0 {
@@ -2110,7 +2119,7 @@ impl RpcHandler {
 
             let mut received: u64 = 0;
             for output in &tx.outputs {
-                let addr = String::from_utf8_lossy(&output.script_pubkey);
+                let addr = Self::script_pubkey_to_address(&output.script_pubkey);
                 if addr == local_address {
                     received += output.value;
                 }
@@ -2130,7 +2139,7 @@ impl RpcHandler {
                     && tx
                         .outputs
                         .iter()
-                        .all(|o| String::from_utf8_lossy(&o.script_pubkey) == local_address);
+                        .all(|o| Self::script_pubkey_to_address(&o.script_pubkey) == local_address);
                 let category = if sent > 0 && outputs_all_to_self {
                     "consolidate"
                 } else if sent > 0 {
@@ -2259,7 +2268,7 @@ impl RpcHandler {
                 let mut ext_address = String::new(); // first non-wallet output = real recipient
                 let mut ext_vout: u32 = 0;
                 for (vout_idx, output) in tx.outputs.iter().enumerate() {
-                    let addr = String::from_utf8_lossy(&output.script_pubkey).to_string();
+                    let addr = Self::script_pubkey_to_address(&output.script_pubkey).to_string();
                     if addr_set.contains(&addr) {
                         received += output.value;
                         if recv_address.is_empty() {
@@ -2290,7 +2299,7 @@ impl RpcHandler {
                                         src_tx.outputs.get(spent_vout as usize)
                                     {
                                         let src_addr =
-                                            String::from_utf8_lossy(&src_output.script_pubkey)
+                                            Self::script_pubkey_to_address(&src_output.script_pubkey)
                                                 .to_string();
                                         if addr_set.contains(&src_addr) {
                                             sent += src_output.value;
@@ -2336,7 +2345,7 @@ impl RpcHandler {
                     // incorrectly reporting the receive as income.
                     let outputs_all_to_self = received > 0
                         && tx.outputs.iter().all(|o| {
-                            let addr = String::from_utf8_lossy(&o.script_pubkey).to_string();
+                            let addr = Self::script_pubkey_to_address(&o.script_pubkey).to_string();
                             addr_set.contains(&addr)
                         });
                     let all_outputs_to_self = sent > 0 && outputs_all_to_self;
@@ -2443,7 +2452,7 @@ impl RpcHandler {
             let mut ext_address = String::new();
             let mut ext_vout: u32 = 0;
             for (vout_idx, output) in tx.outputs.iter().enumerate() {
-                let addr = String::from_utf8_lossy(&output.script_pubkey).to_string();
+                let addr = Self::script_pubkey_to_address(&output.script_pubkey).to_string();
                 if addr_set.contains(&addr) {
                     received += output.value;
                     if recv_address.is_empty() {
@@ -2473,7 +2482,7 @@ impl RpcHandler {
             if sent > 0 || received > 0 {
                 let outputs_all_to_self = received > 0
                     && tx.outputs.iter().all(|o| {
-                        let addr = String::from_utf8_lossy(&o.script_pubkey).to_string();
+                        let addr = Self::script_pubkey_to_address(&o.script_pubkey).to_string();
                         addr_set.contains(&addr)
                     });
                 let category = if sent > 0 && outputs_all_to_self {
@@ -2562,7 +2571,7 @@ impl RpcHandler {
             let mut ext_address = String::new();
             let mut ext_vout: u32 = 0;
             for (vout_idx, output) in tx.outputs.iter().enumerate() {
-                let addr = String::from_utf8_lossy(&output.script_pubkey).to_string();
+                let addr = Self::script_pubkey_to_address(&output.script_pubkey).to_string();
                 if addr_set.contains(&addr) {
                     received += output.value;
                     if recv_address.is_empty() {
@@ -2592,7 +2601,7 @@ impl RpcHandler {
             if sent > 0 || received > 0 {
                 let outputs_all_to_self = received > 0
                     && tx.outputs.iter().all(|o| {
-                        let addr = String::from_utf8_lossy(&o.script_pubkey).to_string();
+                        let addr = Self::script_pubkey_to_address(&o.script_pubkey).to_string();
                         addr_set.contains(&addr)
                     });
                 let category = if sent > 0 && outputs_all_to_self {
@@ -3292,7 +3301,7 @@ impl RpcHandler {
                 let first_output_addr = tx
                     .outputs
                     .first()
-                    .map(|o| String::from_utf8_lossy(&o.script_pubkey).to_string())
+                    .map(|o| Self::script_pubkey_to_address(&o.script_pubkey).to_string())
                     .unwrap_or_default();
                 let size = bincode::serialize(tx).map(|b| b.len()).unwrap_or(0);
                 let vin: Vec<Value> = tx
@@ -3313,7 +3322,7 @@ impl RpcHandler {
                         json!({
                             "value": out.value as f64 / 100_000_000.0,
                             "n": n,
-                            "address": String::from_utf8_lossy(&out.script_pubkey).to_string(),
+                            "address": Self::script_pubkey_to_address(&out.script_pubkey),
                         })
                     })
                     .collect();
@@ -3935,8 +3944,7 @@ impl RpcHandler {
                 .iter()
                 .enumerate()
                 .map(|(i, out)| {
-                    let address = String::from_utf8(out.script_pubkey.clone())
-                        .unwrap_or_else(|_| hex::encode(&out.script_pubkey));
+                    let address = Self::script_pubkey_to_address(&out.script_pubkey);
                     crate::rpc::websocket::TxOutputInfo {
                         address,
                         amount: out.value as f64 / 100_000_000.0,
@@ -5227,7 +5235,7 @@ impl RpcHandler {
                             txid,
                             vout: idx as u32,
                         };
-                        let address = String::from_utf8_lossy(&output.script_pubkey).to_string();
+                        let address = Self::script_pubkey_to_address(&output.script_pubkey).to_string();
                         let utxo = crate::types::UTXO {
                             outpoint: outpoint.clone(),
                             value: output.value,
@@ -7332,7 +7340,7 @@ impl RpcHandler {
         if include_mempool {
             if let Some(tx) = self.consensus.tx_pool.get_transaction(&txid) {
                 if let Some(output) = tx.outputs.get(vout as usize) {
-                    let address = String::from_utf8_lossy(&output.script_pubkey).to_string();
+                    let address = Self::script_pubkey_to_address(&output.script_pubkey).to_string();
                     return Ok(json!({
                         "bestblock": best_block_hash,
                         "confirmations": 0,
