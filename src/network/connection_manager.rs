@@ -100,12 +100,48 @@ impl ConnectionManager {
         }
     }
 
+    fn recalculate_counts(&self) -> (usize, usize, usize) {
+        self.connections.iter().fold(
+            (0usize, 0usize, 0usize),
+            |(connected, inbound, outbound), entry| {
+                if entry.value().state != PeerConnectionState::Connected {
+                    return (connected, inbound, outbound);
+                }
+
+                match entry.value().direction {
+                    ConnectionDirection::Inbound => (connected + 1, inbound + 1, outbound),
+                    ConnectionDirection::Outbound => (connected + 1, inbound, outbound + 1),
+                }
+            },
+        )
+    }
+
+    fn reconcile_counts(&self) -> (usize, usize, usize) {
+        let (connected, inbound, outbound) = self.recalculate_counts();
+        self.connected_count
+            .store(connected, std::sync::atomic::Ordering::Relaxed);
+        self.inbound_count
+            .store(inbound, std::sync::atomic::Ordering::Relaxed);
+        self.outbound_count
+            .store(outbound, std::sync::atomic::Ordering::Relaxed);
+        (connected, inbound, outbound)
+    }
+
+    fn decrement_counter(counter: &std::sync::atomic::AtomicUsize) {
+        let _ = counter.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |current| Some(current.saturating_sub(1)),
+        );
+    }
+
     /// Phase 2.1: Check if we can accept a new inbound connection
     /// Phase 3: Add whitelist exemption for masternodes
     pub fn can_accept_inbound(&self, peer_ip: &str, is_whitelisted: bool) -> Result<(), String> {
+        let (total, inbound, _) = self.reconcile_counts();
+
         // Whitelisted masternodes bypass regular connection limits (but still respect total)
         if is_whitelisted {
-            let total = self.connected_count();
             if total >= MAX_TOTAL_CONNECTIONS {
                 return Err(format!(
                     "Max total connections reached: {}/{}",
@@ -117,7 +153,6 @@ impl ConnectionManager {
         }
 
         // For regular peers, enforce stricter limits
-        let total = self.connected_count();
         if total >= MAX_TOTAL_CONNECTIONS {
             return Err(format!(
                 "Max total connections reached: {}/{}",
@@ -135,9 +170,6 @@ impl ConnectionManager {
         }
 
         // Check inbound limit
-        let inbound = self
-            .inbound_count
-            .load(std::sync::atomic::Ordering::Relaxed);
         if inbound >= MAX_INBOUND_CONNECTIONS {
             return Err(format!(
                 "Max inbound connections reached: {}/{}",
@@ -169,8 +201,9 @@ impl ConnectionManager {
 
     /// Phase 2.1: Check if we can make a new outbound connection
     pub fn can_connect_outbound(&self) -> Result<(), String> {
+        let (total, _, outbound) = self.reconcile_counts();
+
         // Check total connection limit
-        let total = self.connected_count();
         if total >= MAX_TOTAL_CONNECTIONS {
             return Err(format!(
                 "Max total connections reached: {}/{}",
@@ -179,9 +212,6 @@ impl ConnectionManager {
         }
 
         // Check outbound limit
-        let outbound = self
-            .outbound_count
-            .load(std::sync::atomic::Ordering::Relaxed);
         if outbound >= MAX_OUTBOUND_CONNECTIONS {
             return Err(format!(
                 "Max outbound connections reached: {}/{}",
@@ -355,15 +385,20 @@ impl ConnectionManager {
                         );
                         false
                     } else {
+                        let was_connected = e.get().state == PeerConnectionState::Connected;
                         tracing::info!(
                             "🔄 Simultaneous connection with {} — yielding {:?} outbound and accepting inbound",
                             peer_ip,
                             e.get().state
                         );
 
-                        if e.get().state == PeerConnectionState::Connected {
-                            self.outbound_count
-                                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        if was_connected {
+                            Self::decrement_counter(&self.outbound_count);
+                            self.inbound_count
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        } else {
+                            self.connected_count
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             self.inbound_count
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
@@ -445,12 +480,10 @@ impl ConnectionManager {
                 entry.state = PeerConnectionState::Disconnected;
                 entry.disconnected_at = Some(Instant::now());
 
-                self.connected_count
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                Self::decrement_counter(&self.connected_count);
 
                 if entry.direction == ConnectionDirection::Inbound {
-                    self.inbound_count
-                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    Self::decrement_counter(&self.inbound_count);
                 }
                 return true;
             }
@@ -543,17 +576,14 @@ impl ConnectionManager {
     pub fn remove(&self, peer_ip: &str) {
         if let Some((_, info)) = self.connections.remove(peer_ip) {
             if info.state == PeerConnectionState::Connected {
-                self.connected_count
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                Self::decrement_counter(&self.connected_count);
 
                 match info.direction {
                     ConnectionDirection::Inbound => {
-                        self.inbound_count
-                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        Self::decrement_counter(&self.inbound_count);
                     }
                     ConnectionDirection::Outbound => {
-                        self.outbound_count
-                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        Self::decrement_counter(&self.outbound_count);
                     }
                 }
             }
@@ -562,20 +592,17 @@ impl ConnectionManager {
 
     /// Get count of connected peers
     pub fn connected_count(&self) -> usize {
-        self.connected_count
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.reconcile_counts().0
     }
 
     /// Phase 2.1: Get inbound connection count
     pub fn inbound_count(&self) -> usize {
-        self.inbound_count
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.reconcile_counts().1
     }
 
     /// Phase 2.1: Get outbound connection count
     pub fn outbound_count(&self) -> usize {
-        self.outbound_count
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.reconcile_counts().2
     }
 
     /// Check if a peer is in reconnecting state
@@ -590,17 +617,14 @@ impl ConnectionManager {
     pub fn mark_disconnected(&self, peer_ip: &str) {
         if let Some(mut entry) = self.connections.get_mut(peer_ip) {
             if entry.state == PeerConnectionState::Connected {
-                self.connected_count
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                Self::decrement_counter(&self.connected_count);
 
                 match entry.direction {
                     ConnectionDirection::Inbound => {
-                        self.inbound_count
-                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        Self::decrement_counter(&self.inbound_count);
                     }
                     ConnectionDirection::Outbound => {
-                        self.outbound_count
-                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        Self::decrement_counter(&self.outbound_count);
                     }
                 }
             }
@@ -622,10 +646,8 @@ impl ConnectionManager {
             }
 
             if entry.state == PeerConnectionState::Connected {
-                self.connected_count
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                self.outbound_count
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                Self::decrement_counter(&self.connected_count);
+                Self::decrement_counter(&self.outbound_count);
             }
 
             entry.state = PeerConnectionState::Disconnected;
@@ -857,6 +879,7 @@ mod tests {
         assert_eq!(entry.direction, ConnectionDirection::Inbound);
         assert_eq!(entry.state, PeerConnectionState::Connected);
         assert!(entry.is_whitelisted);
+        drop(entry);
         assert_eq!(manager.connected_count(), 1);
         assert_eq!(manager.outbound_count(), 0);
         assert_eq!(manager.inbound_count(), 1);
@@ -874,8 +897,50 @@ mod tests {
         let entry = manager.connections.get("10.0.0.2").unwrap();
         assert_eq!(entry.direction, ConnectionDirection::Outbound);
         assert_eq!(entry.state, PeerConnectionState::Connected);
+        drop(entry);
         assert_eq!(manager.connected_count(), 1);
         assert_eq!(manager.outbound_count(), 1);
         assert_eq!(manager.inbound_count(), 0);
+    }
+
+    #[test]
+    fn accept_inbound_replaces_connecting_outbound_without_underflow() {
+        let manager = ConnectionManager::new();
+        manager.set_local_ip("10.0.0.1".to_string());
+
+        assert!(manager.mark_connecting("10.0.0.2"));
+        assert!(manager.accept_inbound("10.0.0.2", true));
+
+        let entry = manager.connections.get("10.0.0.2").unwrap();
+        assert_eq!(entry.direction, ConnectionDirection::Inbound);
+        assert_eq!(entry.state, PeerConnectionState::Connected);
+        drop(entry);
+        assert_eq!(manager.connected_count(), 1);
+        assert_eq!(manager.outbound_count(), 0);
+        assert_eq!(manager.inbound_count(), 1);
+
+        assert!(manager.mark_inbound_disconnected("10.0.0.2"));
+        assert_eq!(manager.connected_count(), 0);
+        assert_eq!(manager.outbound_count(), 0);
+        assert_eq!(manager.inbound_count(), 0);
+    }
+
+    #[test]
+    fn count_getters_reconcile_corrupted_counters() {
+        let manager = ConnectionManager::new();
+        manager
+            .connected_count
+            .store(usize::MAX - 4, std::sync::atomic::Ordering::Relaxed);
+        manager
+            .inbound_count
+            .store(usize::MAX - 5, std::sync::atomic::Ordering::Relaxed);
+        manager
+            .outbound_count
+            .store(usize::MAX - 6, std::sync::atomic::Ordering::Relaxed);
+
+        assert_eq!(manager.connected_count(), 0);
+        assert_eq!(manager.inbound_count(), 0);
+        assert_eq!(manager.outbound_count(), 0);
+        assert!(manager.can_accept_inbound("10.0.0.2", false).is_ok());
     }
 }

@@ -118,6 +118,15 @@ time-cli getpeerinfo
 ```
 Returns information about connected peers.
 
+#### Manage Ban Lists
+```bash
+time-cli getblacklist
+time-cli unban 154.217.246.86
+time-cli unbansubnet 154.217.246.0/24
+time-cli clearbanlist
+```
+Use `unban` for a single IP, `unbansubnet` for one CIDR subnet, and `clearbanlist` to remove all IP bans, subnet bans, and violation counters.
+
 ---
 
 ### UTXO & Transactions

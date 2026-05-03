@@ -10,6 +10,8 @@ use parking_lot::RwLock;
 /// Convenience alias for per-subnet disconnect event queues.
 /// Each entry is `(unix_timestamp_secs, ip_address_string)`.
 type SubnetEventMap = Arc<RwLock<HashMap<String, VecDeque<(u64, String)>>>>;
+type TimestampWindow = VecDeque<u64>;
+type ConnectionFloodSources = HashMap<String, TimestampWindow>;
 
 /// Dedup window: suppress re-reporting the same attack type from the same peer within this window.
 const ATTACK_DEDUP_SECS: u64 = 300; // 5 minutes
@@ -138,8 +140,8 @@ pub struct AttackDetector {
     /// Key: peer IP, Value: deque of Unix timestamps for null-TX broadcast events.
     null_tx_flood_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
     /// Per-/24-subnet inbound connection rejection timestamps for ConnectionFlood detection (AV50).
-    /// Key: /24 prefix (e.g. "47.82.254"), Value: deque of rejection Unix timestamps.
-    connection_flood_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
+    /// Key: /24 prefix (e.g. "47.82.254"), Value: per-IP deques of rejection Unix timestamps.
+    connection_flood_times: Arc<RwLock<HashMap<String, ConnectionFloodSources>>>,
     /// Per-IP frame bomb timestamps for FrameBomb detection (AV51).
     /// Key: IP address, Value: deque of oversized-frame Unix timestamps.
     frame_bomb_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
@@ -1035,22 +1037,30 @@ impl AttackDetector {
     /// visibility unless we record here.  We track per-/24 subnet to catch distributed floods
     /// where each individual IP stays under per-IP thresholds.
     ///
-    /// Thresholds: ≥10 rejections from the same /24 within 60s → `BanSubnet`.
-    /// This is intentionally aggressive: any subnet that generates 10 rate-limit rejections in
-    /// one minute is conducting a coordinated flood, not normal retry behaviour.
+    /// Thresholds:
+    /// - Single noisy IP: ≥4 rejections/60s → `RateLimitPeer`, ≥8 rejections/60s → `BlockPeer`
+    /// - Coordinated subnet flood: ≥10 total rejections/60s from ≥3 unique IPs in the same /24
+    ///   → `BanSubnet`
+    ///
+    /// This avoids poisoning an entire subnet when only one or two misconfigured or stale nodes
+    /// are retrying too aggressively.
     pub fn record_connection_flood(&self, addr: &str) {
         let now = Self::now_secs();
         const CONN_FLOOD_WINDOW_SECS: u64 = 60;
-        const CONN_FLOOD_THRESHOLD: usize = 10;
+        const CONN_FLOOD_RATE_THRESHOLD: usize = 4;
+        const CONN_FLOOD_BLOCK_THRESHOLD: usize = 8;
+        const CONN_FLOOD_SUBNET_THRESHOLD: usize = 10;
+        const CONN_FLOOD_SUBNET_UNIQUE_IPS: usize = 3;
 
         let subnet: String = addr.split('.').take(3).collect::<Vec<_>>().join(".");
         if subnet.len() < 5 || subnet.contains(':') {
             return;
         }
 
-        let should_ban = {
+        let (ip_rejections, total_rejections, unique_ips) = {
             let mut map = self.connection_flood_times.write();
-            let timestamps = map.entry(subnet.clone()).or_default();
+            let subnet_sources = map.entry(subnet.clone()).or_default();
+            let timestamps = subnet_sources.entry(addr.to_string()).or_default();
             while timestamps
                 .front()
                 .map(|t| now.saturating_sub(*t) > CONN_FLOOD_WINDOW_SECS)
@@ -1059,14 +1069,78 @@ impl AttackDetector {
                 timestamps.pop_front();
             }
             timestamps.push_back(now);
-            timestamps.len() >= CONN_FLOOD_THRESHOLD
+
+            subnet_sources.retain(|_, entries| {
+                while entries
+                    .front()
+                    .map(|t| now.saturating_sub(*t) > CONN_FLOOD_WINDOW_SECS)
+                    .unwrap_or(false)
+                {
+                    entries.pop_front();
+                }
+                !entries.is_empty()
+            });
+
+            let total = subnet_sources.values().map(VecDeque::len).sum::<usize>();
+            let unique = subnet_sources.len();
+            let ip_total = subnet_sources.get(addr).map(VecDeque::len).unwrap_or(0);
+            (ip_total, total, unique)
         };
 
-        if should_ban {
+        if ip_rejections >= CONN_FLOOD_BLOCK_THRESHOLD {
             tracing::warn!(
-                "🛡️ Inbound connection flood from {}.x/24 (AV50) — ≥{} rate-limited in {}s — banning subnet",
+                "🛡️ Inbound connection flood from {} (AV50) — {} rate-limited rejections in {}s — blocking peer",
+                addr,
+                ip_rejections,
+                CONN_FLOOD_WINDOW_SECS
+            );
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::ConnectionFlood,
+                confidence: 0.88,
+                severity: AttackSeverity::High,
+                indicators: vec![
+                    format!(
+                        "{} inbound connections rejected by rate limiter within {}s",
+                        ip_rejections, CONN_FLOOD_WINDOW_SECS
+                    ),
+                    "Single-IP connection flood — block offending peer without penalizing its subnet"
+                        .to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        } else if ip_rejections >= CONN_FLOOD_RATE_THRESHOLD {
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::ConnectionFlood,
+                confidence: 0.78,
+                severity: AttackSeverity::Medium,
+                indicators: vec![
+                    format!(
+                        "{} inbound connections rejected by rate limiter within {}s",
+                        ip_rejections, CONN_FLOOD_WINDOW_SECS
+                    ),
+                    "Single-IP reconnect churn — rate-limit peer before escalating to subnet action"
+                        .to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::RateLimitPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        }
+
+        if total_rejections >= CONN_FLOOD_SUBNET_THRESHOLD
+            && unique_ips >= CONN_FLOOD_SUBNET_UNIQUE_IPS
+        {
+            tracing::warn!(
+                "🛡️ Inbound connection flood from {}.x/24 (AV50) — {} rate-limited rejections across {} IPs in {}s — banning subnet",
                 subnet,
-                CONN_FLOOD_THRESHOLD,
+                total_rejections,
+                unique_ips,
                 CONN_FLOOD_WINDOW_SECS
             );
             self.maybe_add_attack(AttackPattern {
@@ -1075,14 +1149,14 @@ impl AttackDetector {
                 severity: AttackSeverity::High,
                 indicators: vec![
                     format!(
-                        "≥{} inbound connections from {}.x/24 rejected by rate limiter within {}s (AV50)",
-                        CONN_FLOOD_THRESHOLD, subnet, CONN_FLOOD_WINDOW_SECS
+                        "{} inbound connections from {}.x/24 rejected by rate limiter within {}s ({} unique IPs, AV50)",
+                        total_rejections, subnet, CONN_FLOOD_WINDOW_SECS, unique_ips
                     ),
                     "Coordinated connection flood — subnet rate-limited; distributed botnet pattern".to_string(),
                 ],
                 first_detected: now,
                 last_seen: now,
-                source_ips: vec![addr.to_string()],
+                source_ips: vec![format!("{}.0/24", subnet)],
                 recommended_action: MitigationAction::BanSubnet(format!("{}.0/24", subnet)),
                 mitigation_applied_at: None,
             });
@@ -1780,5 +1854,53 @@ mod tests {
             !detector2.get_all_attacks().is_empty(),
             "attacks must persist across restarts"
         );
+    }
+
+    #[test]
+    fn test_connection_flood_blocks_single_ip_before_subnet() {
+        let dir = tempdir().unwrap();
+        let db = Arc::new(sled::open(dir.path()).unwrap());
+        let detector = AttackDetector::new(db).unwrap();
+
+        for _ in 0..8 {
+            detector.record_connection_flood("203.0.113.10");
+        }
+
+        let attacks = detector.get_all_attacks();
+        assert!(
+            attacks.iter().any(|attack| {
+                attack.attack_type == AttackType::ConnectionFlood
+                    && matches!(
+                        &attack.recommended_action,
+                        MitigationAction::BlockPeer(ref ip) if ip == "203.0.113.10"
+                    )
+            }),
+            "single noisy IP should escalate to BlockPeer"
+        );
+        assert!(
+            !attacks
+                .iter()
+                .any(|attack| matches!(&attack.recommended_action, MitigationAction::BanSubnet(_))),
+            "single noisy IP must not poison the entire /24"
+        );
+    }
+
+    #[test]
+    fn test_connection_flood_requires_multiple_ips_for_subnet_ban() {
+        let dir = tempdir().unwrap();
+        let db = Arc::new(sled::open(dir.path()).unwrap());
+        let detector = AttackDetector::new(db).unwrap();
+
+        for ip in ["203.0.113.10", "203.0.113.11", "203.0.113.12"] {
+            for _ in 0..4 {
+                detector.record_connection_flood(ip);
+            }
+        }
+
+        let attacks = detector.get_all_attacks();
+        assert!(attacks.iter().any(|attack| matches!(
+            &attack.recommended_action,
+            MitigationAction::BanSubnet(ref subnet) if subnet == "203.0.113.0/24"
+        )));
     }
 }

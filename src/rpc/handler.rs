@@ -226,6 +226,7 @@ impl RpcHandler {
             "getblacklist" => self.get_blacklist().await,
             "ban" => self.ban_ip(&params_array).await,
             "unban" => self.unban(&params_array).await,
+            "unbansubnet" => self.unban_subnet(&params_array).await,
             "clearbanlist" => self.clear_ban_list().await,
             "resetpeerprofiles" => self.reset_peer_profiles().await,
             "auditcollateral" => self.audit_collateral().await,
@@ -4325,6 +4326,7 @@ impl RpcHandler {
         let bl = self.blacklist.read().await;
         let (permanent, temporary, subnets, violations) = bl.list_bans();
         let (perm_count, temp_count, viol_count, wl_count) = bl.stats();
+        let subnet_count = subnets.len();
 
         let permanent_list: Vec<Value> = permanent
             .into_iter()
@@ -4353,6 +4355,7 @@ impl RpcHandler {
             "summary": {
                 "permanent_bans": perm_count,
                 "temporary_bans": temp_count,
+                "subnet_bans": subnet_count,
                 "active_violations": viol_count,
                 "whitelisted": wl_count
             },
@@ -4563,48 +4566,45 @@ impl RpcHandler {
         }
     }
 
+    async fn unban_subnet(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let subnet = params.first().and_then(|v| v.as_str()).ok_or(RpcError {
+            code: -32602,
+            message: "Subnet CIDR parameter required".to_string(),
+        })?;
+
+        let mut bl = self.blacklist.write().await;
+        let removed = bl.unban_subnet(subnet);
+
+        if removed {
+            tracing::info!("🔓 RPC: Unbanned subnet {}", subnet);
+            Ok(json!({
+                "result": "success",
+                "subnet": subnet,
+                "message": "Subnet removed from ban list"
+            }))
+        } else {
+            Ok(json!({
+                "result": "not_banned",
+                "subnet": subnet,
+                "message": "Subnet was not in the ban list"
+            }))
+        }
+    }
+
     /// Remove ALL bans and violation counts. Whitelisted peers are unaffected.
     async fn clear_ban_list(&self) -> Result<Value, RpcError> {
         let mut bl = self.blacklist.write().await;
-        let (permanent, temporary, _, violations) = bl.list_bans();
-        let perm_count = permanent.len();
-        let temp_count = temporary.len();
-        let viol_count = violations.len();
-
-        // Collect all unique IPs across bans and violations
-        let mut all_ips: Vec<std::net::IpAddr> = Vec::new();
-        for (ip_str, _) in &permanent {
-            if let Ok(ip) = ip_str.parse() {
-                all_ips.push(ip);
-            }
-        }
-        for (ip_str, _, _) in &temporary {
-            if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
-                if !all_ips.contains(&ip) {
-                    all_ips.push(ip);
-                }
-            }
-        }
-        for (ip_str, _) in &violations {
-            if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
-                if !all_ips.contains(&ip) {
-                    all_ips.push(ip);
-                }
-            }
-        }
-
-        for ip in &all_ips {
-            bl.unban(*ip);
-        }
+        let (perm_count, temp_count, subnet_count, viol_count) = bl.clear_all_bans();
 
         tracing::info!(
-            "🔓 RPC clearbanlist: cleared {} permanent ban(s), {} temporary ban(s), {} violation record(s)",
-            perm_count, temp_count, viol_count
+            "🔓 RPC clearbanlist: cleared {} permanent ban(s), {} temporary ban(s), {} subnet ban(s), {} violation record(s)",
+            perm_count, temp_count, subnet_count, viol_count
         );
         Ok(json!({
             "result": "success",
             "permanent_cleared": perm_count,
             "temporary_cleared": temp_count,
+            "subnets_cleared": subnet_count,
             "violations_cleared": viol_count,
         }))
     }

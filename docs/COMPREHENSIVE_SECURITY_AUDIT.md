@@ -1740,7 +1740,10 @@ Applied at all four enforcement points:
 **Root Cause:** `can_accept_inbound()` rejection path logged a warning and dropped the connection, but did not call any AI recording method. The existing subnet rate-limiter (`subnet_accept_rate` / `MAX_SUBNET_CONNECTS_PER_MIN`) also misattributed rejections to `record_tls_failure()` rather than a connection-flood-specific detector.
 
 **Fix Applied:**
-- ✅ **`record_connection_flood()` method** added to `AttackDetector` with per-/24 sliding window: ≥10 rate-limited rejections within 60s → `BanSubnet(/24)` — aggressive threshold since no legitimate traffic generates 10 rate-limit rejections per minute
+- ✅ **`record_connection_flood()` method** added to `AttackDetector` with per-/24 + per-IP sliding windows:
+  - single noisy IP: ≥4 rate-limited rejections/60s → `RateLimitPeer`, ≥8/60s → `BlockPeer`
+  - coordinated subnet flood: ≥10 rate-limited rejections/60s from ≥3 unique IPs in the same /24 → `BanSubnet(/24)`
+- ✅ This prevents one or two stale/misconfigured nodes from poisoning an entire subnet while still escalating genuine distributed floods
 - ✅ **Wired at `can_accept_inbound` rejection** in `server.rs` accept loop
 - ✅ **Wired at subnet accept rate** rejection (replacing the misattributed `record_tls_failure` call)
 
@@ -2014,7 +2017,7 @@ Connection from 64.91.224.76:36048 ended: Frame too large: 4083387062 bytes (max
 | **Watchdog False-Restart via RPC Timeout** | ✅ Fixed | 🟢 Low | `daemon_recently_active()` check added; watchdog v1.1 (Apr 2026) |
 | **Ping Flood (no escalation)** | ✅ Fixed | 🟢 Low | `ping_excess_streak` → `record_ping_flood()` → blacklist (22e056a) |
 | **Pre-channel Message Flood** | ✅ Fixed | 🟢 Low | Soft 200/s + hard 500/s gate in TLS and plaintext I/O bridge tasks (22e056a) |
-| **Inbound Connection Flood (AV50)** | ✅ Fixed | 🟢 Low | `record_connection_flood()` → `BanSubnet(/24)` after ≥10 rate-limited rejections/60s (Apr 2026) |
+| **Inbound Connection Flood (AV50)** | ✅ Fixed | 🟢 Low | `record_connection_flood()` now distinguishes single-IP churn from coordinated floods: per-IP `RateLimitPeer`/`BlockPeer`; subnet ban only after ≥10 rejections/60s from ≥3 IPs |
 | **Frame Bomb (AV51)** | ✅ Fixed | 🟢 Low | `record_frame_bomb()` → `RateLimitPeer` on first; `BlockPeer` on second within 120s (Apr 2026) |
 
 ---

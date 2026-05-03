@@ -1722,6 +1722,8 @@ impl MasternodeRegistry {
         address: &str,
         connection_duration: Option<std::time::Duration>,
     ) -> Result<(), RegistryError> {
+        const SHORT_LIVED_DISCONNECT_GRACE_SECS: u64 = 10;
+
         // SAFETY: Never remove or deactivate the local masternode on a peer
         // disconnect event. The local node is always running and its entry
         // must persist.
@@ -1783,6 +1785,26 @@ impl MasternodeRegistry {
                 .and_then(|i| i.masternode.collateral_outpoint.as_ref())
                 .is_some()
         };
+
+        let was_short_disconnect = connection_duration
+            .map(|d| d < std::time::Duration::from_secs(SHORT_LIVED_DISCONNECT_GRACE_SECS))
+            .unwrap_or(false);
+        let consensus_suspended = masternodes
+            .get(address)
+            .map(|info| info.consensus_suspended)
+            .unwrap_or(false);
+
+        if has_collateral && was_short_disconnect && !consensus_suspended {
+            tracing::debug!(
+                "🔄 Keeping paid-tier masternode {} active after short-lived disconnect ({:.1}s) — avoiding churn during collision/reconnect loops",
+                address,
+                connection_duration
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or_default()
+            );
+            drop(masternodes);
+            return Ok(());
+        }
 
         if is_handshake && !has_collateral {
             // Free-tier nodes: keep in registry with last_seen_at set so the
@@ -5186,6 +5208,35 @@ mod tests {
         assert_eq!(registry.active_masternodes_cached().len(), 1);
         assert_eq!(registry.get_vrf_eligible(100).await.len(), 1);
         assert!(registry.is_address_vrf_eligible(address, 100).await);
+    }
+
+    #[tokio::test]
+    async fn test_short_paid_disconnect_does_not_mark_inactive() {
+        let registry = create_test_registry();
+        let address = "10.0.0.9";
+        let mut masternode = create_test_masternode(address, MasternodeTier::Bronze);
+        masternode.collateral_outpoint = Some(create_test_outpoint(42));
+
+        registry
+            .register_internal(
+                masternode,
+                "reward-short-disconnect".to_string(),
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        registry
+            .mark_inactive_on_disconnect_with_duration(
+                address,
+                Some(std::time::Duration::from_secs(2)),
+            )
+            .await
+            .unwrap();
+
+        let stored = registry.get(address).await.unwrap();
+        assert!(stored.is_active);
     }
 
     #[tokio::test]

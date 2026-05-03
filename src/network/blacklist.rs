@@ -224,6 +224,12 @@ impl IPBlacklist {
         }
     }
 
+    fn remove_subnet(&self, cidr: &str) {
+        if let Some(tree) = &self.db_subnet {
+            let _ = tree.remove(cidr.as_bytes());
+        }
+    }
+
     fn persist_violation(&self, ip: IpAddr, count: u32) {
         if let Some(tree) = &self.db_violations {
             let now_unix = unix_now();
@@ -285,6 +291,34 @@ impl IPBlacklist {
         } else {
             tracing::warn!("⚠️  Invalid subnet CIDR '{}', skipping", cidr);
         }
+    }
+
+    /// Remove a specific banned subnet in CIDR notation.
+    /// Also accepts a bare /24 prefix like "154.217.246" (prefix_len defaults to 24).
+    pub fn unban_subnet(&mut self, cidr: &str) -> bool {
+        let (addr_str, prefix_len) = if let Some(pos) = cidr.find('/') {
+            let bits: u8 = cidr[pos + 1..].parse().unwrap_or(24);
+            (&cidr[..pos], bits)
+        } else {
+            (cidr, 24u8)
+        };
+
+        let Ok(network) = addr_str.parse::<std::net::Ipv4Addr>() else {
+            tracing::warn!("⚠️  Invalid subnet CIDR '{}', cannot unban", cidr);
+            return false;
+        };
+
+        let canonical = format!("{}/{}", network, prefix_len);
+        let before = self.subnet_blacklist.len();
+        self.subnet_blacklist
+            .retain(|(net, prefix, _)| !(*net == network && *prefix == prefix_len));
+        let removed = self.subnet_blacklist.len() != before;
+
+        if removed {
+            self.remove_subnet(&canonical);
+        }
+
+        removed
     }
 
     /// Returns all currently banned subnets as CIDR strings (e.g. `"154.217.246.0/24"`).
@@ -668,6 +702,40 @@ impl IPBlacklist {
         was_banned
     }
 
+    /// Remove all permanent, temporary, subnet bans, and violation counters.
+    /// Returns counts of what was cleared: (permanent, temporary, subnet, violations).
+    pub fn clear_all_bans(&mut self) -> (usize, usize, usize, usize) {
+        let permanent: Vec<IpAddr> = self.permanent_blacklist.keys().copied().collect();
+        let temporary: Vec<IpAddr> = self.temp_blacklist.keys().copied().collect();
+        let violations: Vec<IpAddr> = self.violations.keys().copied().collect();
+        let subnets = self.list_banned_subnets();
+
+        let perm_count = permanent.len();
+        let temp_count = temporary.len();
+        let subnet_count = subnets.len();
+        let viol_count = violations.len();
+
+        for ip in permanent {
+            self.remove_permanent(ip);
+        }
+        for ip in temporary {
+            self.remove_temp(ip);
+        }
+        for ip in violations {
+            self.remove_violation(ip);
+        }
+        for cidr in &subnets {
+            self.remove_subnet(cidr);
+        }
+
+        self.permanent_blacklist.clear();
+        self.temp_blacklist.clear();
+        self.violations.clear();
+        self.subnet_blacklist.clear();
+
+        (perm_count, temp_count, subnet_count, viol_count)
+    }
+
     /// Record a SEVERE violation (corrupted blocks, invalid chain data, reorg attacks)
     /// These are treated more harshly - immediate 1-hour ban on first offense,
     /// permanent ban on second offense
@@ -726,6 +794,45 @@ impl IPBlacklist {
 impl Default for IPBlacklist {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clear_all_bans_removes_subnets_too() {
+        let mut blacklist = IPBlacklist::new();
+        let ip: IpAddr = "192.0.2.10".parse().unwrap();
+
+        blacklist.add_permanent_ban(ip, "test");
+        blacklist.add_temp_ban(ip, Duration::from_secs(60), "temp");
+        blacklist.add_subnet_ban("198.51.100.0/24", "subnet");
+        blacklist.record_violation("192.0.2.11".parse().unwrap(), "violation");
+
+        let counts = blacklist.clear_all_bans();
+
+        assert_eq!(counts, (1, 1, 1, 1));
+        assert!(blacklist.list_banned_subnets().is_empty());
+        let (permanent, temporary, subnets, violations) = blacklist.list_bans();
+        assert!(permanent.is_empty());
+        assert!(temporary.is_empty());
+        assert!(subnets.is_empty());
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn unban_subnet_removes_only_requested_cidr() {
+        let mut blacklist = IPBlacklist::new();
+        blacklist.add_subnet_ban("198.51.100.0/24", "subnet-a");
+        blacklist.add_subnet_ban("203.0.113.0/24", "subnet-b");
+
+        assert!(blacklist.unban_subnet("198.51.100.0/24"));
+        assert!(!blacklist.unban_subnet("198.51.100.0/24"));
+
+        let subnets = blacklist.list_banned_subnets();
+        assert_eq!(subnets, vec!["203.0.113.0/24".to_string()]);
     }
 }
 

@@ -31,6 +31,7 @@ Commands:
     getblacklist           List all banned IPs with reasons
     ban                    Permanently ban an IP address
     unban                  Remove an IP from the ban list
+    unbansubnet            Remove a banned subnet from the ban list
     clearbanlist           Remove ALL bans
     resetpeerprofiles      Clear AI reconnection backoff so nodes retry peers immediately
     auditcollateral        Scan for collateral squatters and evict them
@@ -239,6 +240,13 @@ enum Commands {
     Unban {
         /// IP address to unban (e.g. 154.217.246.86)
         ip: String,
+    },
+
+    /// Remove a banned subnet from the ban list
+    #[command(next_help_heading = "Network")]
+    UnbanSubnet {
+        /// Subnet in CIDR notation (e.g. 154.217.246.0/24)
+        subnet: String,
     },
 
     /// Remove ALL bans and violation counts (whitelisted peers are unaffected)
@@ -1319,6 +1327,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             json!([ip, reason.as_deref().unwrap_or("manual ban via CLI")]),
         ),
         Commands::Unban { ip } => ("unban", json!([ip])),
+        Commands::UnbanSubnet { subnet } => ("unbansubnet", json!([subnet])),
         Commands::ClearBanList => ("clearbanlist", json!([])),
         Commands::ResetPeerProfiles => ("resetpeerprofiles", json!([])),
         Commands::AddWhitelist { ip } => ("addwhitelist", json!([ip])),
@@ -1934,6 +1943,7 @@ fn print_human_readable(
                     .get("temporary_bans")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
+                let subnet = s.get("subnet_bans").and_then(|v| v.as_u64()).unwrap_or(0);
                 let viol = s
                     .get("active_violations")
                     .and_then(|v| v.as_u64())
@@ -1942,6 +1952,7 @@ fn print_human_readable(
                 println!("=== Blacklist Summary ===");
                 println!("Permanent bans:   {}", perm);
                 println!("Temporary bans:   {}", temp);
+                println!("Subnet bans:      {}", subnet);
                 println!("Active violators: {}", viol);
                 println!("Whitelisted:      {}", wl);
             }
@@ -1995,6 +2006,7 @@ fn print_human_readable(
         }
         Commands::Ban { .. }
         | Commands::Unban { .. }
+        | Commands::UnbanSubnet { .. }
         | Commands::ClearBanList
         | Commands::ResetPeerProfiles
         | Commands::AddWhitelist { .. } => {
