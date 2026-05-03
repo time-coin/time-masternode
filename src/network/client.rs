@@ -242,6 +242,47 @@ impl NetworkClient {
                     );
                     sleep(Duration::from_secs(2)).await;
                 }
+
+                // Gate Phase 1 expansion until initial blockchain sync completes.
+                // While we have no genesis (or are still actively syncing), the daemon
+                // only talks to time-coin.io's trusted peer list — no pyramid expansion
+                // to potentially malicious peers that could feed a forked chain during
+                // initial download.  Bounded by PHASE0_SYNC_TIMEOUT_SECS so we don't
+                // hang forever if the trusted set is unreachable.
+                const PHASE0_SYNC_TIMEOUT_SECS: u64 = 600; // 10 min
+                const PHASE0_POLL_INTERVAL_SECS: u64 = 2;
+                let phase0_started = std::time::Instant::now();
+                let mut last_log = phase0_started;
+                tracing::info!(
+                    "⏳ [PHASE0] Holding Phase 1 until initial blockchain sync completes (timeout {}s)",
+                    PHASE0_SYNC_TIMEOUT_SECS
+                );
+                loop {
+                    if blockchain.has_genesis() && !blockchain.is_syncing() {
+                        tracing::info!(
+                            "✅ [PHASE0] Initial sync complete after {}s — proceeding to Phase 1",
+                            phase0_started.elapsed().as_secs()
+                        );
+                        break;
+                    }
+                    if phase0_started.elapsed().as_secs() >= PHASE0_SYNC_TIMEOUT_SECS {
+                        tracing::warn!(
+                            "⏱️ [PHASE0] {}s elapsed without sync completing — proceeding to Phase 1 with broader peer set",
+                            PHASE0_SYNC_TIMEOUT_SECS
+                        );
+                        break;
+                    }
+                    if last_log.elapsed().as_secs() >= 30 {
+                        tracing::info!(
+                            "⏳ [PHASE0] Still waiting for sync (genesis={}, syncing={}, height={})",
+                            blockchain.has_genesis(),
+                            blockchain.is_syncing(),
+                            blockchain.get_height()
+                        );
+                        last_log = std::time::Instant::now();
+                    }
+                    sleep(Duration::from_secs(PHASE0_POLL_INTERVAL_SECS)).await;
+                }
             }
 
             // PHASE 1: Pyramid-aware startup connections.
