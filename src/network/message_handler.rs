@@ -3871,6 +3871,7 @@ impl MessageHandler {
                                         crate::address::verify_collateral_claim_proof(
                                             &public_key,
                                             &collateral_proof,
+                                            &reward_address,
                                             &utxo.address,
                                             &outpoint.txid,
                                             outpoint.vout,
@@ -4032,6 +4033,7 @@ impl MessageHandler {
                                             crate::address::verify_collateral_claim_proof(
                                                 &public_key,
                                                 &collateral_proof,
+                                                &reward_address,
                                                 &utxo.address,
                                                 &outpoint.txid,
                                                 outpoint.vout,
@@ -4393,6 +4395,7 @@ impl MessageHandler {
                                 Some(addr) => crate::address::verify_collateral_claim_proof(
                                     &public_key,
                                     &collateral_proof,
+                                    &reward_address,
                                     addr,
                                     &outpoint.txid,
                                     outpoint.vout,

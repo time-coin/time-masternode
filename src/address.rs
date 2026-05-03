@@ -120,28 +120,35 @@ impl Address {
 
 /// Verify a collateral-claim proof.
 ///
-/// A valid proof requires *both*:
-///   1. The announcer's `public_key` derives to `utxo_address` — i.e. the
-///      announcer controls the private key for the address that owns the
-///      collateral UTXO. (Address derivation: SHA-256 truncated to 20 bytes,
-///      base58 with checksum, prefixed by network digit — see
-///      `Address::from_public_key`.)
-///   2. `signature` is a valid Ed25519 signature by `public_key` over the
-///      canonical claim message `"TIME_COLLATERAL_CLAIM:<txid_hex>:<vout>"`.
+/// A valid proof requires *all three*:
+///   1. **Reward routing rule**: `reward_address == utxo_address`.  The
+///      announcer must direct rewards to the address that owns the
+///      collateral UTXO.  This is the economic anti-hijack mechanism — a
+///      squatter announcing with their own reward address gains nothing
+///      because rewards flow to the legitimate owner anyway, and an
+///      announce that violates this rule cannot win conflict resolution.
+///   2. **Key control**: the announcer's `public_key` derives to
+///      `utxo_address` (SHA-256 → 20 bytes → base58check with network
+///      prefix; see `Address::from_public_key`).  This proves the
+///      announcer controls the private key for the address that owns
+///      the collateral UTXO.
+///   3. **Signature**: `signature` is a valid Ed25519 signature by
+///      `public_key` over the canonical claim message
+///      `"TIME_COLLATERAL_CLAIM:<txid_hex>:<vout>"`.
 ///
-/// This is *cryptographic ownership proof*, fully decoupled from the
-/// announced reward address.  Where the rewards eventually flow is a
-/// reward-routing question handled separately at block assembly.
-///
-/// Returns true iff both checks pass.
+/// Returns true iff all three checks pass.
 pub fn verify_collateral_claim_proof(
     public_key: &ed25519_dalek::VerifyingKey,
     signature: &[u8],
+    reward_address: &str,
     utxo_address: &str,
     outpoint_txid: &[u8; 32],
     outpoint_vout: u32,
 ) -> bool {
     if signature.is_empty() || utxo_address.is_empty() {
+        return false;
+    }
+    if reward_address != utxo_address {
         return false;
     }
     let network = if utxo_address.starts_with("TIME0") {
