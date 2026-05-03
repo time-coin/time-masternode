@@ -20,6 +20,7 @@ pub mod memo;
 pub mod network;
 pub mod network_type;
 pub mod peer_manager;
+pub mod purge_list;
 pub mod reward_calculator;
 pub mod rpc;
 pub mod shutdown;
@@ -953,6 +954,23 @@ async fn main() {
         tracing::warn!(
             "🛡️ [AV41] Startup: purged {} ghost transaction(s) from restored mempool",
             ghost_purged
+        );
+    }
+
+    // Apply the hardcoded phantom-finalized blacklist (see src/purge_list.rs)
+    // and then sweep any other finalized TXs whose inputs are missing on-chain.
+    let blacklist_purged = consensus_engine.purge_blacklisted_transactions().await;
+    if blacklist_purged > 0 {
+        tracing::warn!(
+            "🛡️ Startup: applied phantom-TX blacklist to {} record(s)",
+            blacklist_purged
+        );
+    }
+    let stuck_evicted = consensus_engine.evict_finalized_with_missing_inputs().await;
+    if stuck_evicted > 0 {
+        tracing::warn!(
+            "🛡️ Startup: evicted {} finalized TX(s) with missing input UTXOs",
+            stuck_evicted
         );
     }
 

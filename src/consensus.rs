@@ -3575,6 +3575,143 @@ impl ConsensusEngine {
         self.tx_pool.load_from_sled(db)
     }
 
+    /// Walk the finalized pool and evict any TX whose inputs are not all
+    /// present on-chain.  Such TXs were finalized before input-existence
+    /// validation was hardened and can never be included in a block, so they
+    /// permanently block block production for the holder.
+    ///
+    /// For each evicted TX:
+    ///   - inputs that DO exist and are in a spent/locked state are restored
+    ///     to `Unspent` (collateral-locked entries are skipped)
+    ///   - phantom output UTXOs that were synthesized at finalize time are
+    ///     removed from the local UTXO set
+    ///   - the TX is dropped from the finalized pool and sled mempool tree
+    ///
+    /// Returns the number of TXs evicted.
+    pub async fn evict_finalized_with_missing_inputs(&self) -> usize {
+        let finalized = self.tx_pool.get_finalized_transactions();
+        if finalized.is_empty() {
+            return 0;
+        }
+
+        let mut evicted = 0usize;
+        for tx in finalized {
+            let txid = tx.txid();
+
+            let mut any_missing = false;
+            let mut existing_inputs = Vec::new();
+            for input in &tx.inputs {
+                match self.utxo_manager.get_utxo(&input.previous_output).await {
+                    Ok(_) => existing_inputs.push(input.previous_output.clone()),
+                    Err(_) => {
+                        any_missing = true;
+                    }
+                }
+            }
+            if !any_missing {
+                continue;
+            }
+
+            for outpoint in &existing_inputs {
+                if self.utxo_manager.is_collateral_locked(outpoint) {
+                    continue;
+                }
+                if matches!(
+                    self.utxo_manager.get_state(outpoint),
+                    Some(
+                        crate::types::UTXOState::SpentFinalized { .. }
+                            | crate::types::UTXOState::SpentPending { .. }
+                            | crate::types::UTXOState::Locked { .. }
+                    )
+                ) {
+                    self.utxo_manager
+                        .update_state(outpoint, crate::types::UTXOState::Unspent);
+                }
+            }
+
+            for (idx, _) in tx.outputs.iter().enumerate() {
+                let outpoint = OutPoint {
+                    txid,
+                    vout: idx as u32,
+                };
+                if self.utxo_manager.get_state(&outpoint).is_some() {
+                    let _ = self.utxo_manager.remove_utxo(&outpoint).await;
+                }
+            }
+
+            self.tx_pool.drop_blacklisted(&txid);
+            evicted += 1;
+            tracing::warn!(
+                "🧹 Evicted finalized TX {} from pool — at least one input UTXO is missing on-chain",
+                hex::encode(txid)
+            );
+        }
+        evicted
+    }
+
+    /// Apply the hardcoded phantom-finalized blacklist (`crate::purge_list`).
+    ///
+    /// For each blacklisted txid:
+    ///   1. Restore real input UTXOs from `SpentFinalized`/`SpentPending`/`Locked`
+    ///      back to `Unspent` (skip collateral-locked entries).
+    ///   2. Remove phantom output UTXOs from the local UTXO set.
+    ///   3. Drop the TX from the in-memory pending and finalized pools.
+    ///
+    /// Idempotent: missing UTXOs and missing pool entries are skipped silently.
+    /// Returns the number of blacklist records that touched local state.
+    pub async fn purge_blacklisted_transactions(&self) -> usize {
+        let mut touched = 0usize;
+        for (txid, real_inputs, phantom_outputs, reason) in crate::purge_list::iter_records() {
+            let mut did_work = false;
+
+            for outpoint in &real_inputs {
+                if self.utxo_manager.is_collateral_locked(outpoint) {
+                    tracing::warn!(
+                        "🛡️ Skipping collateral-locked input {} during phantom-TX purge",
+                        outpoint
+                    );
+                    continue;
+                }
+                if matches!(
+                    self.utxo_manager.get_state(outpoint),
+                    Some(
+                        crate::types::UTXOState::SpentFinalized { .. }
+                            | crate::types::UTXOState::SpentPending { .. }
+                            | crate::types::UTXOState::Locked { .. }
+                    )
+                ) {
+                    self.utxo_manager
+                        .update_state(outpoint, crate::types::UTXOState::Unspent);
+                    did_work = true;
+                }
+            }
+
+            for outpoint in &phantom_outputs {
+                if self.utxo_manager.get_state(outpoint).is_some() {
+                    if let Err(e) = self.utxo_manager.remove_utxo(outpoint).await {
+                        tracing::warn!(
+                            "⚠️ Failed to remove phantom output {} during purge: {}",
+                            outpoint,
+                            e
+                        );
+                    } else {
+                        did_work = true;
+                    }
+                }
+            }
+
+            if self.tx_pool.drop_blacklisted(&txid) {
+                did_work = true;
+            }
+
+            if did_work {
+                touched += 1;
+                tracing::warn!("🛡️ Purged phantom TX {}: {}", hex::encode(txid), reason);
+            }
+        }
+        touched
+    }
+
     /// Evict pending transactions that have been stuck longer than `max_age`.
     ///
     /// This is a policy/mempool cleanup path only: it releases local UTXO reservations

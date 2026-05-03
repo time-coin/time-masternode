@@ -166,6 +166,11 @@ impl TransactionPool {
     ) -> Result<(), PoolError> {
         let txid = tx.txid();
 
+        if crate::purge_list::is_blacklisted(&txid) {
+            self.sled_remove(&txid);
+            return Err(PoolError::PreviouslyRejected);
+        }
+
         // Fast path: Check if already exists BEFORE expensive serialization
         if self.pending.contains_key(&txid) || self.confirmed.contains_key(&txid) {
             return Err(PoolError::AlreadyExists);
@@ -240,6 +245,18 @@ impl TransactionPool {
     /// It stays in `confirmed` until the block producer archives it.
     /// Returns true if the transaction was found in pending and confirmed.
     pub fn confirm_transaction(&self, txid: Hash256) -> bool {
+        if crate::purge_list::is_blacklisted(&txid) {
+            if let Some((_, entry)) = self.pending.remove(&txid) {
+                self.pending_count.fetch_sub(1, Ordering::Relaxed);
+                self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
+            }
+            self.sled_remove(&txid);
+            tracing::warn!(
+                "🛡️ Blacklisted phantom TX {} blocked from finalization",
+                hex::encode(txid)
+            );
+            return false;
+        }
         if let Some((_, entry)) = self.pending.remove(&txid) {
             // Update sled entry to is_finalized=true so the TX survives a daemon restart
             // while waiting for block archival. Removed from sled in archive_confirmed_txs.
@@ -661,6 +678,22 @@ impl TransactionPool {
         Ok(evicted)
     }
 
+    /// Drop a single blacklisted txid from both pools and sled.
+    /// Returns true if the entry existed in either pool.
+    pub fn drop_blacklisted(&self, txid: &Hash256) -> bool {
+        let mut found = false;
+        if let Some((_, entry)) = self.pending.remove(txid) {
+            self.pending_count.fetch_sub(1, Ordering::Relaxed);
+            self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
+            found = true;
+        }
+        if self.confirmed.remove(txid).is_some() {
+            found = true;
+        }
+        self.sled_remove(txid);
+        found
+    }
+
     /// AV41: Purge ghost transactions from both the pending and confirmed pools.
     ///
     /// A ghost TX has 0 inputs AND 0 outputs AND either no special_data or
@@ -779,6 +812,14 @@ impl TransactionPool {
     /// TimeVote consensus. Does not start a new consensus round.
     pub fn add_finalized_direct(&self, tx: Transaction, fee: u64) {
         let txid = tx.txid();
+        if crate::purge_list::is_blacklisted(&txid) {
+            self.sled_remove(&txid);
+            tracing::warn!(
+                "🛡️ Blacklisted phantom TX {} rejected from finalized pool",
+                hex::encode(txid)
+            );
+            return;
+        }
         if self.pending.contains_key(&txid) || self.confirmed.contains_key(&txid) {
             return;
         }
@@ -904,9 +945,11 @@ impl TransactionPool {
 
         let mut restored = 0usize;
         let mut skipped = 0usize;
+        let mut blacklisted_evicted = 0usize;
+        let mut keys_to_drop: Vec<sled::IVec> = Vec::new();
 
         for item in tree.iter() {
-            let (_, value) = match item {
+            let (key, value) = match item {
                 Ok(kv) => kv,
                 Err(_) => continue,
             };
@@ -927,6 +970,13 @@ impl TransactionPool {
                 }
             };
 
+            let txid = tx.txid();
+            if crate::purge_list::is_blacklisted(&txid) {
+                keys_to_drop.push(key);
+                blacklisted_evicted += 1;
+                continue;
+            }
+
             let fee = parsed["fee"].as_u64().unwrap_or(0);
             let is_finalized = parsed["is_finalized"].as_bool().unwrap_or(false);
 
@@ -940,6 +990,16 @@ impl TransactionPool {
                     Err(_) => skipped += 1,
                 }
             }
+        }
+
+        for key in keys_to_drop {
+            let _ = tree.remove(&key);
+        }
+        if blacklisted_evicted > 0 {
+            tracing::warn!(
+                "🛡️ Evicted {} blacklisted phantom transaction(s) from sled mempool on load",
+                blacklisted_evicted
+            );
         }
 
         if restored > 0 || skipped > 0 {
