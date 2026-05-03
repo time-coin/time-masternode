@@ -249,6 +249,15 @@ enum Commands {
         subnet: String,
     },
 
+    /// Delete the stored anchor for a collateral outpoint and auto-unban any
+    /// IP banned for "Collateral hijack attempt for <that outpoint>".
+    /// Recovery for stuck/wrong anchor cases.
+    #[command(next_help_heading = "Network")]
+    ClearCollateralAnchor {
+        /// Outpoint formatted "<txid_hex>:<vout>"
+        outpoint: String,
+    },
+
     /// Remove ALL bans and violation counts (whitelisted peers are unaffected)
     #[command(next_help_heading = "Network")]
     ClearBanList,
@@ -1328,6 +1337,9 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         ),
         Commands::Unban { ip } => ("unban", json!([ip])),
         Commands::UnbanSubnet { subnet } => ("unbansubnet", json!([subnet])),
+        Commands::ClearCollateralAnchor { outpoint } => {
+            ("clearcollateralanchor", json!([outpoint]))
+        }
         Commands::ClearBanList => ("clearbanlist", json!([])),
         Commands::ResetPeerProfiles => ("resetpeerprofiles", json!([])),
         Commands::AddWhitelist { ip } => ("addwhitelist", json!([ip])),

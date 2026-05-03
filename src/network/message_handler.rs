@@ -3867,23 +3867,14 @@ impl MessageHandler {
                                     // Check whether the announcer carries a valid V4 proof.
                                     // A V4 proof is a signature over "TIME_COLLATERAL_CLAIM:{txid}:{vout}"
                                     // by the private key of the collateral UTXO's output address.
-                                    let txid_hex = hex::encode(outpoint.txid);
-                                    let proof_msg = format!(
-                                        "TIME_COLLATERAL_CLAIM:{}:{}",
-                                        txid_hex, outpoint.vout
-                                    );
-                                    let claimant_matches_utxo = reward_address == utxo.address;
                                     let has_valid_v4_proof =
-                                        !collateral_proof.is_empty() && claimant_matches_utxo && {
-                                            use ed25519_dalek::Verifier;
-                                            ed25519_dalek::Signature::from_slice(&collateral_proof)
-                                                .map(|sig| {
-                                                    public_key
-                                                        .verify(proof_msg.as_bytes(), &sig)
-                                                        .is_ok()
-                                                })
-                                                .unwrap_or(false)
-                                        };
+                                        crate::address::verify_collateral_claim_proof(
+                                            &public_key,
+                                            &collateral_proof,
+                                            &utxo.address,
+                                            &outpoint.txid,
+                                            outpoint.vout,
+                                        );
 
                                     if has_valid_v4_proof {
                                         // Legitimate owner proved key ownership — the anchor was
@@ -4024,12 +4015,6 @@ impl MessageHandler {
                                         let squatter_ip = info.masternode_address.clone();
                                         drop(existing);
 
-                                        let txid_hex = hex::encode(outpoint.txid);
-                                        let proof_msg = format!(
-                                            "TIME_COLLATERAL_CLAIM:{}:{}",
-                                            txid_hex, outpoint.vout
-                                        );
-
                                         let claimant_matches_utxo = reward_address == utxo.address;
 
                                         // Look up the squatter's stored reward_address to detect
@@ -4043,20 +4028,14 @@ impl MessageHandler {
                                             .map(|a| a == utxo.address)
                                             .unwrap_or(false);
 
-                                        let has_valid_proof = if !collateral_proof.is_empty()
-                                            && claimant_matches_utxo
-                                        {
-                                            use ed25519_dalek::Verifier;
-                                            ed25519_dalek::Signature::from_slice(&collateral_proof)
-                                                .map(|sig| {
-                                                    public_key
-                                                        .verify(proof_msg.as_bytes(), &sig)
-                                                        .is_ok()
-                                                })
-                                                .unwrap_or(false)
-                                        } else {
-                                            false
-                                        };
+                                        let has_valid_proof =
+                                            crate::address::verify_collateral_claim_proof(
+                                                &public_key,
+                                                &collateral_proof,
+                                                &utxo.address,
+                                                &outpoint.txid,
+                                                outpoint.vout,
+                                            );
 
                                         let can_evict = if has_valid_proof {
                                             // Tier 1: cryptographic proof — but never evict the
@@ -4410,21 +4389,16 @@ impl MessageHandler {
                                 .and_then(|a| utxo_addr_opt.as_deref().map(|u| a == u))
                                 .unwrap_or(false);
 
-                            let txid_hex = hex::encode(outpoint.txid);
-                            let proof_msg =
-                                format!("TIME_COLLATERAL_CLAIM:{}:{}", txid_hex, outpoint.vout);
-
-                            let has_valid_proof =
-                                if !collateral_proof.is_empty() && claimant_matches_utxo {
-                                    use ed25519_dalek::Verifier;
-                                    ed25519_dalek::Signature::from_slice(&collateral_proof)
-                                        .map(|sig| {
-                                            public_key.verify(proof_msg.as_bytes(), &sig).is_ok()
-                                        })
-                                        .unwrap_or(false)
-                                } else {
-                                    false
-                                };
+                            let has_valid_proof = match utxo_addr_opt.as_deref() {
+                                Some(addr) => crate::address::verify_collateral_claim_proof(
+                                    &public_key,
+                                    &collateral_proof,
+                                    addr,
+                                    &outpoint.txid,
+                                    outpoint.vout,
+                                ),
+                                None => false,
+                            };
 
                             let can_evict = if has_valid_proof {
                                 // Tier 1: cryptographic proof — but never evict the local node
@@ -4896,33 +4870,37 @@ impl MessageHandler {
                             );
                         }
                     }
+                    // CollateralAlreadyLocked is no longer treated as a severe ban-worthy
+                    // offense.  An unforgeable V4 proof — verified upstream against the
+                    // UTXO output address — is the canonical path for the legitimate owner
+                    // to displace a stale anchor, and that path doesn't reach this branch.
+                    // Reaching here means either (a) the announcer truly is a squatter, in
+                    // which case the announcement is dropped harmlessly without rewards
+                    // (see reward-address Level-3 enforcement), or (b) the local node has a
+                    // stale anchor and the legitimate owner hasn't sent a V4 proof yet —
+                    // banning them in that case is exactly the bug we're fixing.
+                    //
+                    // Rate-limit a soft violation per (peer, outpoint) so a determined
+                    // squatter still accumulates blacklist signal slowly; legitimate-owner
+                    // reannounces every 60s no longer ratchet to a permaban within minutes.
                     if let Some(blacklist) = &context.blacklist {
                         let bare_ip = violation_ip.split(':').next().unwrap_or(violation_ip);
                         if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
-                            let mut bl = blacklist.write().await;
-                            let should_disconnect = if is_relayed {
-                                // Relay forwarding bad content: minor violation only
+                            static LOCKED_VIOLATION_RL: std::sync::OnceLock<
+                                dashmap::DashMap<String, std::time::Instant>,
+                            > = std::sync::OnceLock::new();
+                            let rl = LOCKED_VIOLATION_RL.get_or_init(dashmap::DashMap::new);
+                            let key = format!("{}:{}", bare_ip, outpoint_for_relay);
+                            if should_warn_now(rl, &key, 600) {
+                                let mut bl = blacklist.write().await;
                                 bl.record_violation(
                                     ban_ip,
                                     &format!(
-                                        "Relayed collateral hijack announce for {}",
-                                        outpoint_for_relay
+                                        "Collateral already locked under different anchor for {}{}",
+                                        outpoint_for_relay,
+                                        if is_relayed { " (relayed)" } else { "" }
                                     ),
-                                )
-                            } else {
-                                bl.record_severe_violation(
-                                    ban_ip,
-                                    &format!(
-                                        "Collateral hijack attempt for {}",
-                                        outpoint_for_relay
-                                    ),
-                                )
-                            };
-                            if should_disconnect && !is_relayed {
-                                return Err(format!(
-                                    "DISCONNECT: collateral hijack banned {}",
-                                    ban_ip
-                                ));
+                                );
                             }
                         }
                     }

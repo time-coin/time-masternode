@@ -227,6 +227,7 @@ impl RpcHandler {
             "ban" => self.ban_ip(&params_array).await,
             "unban" => self.unban(&params_array).await,
             "unbansubnet" => self.unban_subnet(&params_array).await,
+            "clearcollateralanchor" => self.clear_collateral_anchor(&params_array).await,
             "clearbanlist" => self.clear_ban_list().await,
             "resetpeerprofiles" => self.reset_peer_profiles().await,
             "auditcollateral" => self.audit_collateral().await,
@@ -4589,6 +4590,94 @@ impl RpcHandler {
                 "message": "Subnet was not in the ban list"
             }))
         }
+    }
+
+    /// Delete the sled `collateral_anchor:{txid}:{vout}` entry for an outpoint
+    /// and clear any blacklist entries banned for "Collateral hijack attempt
+    /// for <that outpoint>".  Used to recover from a stuck anchor that points
+    /// at the wrong IP (e.g. set by a stale relay before AV36 hardening), so
+    /// the legitimate owner's next V4 announce can re-anchor cleanly.
+    ///
+    /// Params: [outpoint] where outpoint = "<txid_hex>:<vout>"
+    async fn clear_collateral_anchor(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let outpoint_str = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Usage: clearcollateralanchor <txid_hex>:<vout>".to_string(),
+            })?;
+
+        let (txid_hex, vout_str) = outpoint_str.split_once(':').ok_or_else(|| RpcError {
+            code: -32602,
+            message: "Outpoint must be formatted <txid_hex>:<vout>".to_string(),
+        })?;
+        let vout: u32 = vout_str.parse().map_err(|_| RpcError {
+            code: -32602,
+            message: "vout must be a non-negative integer".to_string(),
+        })?;
+        let txid_bytes = hex::decode(txid_hex).map_err(|_| RpcError {
+            code: -32602,
+            message: "txid must be hex".to_string(),
+        })?;
+        if txid_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -32602,
+                message: "txid must be 32 bytes".to_string(),
+            });
+        }
+        let mut txid_arr = [0u8; 32];
+        txid_arr.copy_from_slice(&txid_bytes);
+        let outpoint = crate::types::OutPoint {
+            txid: txid_arr,
+            vout,
+        };
+
+        let removed_anchor = self.registry.delete_collateral_anchor(&outpoint);
+
+        // Auto-unban any IP previously banned with a reason mentioning this
+        // outpoint, so the legitimate owner can reconnect immediately.
+        let unbanned: Vec<String> = {
+            let mut bl = self.blacklist.write().await;
+            let needle_a = format!("Collateral hijack attempt for {}", outpoint_str);
+            let needle_b = format!(
+                "Collateral already locked under different anchor for {}",
+                outpoint_str
+            );
+            let (permanent, _temp, _subnets, _viol) = bl.list_bans();
+            let to_unban: Vec<std::net::IpAddr> = permanent
+                .into_iter()
+                .filter(|(_, reason)| reason.contains(&needle_a) || reason.contains(&needle_b))
+                .filter_map(|(ip, _)| ip.parse().ok())
+                .collect();
+            let mut cleared = Vec::new();
+            for ip in to_unban {
+                if bl.unban(ip) {
+                    cleared.push(ip.to_string());
+                }
+            }
+            cleared
+        };
+
+        tracing::warn!(
+            "🛠️ RPC clearcollateralanchor: outpoint={} anchor_removed={} unbanned={:?}",
+            outpoint_str,
+            removed_anchor,
+            unbanned
+        );
+
+        Ok(json!({
+            "result": "success",
+            "outpoint": outpoint_str,
+            "anchor_removed": removed_anchor,
+            "unbanned_ips": unbanned,
+            "message": format!(
+                "Anchor {} for {}; cleared {} related ban(s)",
+                if removed_anchor { "removed" } else { "did not exist" },
+                outpoint_str,
+                unbanned.len()
+            )
+        }))
     }
 
     /// Remove ALL bans and violation counts. Whitelisted peers are unaffected.

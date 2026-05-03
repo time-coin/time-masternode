@@ -118,6 +118,54 @@ impl Address {
     }
 }
 
+/// Verify a collateral-claim proof.
+///
+/// A valid proof requires *both*:
+///   1. The announcer's `public_key` derives to `utxo_address` — i.e. the
+///      announcer controls the private key for the address that owns the
+///      collateral UTXO. (Address derivation: SHA-256 truncated to 20 bytes,
+///      base58 with checksum, prefixed by network digit — see
+///      `Address::from_public_key`.)
+///   2. `signature` is a valid Ed25519 signature by `public_key` over the
+///      canonical claim message `"TIME_COLLATERAL_CLAIM:<txid_hex>:<vout>"`.
+///
+/// This is *cryptographic ownership proof*, fully decoupled from the
+/// announced reward address.  Where the rewards eventually flow is a
+/// reward-routing question handled separately at block assembly.
+///
+/// Returns true iff both checks pass.
+pub fn verify_collateral_claim_proof(
+    public_key: &ed25519_dalek::VerifyingKey,
+    signature: &[u8],
+    utxo_address: &str,
+    outpoint_txid: &[u8; 32],
+    outpoint_vout: u32,
+) -> bool {
+    if signature.is_empty() || utxo_address.is_empty() {
+        return false;
+    }
+    let network = if utxo_address.starts_with("TIME0") {
+        crate::network_type::NetworkType::Testnet
+    } else if utxo_address.starts_with("TIME1") {
+        crate::network_type::NetworkType::Mainnet
+    } else {
+        return false;
+    };
+    let derived = Address::from_public_key(public_key.as_bytes(), network).as_string();
+    if derived != utxo_address {
+        return false;
+    }
+    use ed25519_dalek::Verifier;
+    let proof_msg = format!(
+        "TIME_COLLATERAL_CLAIM:{}:{}",
+        hex::encode(outpoint_txid),
+        outpoint_vout
+    );
+    ed25519_dalek::Signature::from_slice(signature)
+        .map(|sig| public_key.verify(proof_msg.as_bytes(), &sig).is_ok())
+        .unwrap_or(false)
+}
+
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.as_string())

@@ -4538,6 +4538,20 @@ impl MasternodeRegistry {
             .map(|v| v.to_vec())
     }
 
+    /// Delete the sled anchor for a collateral outpoint.  Used by the
+    /// `clearcollateralanchor` admin RPC when an operator needs to recover
+    /// from a stuck/wrong anchor (e.g. anchor was set by a stale relay
+    /// before AV36 hardening).  Returns true if an entry was removed.
+    pub fn delete_collateral_anchor(&self, outpoint: &OutPoint) -> bool {
+        let outpoint_key = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
+        let anchor_db_key = format!("collateral_anchor:{}", outpoint_key);
+        self.db
+            .remove(anchor_db_key.as_bytes())
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
     /// Overwrite the sled anchor for a collateral outpoint (used when a V4 proof evicts a squatter).
     pub fn set_collateral_anchor(&self, outpoint: &OutPoint, ip: &str) {
         let outpoint_key = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
