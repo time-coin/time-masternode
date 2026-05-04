@@ -1086,11 +1086,6 @@ async fn handle_peer(
                         break;
                     }
                     Err(e) => {
-                        if handshake_done {
-                            tracing::info!("🔌 Connection from {} ended: {}", peer.addr, e);
-                        } else {
-                            tracing::debug!("🔌 Connection from {} ended before handshake: {}", peer.addr, e);
-                        }
                         // Pre-handshake oversized frame: trivial 4-byte DoS — penalise.
                         // Post-handshake frames > 100 MB are clearly malicious (e.g. 926 MB
                         // frames from fork-attack peers); penalise those too. Smaller
@@ -1105,6 +1100,17 @@ async fn handle_peer(
                             None
                         };
                         let clearly_malicious = frame_bytes.is_some_and(|b| b > MALICIOUS_FRAME_BYTES);
+                        // Whitelisted oversized-frame events emit a single combined WARN below
+                        // (via record_frame_bomb_violation); skip the generic "Connection ended"
+                        // line to avoid 3-line-per-event log spam.
+                        let suppress_generic_close_log = is_large_frame && is_whitelisted;
+                        if !suppress_generic_close_log {
+                            if handshake_done {
+                                tracing::info!("🔌 Connection from {} ended: {}", peer.addr, e);
+                            } else {
+                                tracing::debug!("🔌 Connection from {} ended before handshake: {}", peer.addr, e);
+                            }
+                        }
                         if is_large_frame && (!handshake_done || clearly_malicious) {
                             if let Some(ai) = &ai_system {
                                 ai.attack_detector.record_frame_bomb(&ip_str);
@@ -1116,13 +1122,7 @@ async fn handle_peer(
                                 // after reading a multi-GB length header the stream state is lost
                                 // and there is no way to find the next valid frame boundary.
                                 // The node will reconnect immediately (no ban applied).
-                                blacklist.write().await.record_frame_bomb_violation(
-                                    ip,
-                                    &format!("Oversized frame from whitelisted peer: {}", e),
-                                );
-                                // Note: record_frame_bomb_violation is a no-op for whitelisted IPs.
-                                // We still break because the TCP stream is unrecoverable after
-                                // reading a partial multi-GB frame header.
+                                blacklist.write().await.record_frame_bomb_violation(ip, &e);
                             } else {
                                 blacklist.write().await.record_violation(
                                     ip,

@@ -547,7 +547,7 @@ impl IPBlacklist {
         // Whitelisted IPs are never banned — they are the operator's own nodes.
         if self.is_whitelisted(ip) {
             tracing::warn!(
-                "⚠️  Oversized frame from whitelisted peer {} — dropping frame, keeping connection ({})",
+                "⚠️  Oversized frame from whitelisted peer {} — closing connection (stream unrecoverable, peer needs upgrade): {}",
                 ip,
                 reason
             );
