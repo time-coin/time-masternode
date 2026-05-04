@@ -5565,6 +5565,50 @@ impl Blockchain {
         self.consensus.tx_pool.get_pending_transactions()
     }
 
+    /// Startup-only sweep that removes block-construction artifacts that leaked
+    /// into the finalized pool — typically from a pre-fix reorg or from a peer
+    /// running older code. The two block-only TX types are the coinbase and the
+    /// reward_distribution that follows it.
+    ///
+    /// Reward_distribution detection is chain-aware: a finalized TX with one
+    /// input is treated as a reward_distribution iff the input's previous_output
+    /// txid resolves on-chain to a TX with a `BLOCK_REWARD_` script_pubkey.
+    /// This is definitive, not heuristic — wallet TXs that happen to spend a
+    /// coinbase output are conceptually impossible because coinbase outputs
+    /// only exist for the duration of one block before reward_distribution
+    /// consumes them.
+    pub fn purge_block_only_finalized(&self) -> usize {
+        let tx_index = match &self.tx_index {
+            Some(idx) => idx.clone(),
+            None => {
+                // Without tx_index we can still catch shape-detectable
+                // coinbases. Reward_distributions will be handled on first
+                // restart after tx_index becomes available.
+                return self.consensus.tx_pool.purge_block_only_finalized(|_| false);
+            }
+        };
+        let blockchain = self;
+        self.consensus
+            .tx_pool
+            .purge_block_only_finalized(|input_txid| {
+                let loc = match tx_index.get_location(input_txid) {
+                    Some(l) => l,
+                    None => return false,
+                };
+                let block = match blockchain.get_block(loc.block_height) {
+                    Ok(b) => b,
+                    Err(_) => return false,
+                };
+                let tx = match block.transactions.get(loc.tx_index) {
+                    Some(t) => t,
+                    None => return false,
+                };
+                tx.outputs
+                    .iter()
+                    .any(|o| o.script_pubkey.starts_with(b"BLOCK_REWARD_"))
+            })
+    }
+
     /// Get block by height  
     pub async fn get_block_by_height(&self, height: u64) -> Result<Block, String> {
         self.get_block(height)
@@ -7532,7 +7576,7 @@ impl Blockchain {
                         // The reward_distribution transaction outputs are removed below with all other transactions.
 
                         // Remove transaction outputs
-                        for tx in block.transactions.iter() {
+                        for (tx_idx, tx) in block.transactions.iter().enumerate() {
                             let txid = tx.txid();
 
                             // Remove created UTXOs
@@ -7553,18 +7597,38 @@ impl Blockchain {
                                 }
                             }
 
-                            // Non-coinbase, non-finalized transactions go back to mempool
-                            let is_coinbase = !tx.inputs.is_empty()
+                            // Block-only transactions (coinbase at index 0,
+                            // reward_distribution at index 1) are constructed fresh by
+                            // every block producer and have no meaning outside the
+                            // block they were minted for. Re-pooling them dumps stale
+                            // entries into the finalized pool that no future block can
+                            // ever clear (each new block builds its own pair from
+                            // scratch). Skip them. Also keep TIME's empty-input
+                            // coinbase shape detected for safety on any unexpected
+                            // ordering.
+                            let is_block_only_position = tx_idx <= 1;
+                            let is_empty_input_coinbase = tx.inputs.is_empty();
+                            let is_legacy_coinbase = !tx.inputs.is_empty()
                                 && tx.inputs[0].previous_output.vout == u32::MAX;
                             let is_finalized = undo_log.finalized_txs.contains(&txid);
 
-                            if !is_coinbase && !is_finalized {
+                            if is_block_only_position
+                                || is_empty_input_coinbase
+                                || is_legacy_coinbase
+                            {
+                                tracing::debug!(
+                                    "🚫 Skipping re-pool of block-only TX {} (idx {}, height {})",
+                                    hex::encode(&txid[..8]),
+                                    tx_idx,
+                                    height
+                                );
+                            } else if !is_finalized {
                                 transactions_to_repool.push(tx.clone());
                                 tracing::debug!(
                                     "📝 Transaction {} will be returned to mempool",
                                     hex::encode(&txid[..8])
                                 );
-                            } else if is_finalized {
+                            } else {
                                 tracing::debug!(
                                     "✅ Finalized transaction {} - will NOT return to mempool",
                                     hex::encode(&txid[..8])

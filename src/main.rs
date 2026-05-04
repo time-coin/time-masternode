@@ -1025,6 +1025,18 @@ async fn main() {
 
     let blockchain = Arc::new(blockchain);
 
+    // One-shot sweep for block-construction artifacts (coinbase +
+    // reward_distribution) that leaked into the finalized pool from pre-fix
+    // reorgs or from peers running older code. Definitive, chain-aware —
+    // reward_distribution detection requires tx_index which is now wired.
+    let block_only_purged = blockchain.purge_block_only_finalized();
+    if block_only_purged > 0 {
+        tracing::warn!(
+            "🧹 Startup: removed {} block-only TX(s) from finalized pool",
+            block_only_purged
+        );
+    }
+
     // Verify chain height integrity on startup (fix inconsistencies from crashes)
     tracing::info!("🔍 Verifying chain height integrity...");
     match blockchain.verify_and_fix_chain_height() {

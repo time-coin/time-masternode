@@ -171,6 +171,16 @@ impl TransactionPool {
             return Err(PoolError::PreviouslyRejected);
         }
 
+        // Block-only artifacts (coinbase) must never enter the pool.
+        if Self::is_block_only_tx(&tx) {
+            self.sled_remove(&txid);
+            tracing::debug!(
+                "🚫 Refused block-only TX {} from pending pool",
+                hex::encode(txid)
+            );
+            return Err(PoolError::PreviouslyRejected);
+        }
+
         // Fast path: Check if already exists BEFORE expensive serialization
         if self.pending.contains_key(&txid) || self.confirmed.contains_key(&txid) {
             return Err(PoolError::AlreadyExists);
@@ -807,6 +817,81 @@ impl TransactionPool {
         }
     }
 
+    /// Returns true if `tx` is unambiguously a coinbase: TIME's coinbase has
+    /// empty inputs and one `BLOCK_REWARD_<height>` output. Coinbase TXs are
+    /// minted fresh per block by the producer and have no business sitting in
+    /// the mempool — once they're in the chain they cannot be re-included
+    /// anywhere.
+    ///
+    /// Note: the matching reward_distribution TX cannot be detected by shape
+    /// alone (wallet TXs have the same field layout), so it is filtered out by
+    /// the rollback re-pool path positionally and by the startup purge using
+    /// chain context.
+    pub fn is_block_only_tx(tx: &Transaction) -> bool {
+        if tx.inputs.is_empty() {
+            return true;
+        }
+        if tx
+            .outputs
+            .iter()
+            .any(|o| o.script_pubkey.starts_with(b"BLOCK_REWARD_"))
+        {
+            return true;
+        }
+        false
+    }
+
+    /// One-shot startup purge: remove every block-construction artifact from
+    /// the finalized pool.
+    ///
+    /// Catches:
+    ///   1. Coinbases (via `is_block_only_tx` — empty inputs / BLOCK_REWARD_
+    ///      script).
+    ///   2. Reward_distribution TXs whose single input spends a coinbase that
+    ///      `is_input_coinbase` reports lives on-chain. The caller wires this
+    ///      closure to a chain lookup (typically `tx_index` + the resolved
+    ///      block's transactions[0]) so reward_distributions are detected
+    ///      definitively, never by heuristic.
+    ///
+    /// Returns the number of entries removed.
+    pub fn purge_block_only_finalized<F>(&self, mut is_input_coinbase: F) -> usize
+    where
+        F: FnMut(&Hash256) -> bool,
+    {
+        let mut to_remove: Vec<Hash256> = Vec::new();
+
+        for entry in self.confirmed.iter() {
+            let txid = *entry.key();
+            let tx = &entry.value().tx;
+
+            if Self::is_block_only_tx(tx) {
+                to_remove.push(txid);
+                continue;
+            }
+
+            // Reward distribution shape: exactly one input. Resolve that input
+            // against the chain — if it's a coinbase, this is a
+            // reward_distribution and must be evicted.
+            if tx.inputs.len() == 1 && is_input_coinbase(&tx.inputs[0].previous_output.txid) {
+                to_remove.push(txid);
+            }
+        }
+
+        let count = to_remove.len();
+        for txid in &to_remove {
+            self.confirmed.remove(txid);
+            self.sled_remove(txid);
+        }
+
+        if count > 0 {
+            tracing::warn!(
+                "🧹 Startup purge: removed {} block-only TX(s) (coinbase + reward_distribution) from finalized pool",
+                count
+            );
+        }
+        count
+    }
+
     /// Add a transaction directly to the finalized pool (used for mempool sync and persistence
     /// restore). The caller is responsible for ensuring the transaction has already passed
     /// TimeVote consensus. Does not start a new consensus round.
@@ -816,6 +901,18 @@ impl TransactionPool {
             self.sled_remove(&txid);
             tracing::warn!(
                 "🛡️ Blacklisted phantom TX {} rejected from finalized pool",
+                hex::encode(txid)
+            );
+            return;
+        }
+        // Defense in depth: never let a block-construction TX (coinbase or
+        // reward_distribution) into the finalized pool. These leak into the
+        // pool via reorg re-pooling or from peers running older code, then sit
+        // forever because no future block will ever include them.
+        if Self::is_block_only_tx(&tx) {
+            self.sled_remove(&txid);
+            tracing::debug!(
+                "🚫 Refused block-only TX {} from finalized pool",
                 hex::encode(txid)
             );
             return;
