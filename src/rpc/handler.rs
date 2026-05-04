@@ -662,8 +662,9 @@ impl RpcHandler {
                                             src_tx.outputs.get(input.previous_output.vout as usize)
                                         {
                                             input_sum += src_out.value;
-                                            let src_addr =
-                                                Self::script_pubkey_to_address(&src_out.script_pubkey);
+                                            let src_addr = Self::script_pubkey_to_address(
+                                                &src_out.script_pubkey,
+                                            );
                                             if local_address.as_deref() == Some(src_addr.as_ref()) {
                                                 wallet_input += src_out.value;
                                             }
@@ -778,7 +779,8 @@ impl RpcHandler {
                                     src_tx.outputs.get(input.previous_output.vout as usize)
                                 {
                                     input_sum += src_out.value;
-                                    let src_addr = Self::script_pubkey_to_address(&src_out.script_pubkey);
+                                    let src_addr =
+                                        Self::script_pubkey_to_address(&src_out.script_pubkey);
                                     if local_address.as_deref() == Some(src_addr.as_ref()) {
                                         wallet_input += src_out.value;
                                     }
@@ -1682,7 +1684,8 @@ impl RpcHandler {
             for tx in &finalized_txs {
                 let txid = tx.txid();
                 for (vout, output) in tx.outputs.iter().enumerate() {
-                    let output_address = Self::script_pubkey_to_address(&output.script_pubkey).to_string();
+                    let output_address =
+                        Self::script_pubkey_to_address(&output.script_pubkey).to_string();
                     if !addr_set.contains(output_address.as_str()) {
                         continue;
                     }
@@ -1905,8 +1908,9 @@ impl RpcHandler {
                                     if let Some(src_output) =
                                         src_tx.outputs.get(spent_vout as usize)
                                     {
-                                        let src_addr =
-                                            Self::script_pubkey_to_address(&src_output.script_pubkey);
+                                        let src_addr = Self::script_pubkey_to_address(
+                                            &src_output.script_pubkey,
+                                        );
                                         if src_addr == local_address {
                                             sent += src_output.value;
                                         }
@@ -1921,10 +1925,9 @@ impl RpcHandler {
                     // Detect consolidation: all outputs go to our address (self-send)
                     let all_outputs_to_self = sent > 0
                         && received > 0
-                        && tx
-                            .outputs
-                            .iter()
-                            .all(|o| Self::script_pubkey_to_address(&o.script_pubkey) == local_address);
+                        && tx.outputs.iter().all(|o| {
+                            Self::script_pubkey_to_address(&o.script_pubkey) == local_address
+                        });
 
                     // Try to decrypt encrypted memo if present
                     let memo = tx
@@ -2298,9 +2301,10 @@ impl RpcHandler {
                                     if let Some(src_output) =
                                         src_tx.outputs.get(spent_vout as usize)
                                     {
-                                        let src_addr =
-                                            Self::script_pubkey_to_address(&src_output.script_pubkey)
-                                                .to_string();
+                                        let src_addr = Self::script_pubkey_to_address(
+                                            &src_output.script_pubkey,
+                                        )
+                                        .to_string();
                                         if addr_set.contains(&src_addr) {
                                             sent += src_output.value;
                                             if send_address.is_empty() {
@@ -5235,7 +5239,8 @@ impl RpcHandler {
                             txid,
                             vout: idx as u32,
                         };
-                        let address = Self::script_pubkey_to_address(&output.script_pubkey).to_string();
+                        let address =
+                            Self::script_pubkey_to_address(&output.script_pubkey).to_string();
                         let utxo = crate::types::UTXO {
                             outpoint: outpoint.clone(),
                             value: output.value,
