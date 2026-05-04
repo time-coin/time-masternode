@@ -3760,6 +3760,33 @@ impl Blockchain {
                 }
             }
 
+            // Coinbase-shape guard: a finalized TX with empty inputs and one or
+            // more outputs is a block-construction artifact (coinbase) that must
+            // never be re-included from the pool. The producer mints a fresh
+            // coinbase per block at index 0; any pool entry matching this shape
+            // leaked in via an old reorg or a peer running pre-fix code. The
+            // existing inbound guards in TransactionPool::is_block_only_tx stop
+            // new entries, but stale ones already in the pool would otherwise
+            // be appended verbatim into every new block and accepted by lax
+            // validators — exactly the symptom seen on mainnet (block 2773 had
+            // three coinbase-shaped TXs).
+            let is_coinbase_shape =
+                tx.inputs.is_empty() && !tx.outputs.is_empty() && tx.special_data.is_none();
+            let has_block_reward_output = tx
+                .outputs
+                .iter()
+                .any(|o| o.script_pubkey.starts_with(b"BLOCK_REWARD_"));
+            if is_coinbase_shape || has_block_reward_output {
+                tracing::warn!(
+                    "🗑️ Block {}: Evicting block-only TX {} (coinbase shape) from finalized pool",
+                    next_height,
+                    hex::encode(txid)
+                );
+                evict_txids.push(txid);
+                ds_invalid_count += 1;
+                continue;
+            }
+
             // Replay-protection version check (AV-REPLAY): from block 1000 onward all
             // value-transfer transactions (those with inputs) must use version >= 2,
             // i.e. signed with CHAIN_ID prepended to the signing message.
