@@ -1143,11 +1143,24 @@ impl PeerConnection {
 
                             if let Err(e) = handle_result {
                                 if e.contains("is blacklisted") || e.contains("DISCONNECT:") {
-                                    warn!("🚫 [{:?}] Disconnecting peer {}: {}", self.direction, self.peer_ip, e);
-                                    break;
+                                    // Whitelisted peers are operator-trusted infrastructure:
+                                    // never close them on protocol-violation DISCONNECT signals.
+                                    // The message that triggered the error was already dropped
+                                    // by the handler; the peer stays connected and consensus
+                                    // / sync flows continue.
+                                    if self.is_whitelisted {
+                                        warn!(
+                                            "⚠️ [{:?}] Suppressing DISCONNECT for whitelisted peer {}: {}",
+                                            self.direction, self.peer_ip, e
+                                        );
+                                    } else {
+                                        warn!("🚫 [{:?}] Disconnecting peer {}: {}", self.direction, self.peer_ip, e);
+                                        break;
+                                    }
+                                } else {
+                                    warn!("⚠️ [{:?}] Error handling message from {}: {}",
+                                          self.direction, self.peer_ip, e);
                                 }
-                                warn!("⚠️ [{:?}] Error handling message from {}: {}",
-                                      self.direction, self.peer_ip, e);
                             }
                         }
                         Err(e) => {
@@ -1211,27 +1224,37 @@ impl PeerConnection {
                     genesis_check_rx = None;
                     if !result {
                         // Peer replied with a different genesis hash — wrong network/fork.
-                        // Permanently ban and disconnect.
-                        warn!(
-                            "🚫 [{:?}] Disconnecting {} — genesis hash mismatch (wrong network/fork). Banning.",
-                            self.direction, self.peer_ip
-                        );
-                        if let Some(ref blacklist) = config.blacklist {
-                            let bare = self
-                                .peer_ip
-                                .split(':')
-                                .next()
-                                .unwrap_or(&self.peer_ip);
-                            if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-                                if !blacklist.read().await.is_whitelisted(ip) {
-                                    blacklist
-                                        .write()
-                                        .await
-                                        .add_permanent_ban(ip, "genesis hash mismatch");
+                        // Permanently ban and disconnect, UNLESS the peer is whitelisted —
+                        // an operator-trusted node with a different genesis hash means our
+                        // local registry / chain state is the one out of sync. Keep the
+                        // connection and let resync / convergence resolve it.
+                        if self.is_whitelisted {
+                            warn!(
+                                "⚠️ [{:?}] Genesis mismatch with WHITELISTED peer {} — keeping connection (operator-trusted; likely local divergence)",
+                                self.direction, self.peer_ip
+                            );
+                        } else {
+                            warn!(
+                                "🚫 [{:?}] Disconnecting {} — genesis hash mismatch (wrong network/fork). Banning.",
+                                self.direction, self.peer_ip
+                            );
+                            if let Some(ref blacklist) = config.blacklist {
+                                let bare = self
+                                    .peer_ip
+                                    .split(':')
+                                    .next()
+                                    .unwrap_or(&self.peer_ip);
+                                if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+                                    if !blacklist.read().await.is_whitelisted(ip) {
+                                        blacklist
+                                            .write()
+                                            .await
+                                            .add_permanent_ban(ip, "genesis hash mismatch");
+                                    }
                                 }
                             }
+                            break;
                         }
-                        break;
                     }
                 }
 

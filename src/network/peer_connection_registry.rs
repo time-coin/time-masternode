@@ -200,6 +200,18 @@ impl PeerConnectionRegistry {
     /// If `permanent` is false, peer is rechecked after INCOMPATIBLE_RECHECK_SECS
     pub async fn mark_incompatible(&self, peer_ip: &str, reason: &str, permanent: bool) {
         let ip_only = extract_ip(peer_ip).to_string();
+        // Whitelisted peers are operator-trusted; never mark them incompatible.
+        // Compatibility issues with whitelisted peers are local registry / version
+        // drift, not a property of the peer.
+        if self.is_whitelisted(&ip_only).await {
+            tracing::warn!(
+                "⚠️ Suppressing mark_incompatible for whitelisted peer {}: {} (permanent={})",
+                ip_only,
+                reason,
+                permanent
+            );
+            return;
+        }
         let mut incompatible = self.incompatible_peers.write().await;
 
         // Check if already marked
@@ -1274,8 +1286,21 @@ impl PeerConnectionRegistry {
     /// loop in server.rs / client.rs to receive an error on the next send and
     /// close the TCP connection cleanly.  Also removes the peer from the
     /// connections map.  Use for zombie peers that should not reconnect.
+    ///
+    /// Whitelisted (operator-trusted) peers are NEVER kicked — every kick path
+    /// in the codebase ultimately routes through this function, so this is the
+    /// single chokepoint that enforces the "whitelisted peers stay connected"
+    /// invariant. Callers that need to drop a misbehaving peer regardless must
+    /// remove it from the whitelist first.
     pub async fn kick_peer(&self, peer_ip: &str) {
         let ip_only = extract_ip(peer_ip);
+        if self.is_whitelisted(ip_only).await {
+            tracing::warn!(
+                "⚠️ Suppressing kick of whitelisted peer {} (operator-trusted)",
+                ip_only
+            );
+            return;
+        }
         {
             let mut writers = self.peer_writers.write().await;
             writers.remove(ip_only);

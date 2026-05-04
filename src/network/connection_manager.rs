@@ -377,7 +377,10 @@ impl ConnectionManager {
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     true
                 } else if e.get().direction == ConnectionDirection::Outbound {
-                    if self.should_keep_outbound(peer_ip) {
+                    // Whitelisted peers are operator-trusted: never reject their
+                    // inbound for tiebreaker reasons. A stuck outbound entry must
+                    // not block a fresh inbound from the operator's own node.
+                    if !is_whitelisted && self.should_keep_outbound(peer_ip) {
                         tracing::debug!(
                             "🔄 Rejecting inbound from {} — keeping {:?} outbound (IP tiebreaker)",
                             peer_ip,
@@ -419,6 +422,39 @@ impl ConnectionManager {
                         });
                         true
                     }
+                } else if is_whitelisted {
+                    // Whitelisted peers must never be locked out by a stale or
+                    // duplicate inbound entry. Replace the existing slot in place;
+                    // the previous I/O bridge will exit naturally when its writer
+                    // channel drops.
+                    let was_connected = e.get().state == PeerConnectionState::Connected;
+                    let connection_count = e.get().connection_count.saturating_add(1);
+                    tracing::info!(
+                        "🔄 Replacing existing inbound slot for whitelisted peer {} (prev state: {:?})",
+                        peer_ip,
+                        e.get().state
+                    );
+                    e.insert(ConnectionInfo {
+                        state: PeerConnectionState::Connected,
+                        direction: ConnectionDirection::Inbound,
+                        connected_at: Some(Instant::now()),
+                        disconnected_at: None,
+                        connection_count,
+                        last_message_at: Some(Instant::now()),
+                        bytes_sent: 0,
+                        bytes_received: 0,
+                        messages_sent: 0,
+                        messages_received: 0,
+                        is_whitelisted,
+                    });
+                    if !was_connected {
+                        self.connected_count
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.inbound_count
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    self.record_new_connection(peer_ip);
+                    true
                 } else {
                     // Active inbound session already exists.
                     tracing::debug!(

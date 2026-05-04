@@ -811,16 +811,26 @@ async fn handle_peer(
                     let sni = tls_stream.get_ref().1.server_name();
                     if sni != Some("timecoin.local") {
                         let sni_desc = sni.unwrap_or("<none>").to_owned();
-                        blacklist
-                            .write()
-                            .await
-                            .record_violation(ip, &format!("Invalid TLS SNI: {}", sni_desc));
-                        tracing::debug!(
-                            "🚫 Rejected {} — invalid SNI {:?} (not a TIME node)",
-                            ip,
-                            sni_desc
-                        );
-                        return Ok(());
+                        if is_whitelisted {
+                            // Whitelisted peers are operator-trusted; an unexpected
+                            // SNI from one of them is almost certainly an older client
+                            // build, not a probe. Log and continue.
+                            tracing::warn!(
+                                "⚠️  Whitelisted peer {} sent unexpected SNI {:?} — accepting connection",
+                                ip, sni_desc
+                            );
+                        } else {
+                            blacklist
+                                .write()
+                                .await
+                                .record_violation(ip, &format!("Invalid TLS SNI: {}", sni_desc));
+                            tracing::debug!(
+                                "🚫 Rejected {} — invalid SNI {:?} (not a TIME node)",
+                                ip,
+                                sni_desc
+                            );
+                            return Ok(());
+                        }
                     }
                 }
                 // Log only after TLS succeeds — plain TCP probes (reachability checks)
@@ -1141,35 +1151,53 @@ async fn handle_peer(
                                 match &msg {
                                     NetworkMessage::Handshake { magic, protocol_version, network, commit_count } => {
                                         if magic != &magic_bytes {
-                                            tracing::warn!("🚫 Rejecting {} - invalid magic bytes: {:?}", peer.addr, magic);
-                                            blacklist.write().await.record_violation(
-                                                ip,
-                                                &format!("Invalid magic bytes: {:?}", magic)
-                                            );
-                                            let _ = masternode_registry
-                                                .suspend_from_consensus(&ip_str, "Invalid handshake magic")
-                                                .await;
-                                            break;
+                                            if is_whitelisted {
+                                                tracing::warn!(
+                                                    "⚠️  Whitelisted peer {} sent unexpected magic {:?} — accepting anyway (operator-trusted)",
+                                                    peer.addr, magic
+                                                );
+                                            } else {
+                                                tracing::warn!("🚫 Rejecting {} - invalid magic bytes: {:?}", peer.addr, magic);
+                                                blacklist.write().await.record_violation(
+                                                    ip,
+                                                    &format!("Invalid magic bytes: {:?}", magic)
+                                                );
+                                                let _ = masternode_registry
+                                                    .suspend_from_consensus(&ip_str, "Invalid handshake magic")
+                                                    .await;
+                                                break;
+                                            }
                                         }
                                         if *protocol_version < 2 {
-                                            tracing::warn!("🚫 Rejecting {} - protocol version {} is too old (minimum: 2)", peer.addr, protocol_version);
-                                            blacklist.write().await.record_violation(
-                                                ip,
-                                                &format!("Protocol version {} below minimum 2", protocol_version)
-                                            );
-                                            let _ = masternode_registry
-                                                .suspend_from_consensus(
-                                                    &ip_str,
-                                                    &format!("Protocol version {} below minimum 2", protocol_version),
-                                                )
-                                                .await;
-                                            break;
+                                            if is_whitelisted {
+                                                tracing::warn!(
+                                                    "⚠️  Whitelisted peer {} on protocol version {} (minimum 2) — accepting anyway",
+                                                    peer.addr, protocol_version
+                                                );
+                                            } else {
+                                                tracing::warn!("🚫 Rejecting {} - protocol version {} is too old (minimum: 2)", peer.addr, protocol_version);
+                                                blacklist.write().await.record_violation(
+                                                    ip,
+                                                    &format!("Protocol version {} below minimum 2", protocol_version)
+                                                );
+                                                let _ = masternode_registry
+                                                    .suspend_from_consensus(
+                                                        &ip_str,
+                                                        &format!("Protocol version {} below minimum 2", protocol_version),
+                                                    )
+                                                    .await;
+                                                break;
+                                            }
                                         }
                                         let our_commits = env!("GIT_COMMIT_COUNT").parse::<u32>().unwrap_or(0);
                                         // Hard-reject peers below the minimum quorum version.
                                         // Nodes running old code cannot participate in consensus
                                         // and must not be counted toward our peer quorum.
-                                        if *commit_count < crate::constants::MIN_PEER_COMMIT_VERSION {
+                                        // Whitelisted peers are operator-trusted infrastructure: never
+                                        // close them on a version check — even if they're behind, we
+                                        // still want them in the peer set (they may still serve blocks
+                                        // and votes in a degraded mode while the operator upgrades).
+                                        if *commit_count < crate::constants::MIN_PEER_COMMIT_VERSION && !is_whitelisted {
                                             tracing::warn!(
                                                 "🚫 Rejecting {} — running obsolete software \
                                                 (commit {}, minimum required: {}). \
@@ -1208,6 +1236,12 @@ async fn handle_peer(
                                                 )
                                                 .await;
                                             break;
+                                        }
+                                        if *commit_count < crate::constants::MIN_PEER_COMMIT_VERSION && is_whitelisted {
+                                            tracing::warn!(
+                                                "⚠️  Whitelisted peer {} below minimum commit ({} < {}) — accepting anyway (operator-trusted)",
+                                                peer.addr, commit_count, crate::constants::MIN_PEER_COMMIT_VERSION
+                                            );
                                         }
                                         if *commit_count < our_commits {
                                             tracing::warn!(
@@ -1468,9 +1502,12 @@ async fn handle_peer(
 
                                         // After 10 dropped messages on a single connection,
                                         // this is a mass-flood, not a reconnect race.
-                                        // Use record_severe_violation to bypass the whitelist
-                                        // exemption and escalate the ban faster.
-                                        let should_ban = if rl_drop_count >= 10 {
+                                        // Whitelisted peers are operator-trusted: never escalate
+                                        // to record_severe_violation (which bypasses the whitelist).
+                                        // Use record_violation, which is exempt for whitelisted IPs,
+                                        // so a friendly burst from an operator's own node never
+                                        // triggers a ban or kick.
+                                        let should_ban = if rl_drop_count >= 10 && !is_whitelisted {
                                             blacklist_guard.record_severe_violation(ip,
                                                 &format!("Mass flood: {} ({}+ msgs dropped)", $msg_type, rl_drop_count))
                                         } else {
@@ -1478,7 +1515,7 @@ async fn handle_peer(
                                                 &format!("Rate limit exceeded: {}", $msg_type))
                                         };
 
-                                        if should_ban {
+                                        if should_ban && !is_whitelisted {
                                             tracing::warn!(
                                                 "🚫 Disconnecting {} due to rate limit flood ({} dropped)",
                                                 peer.addr, rl_drop_count
@@ -2340,18 +2377,29 @@ async fn handle_peer(
                                         }
                                         Err(e) if e.contains("corrupted") || e.contains("serialization failed") => {
                                             // SECURITY: Corrupted block from peer - severe violation
-                                            tracing::error!(
-                                                "🚨 CORRUPTED BLOCK {} from {} - recording severe violation: {}",
-                                                block_height, peer.addr, e
-                                            );
-                                            let should_ban = blacklist.write().await.record_severe_violation(
-                                                ip,
-                                                &format!("Sent corrupted block {}: {}", block_height, e)
-                                            );
-                                            if should_ban {
-                                                tracing::warn!("🚫 Disconnecting {} for sending corrupted block", peer.addr);
-                                                peer_registry.kick_peer(&ip_str).await;
-                                                break; // Exit the message loop to disconnect
+                                            // Whitelisted peers are operator-trusted infrastructure;
+                                            // a corrupted block from one is almost always a software
+                                            // bug or version mismatch, not an attack. Log loudly,
+                                            // skip the block, but keep the connection.
+                                            if is_whitelisted {
+                                                tracing::error!(
+                                                    "🚨 CORRUPTED BLOCK {} from WHITELISTED peer {} — skipping block, keeping connection: {}",
+                                                    block_height, peer.addr, e
+                                                );
+                                            } else {
+                                                tracing::error!(
+                                                    "🚨 CORRUPTED BLOCK {} from {} - recording severe violation: {}",
+                                                    block_height, peer.addr, e
+                                                );
+                                                let should_ban = blacklist.write().await.record_severe_violation(
+                                                    ip,
+                                                    &format!("Sent corrupted block {}: {}", block_height, e)
+                                                );
+                                                if should_ban {
+                                                    tracing::warn!("🚫 Disconnecting {} for sending corrupted block", peer.addr);
+                                                    peer_registry.kick_peer(&ip_str).await;
+                                                    break; // Exit the message loop to disconnect
+                                                }
                                             }
                                         }
                                         Err(e) => {
@@ -2418,18 +2466,26 @@ async fn handle_peer(
                                         }
                                         Err(e) if e.contains("corrupted") || e.contains("serialization failed") => {
                                             // SECURITY: Corrupted block from peer - severe violation
-                                            tracing::error!(
-                                                "🚨 CORRUPTED BLOCK {} from {} (announcement) - recording severe violation: {}",
-                                                block_height, peer.addr, e
-                                            );
-                                            let should_ban = blacklist.write().await.record_severe_violation(
-                                                ip,
-                                                &format!("Sent corrupted block {}: {}", block_height, e)
-                                            );
-                                            if should_ban {
-                                                tracing::warn!("🚫 Disconnecting {} for sending corrupted block", peer.addr);
-                                                peer_registry.kick_peer(&ip_str).await;
-                                                break;
+                                            // Whitelisted peers are operator-trusted; never close them.
+                                            if is_whitelisted {
+                                                tracing::error!(
+                                                    "🚨 CORRUPTED BLOCK {} from WHITELISTED peer {} (announcement) — skipping block, keeping connection: {}",
+                                                    block_height, peer.addr, e
+                                                );
+                                            } else {
+                                                tracing::error!(
+                                                    "🚨 CORRUPTED BLOCK {} from {} (announcement) - recording severe violation: {}",
+                                                    block_height, peer.addr, e
+                                                );
+                                                let should_ban = blacklist.write().await.record_severe_violation(
+                                                    ip,
+                                                    &format!("Sent corrupted block {}: {}", block_height, e)
+                                                );
+                                                if should_ban {
+                                                    tracing::warn!("🚫 Disconnecting {} for sending corrupted block", peer.addr);
+                                                    peer_registry.kick_peer(&ip_str).await;
+                                                    break;
+                                                }
                                             }
                                         }
                                         Err(e) => {
