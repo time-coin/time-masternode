@@ -223,7 +223,7 @@ impl RpcHandler {
             "getwhitelist" => self.get_whitelist().await,
             "addwhitelist" => self.add_whitelist(&params_array).await,
             "removewhitelist" => self.remove_whitelist(&params_array).await,
-            "getblacklist" => self.get_blacklist().await,
+            "getbanlist" | "getblacklist" => self.get_blacklist().await,
             "ban" => self.ban_ip(&params_array).await,
             "unban" => self.unban(&params_array).await,
             "unbansubnet" => self.unban_subnet(&params_array).await,

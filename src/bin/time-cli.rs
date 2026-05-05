@@ -28,14 +28,14 @@ Commands:
     getwhitelist           List all whitelisted IPs
     addwhitelist           Add an IP to the whitelist
     removewhitelist        Remove an IP from the whitelist
-    getblacklist           List all banned IPs with reasons
+    getbanlist             List all banned IPs with reasons
     ban                    Permanently ban an IP address
     unban                  Remove an IP from the ban list
     unbansubnet            Remove a banned subnet from the ban list
     clearbanlist           Remove ALL bans
     resetpeerprofiles      Clear AI reconnection backoff so nodes retry peers immediately
     auditcollateral        Scan for collateral squatters and evict them
-    aggregateblacklists    Collect and merge ban lists from multiple nodes
+    aggregatebanlists      Collect and merge ban lists from multiple nodes
   Wallet
     getbalance             Get wallet balance [address]
     getwalletinfo          Get wallet information
@@ -224,7 +224,7 @@ enum Commands {
 
     /// List all banned IPs (permanent and temporary) with reasons
     #[command(next_help_heading = "Network")]
-    GetBlacklist,
+    GetBanList,
 
     /// Permanently ban an IP address
     #[command(next_help_heading = "Network")]
@@ -289,13 +289,13 @@ enum Commands {
     GetConnectionCount,
 
     /// Collect and merge ban lists from multiple nodes.
-    /// Queries each node's getblacklist RPC and produces a unified report
+    /// Queries each node's getbanlist RPC and produces a unified report
     /// showing which IPs are banned across the network and on how many nodes.
     ///
     /// Example:
-    ///   time-cli aggregateblacklists http://1.2.3.4:24001 http://5.6.7.8:24001
+    ///   time-cli aggregatebanlists http://1.2.3.4:24001 http://5.6.7.8:24001
     #[command(next_help_heading = "Network")]
-    AggregateBlacklists {
+    AggregateBanLists {
         /// RPC URLs to query (e.g. http://1.2.3.4:24001). Queries localhost only if none given.
         nodes: Vec<String>,
     },
@@ -1174,8 +1174,8 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
     // ── End MasternodeReg ────────────────────────────────────────────────────
 
-    // ── AggregateBlacklists: query multiple nodes and merge ──────────────────
-    if let Commands::AggregateBlacklists { nodes } = &args.command {
+    // ── AggregateBanLists: query multiple nodes and merge ────────────────────
+    if let Commands::AggregateBanLists { nodes } = &args.command {
         let mut query_urls: Vec<String> = nodes.clone();
         // Always include localhost
         if query_urls.is_empty()
@@ -1194,8 +1194,8 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             None
         };
-        let blacklist_req = serde_json::json!({
-            "jsonrpc": "2.0", "id": "agg", "method": "getblacklist", "params": []
+        let banlist_req = serde_json::json!({
+            "jsonrpc": "2.0", "id": "agg", "method": "getbanlist", "params": []
         });
 
         // ip -> (ban_reason, Vec<node_url>)
@@ -1206,7 +1206,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             std::collections::HashMap::new();
 
         for url in &query_urls {
-            match client.post_json(url, &blacklist_req, auth).await {
+            match client.post_json(url, &banlist_req, auth).await {
                 Ok(resp) if resp.is_success() => {
                     if let Ok(rpc_resp) = resp.json::<RpcResponse>() {
                         if let Some(result) = rpc_resp.result {
@@ -1315,7 +1315,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
         return Ok(());
     }
-    // ── End AggregateBlacklists ──────────────────────────────────────────────
+    // ── End AggregateBanLists ────────────────────────────────────────────────
 
     let (method, params) = match &args.command {
         Commands::GetBlockchainInfo => ("getblockchaininfo", json!([])),
@@ -1330,7 +1330,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::GetWhitelist => ("getwhitelist", json!([])),
         Commands::RemoveWhitelist { ip } => ("removewhitelist", json!([ip])),
         Commands::AuditCollateral => ("auditcollateral", json!([])),
-        Commands::GetBlacklist => ("getblacklist", json!([])),
+        Commands::GetBanList => ("getbanlist", json!([])),
         Commands::Ban { ip, reason } => (
             "ban",
             json!([ip, reason.as_deref().unwrap_or("manual ban via CLI")]),
@@ -1404,7 +1404,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::FindCollateral { outpoint } => ("findcollateral", json!([outpoint])),
         Commands::MasternodeReg { .. } => unreachable!("handled above"),
         Commands::DumpPrivKey { .. } => unreachable!("handled above"),
-        Commands::AggregateBlacklists { .. } => unreachable!("handled above"),
+        Commands::AggregateBanLists { .. } => unreachable!("handled above"),
         Commands::GetConsensusInfo => ("getconsensusinfo", json!([])),
         Commands::GetTimeVoteStatus => ("gettimevotestatus", json!([])),
         Commands::GetTreasuryBalance => ("gettreasurybalance", json!([])),
@@ -1944,7 +1944,7 @@ fn print_human_readable(
                 }
             }
         }
-        Commands::GetBlacklist => {
+        Commands::GetBanList => {
             let summary = result.get("summary");
             if let Some(s) = summary {
                 let perm = s
@@ -1961,7 +1961,7 @@ fn print_human_readable(
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
                 let wl = s.get("whitelisted").and_then(|v| v.as_u64()).unwrap_or(0);
-                println!("=== Blacklist Summary ===");
+                println!("=== Ban List ===");
                 println!("Permanent bans:   {}", perm);
                 println!("Temporary bans:   {}", temp);
                 println!("Subnet bans:      {}", subnet);

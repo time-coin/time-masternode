@@ -120,7 +120,7 @@ Returns information about connected peers.
 
 #### Manage Ban Lists
 ```bash
-time-cli getblacklist
+time-cli getbanlist
 time-cli unban 154.217.246.86
 time-cli unbansubnet 154.217.246.0/24
 time-cli clearbanlist

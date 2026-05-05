@@ -1363,13 +1363,13 @@ OOM prevention is retained via an overall PHASE3 reconnect concurrency cap (not 
 **Status:** **NO FIX NEEDED**
 **Severity:** Low (operator confusion only; no protocol impact)
 
-**Scenario:** An attacker sets the TLS SNI field in connection attempts to a victim node's own IP address (e.g., hex-encoded `69.167.168.176`), making log entries appear to attribute TLS violations to a friendly node. An operator observing `getblacklist` output might mistakenly believe a trusted peer is attacking the network.
+**Scenario:** An attacker sets the TLS SNI field in connection attempts to a victim node's own IP address (e.g., hex-encoded `69.167.168.176`), making log entries appear to attribute TLS violations to a friendly node. An operator observing `getbanlist` output might mistakenly believe a trusted peer is attacking the network.
 
-**Why This Is Not a Real Attack:** Ban attribution in `IPBlacklist` is always based on the real TCP source IP obtained from `TcpStream::peer_addr()` at `accept()` time — not from the TLS SNI field. An attacker can forge the SNI value but not the TCP source IP (without IP spoofing, which breaks the TCP handshake). The `getblacklist` CLI command (added in commit `a4d7daa`) allows operators to inspect actual banned IPs and verify that no friendly nodes have been incorrectly penalized.
+**Why This Is Not a Real Attack:** Ban attribution in `IPBlacklist` is always based on the real TCP source IP obtained from `TcpStream::peer_addr()` at `accept()` time — not from the TLS SNI field. An attacker can forge the SNI value but not the TCP source IP (without IP spoofing, which breaks the TCP handshake). The `getbanlist` CLI command (added in commit `a4d7daa`) allows operators to inspect actual banned IPs and verify that no friendly nodes have been incorrectly penalized.
 
 **Code References:**
 - `src/network/server.rs` — `peer_addr()` from `accept()` used for all violation attribution
-- `src/bin/time-cli.rs` — `getblacklist` command
+- `src/bin/time-cli.rs` — `getbanlist` command
 
 ---
 
