@@ -4,7 +4,7 @@ set -euo pipefail
 
 MAINNET_URL="https://time-coin.io/api/peers"
 TESTNET_URL="https://time-coin.io/api/testnet/peers"
-CLI="${CLI:-./target/release/time-cli}"
+CLI="${CLI:-time-cli}"
 TESTNET=0
 INTERVAL=0  # 0 = run once; >0 = poll every N seconds
 
@@ -55,19 +55,25 @@ for entry in data:
     }
 
     COUNT=0
+    ALREADY_CLEAN=0
     FAILED=0
     while IFS= read -r ip; do
         [[ -z "$ip" ]] && continue
-        if "$CLI" $TESTNET_FLAG unban "$ip" >/dev/null 2>&1; then
+        RESULT=$("$CLI" $TESTNET_FLAG unban "$ip" 2>/dev/null) || {
+            echo "  error:    $ip (RPC failed — is time-cli in PATH and daemon running?)"
+            (( FAILED++ )) || true
+            continue
+        }
+        if echo "$RESULT" | grep -q '"result": "success"'; then
             echo "  unbanned: $ip"
             (( COUNT++ )) || true
         else
-            echo "  skipped:  $ip (not banned or error)"
-            (( FAILED++ )) || true
+            echo "  ok:       $ip (was not banned)"
+            (( ALREADY_CLEAN++ )) || true
         fi
     done <<< "$IPS"
 
-    echo "Done: $COUNT unbanned, $FAILED skipped."
+    echo "Done: $COUNT unbanned, $ALREADY_CLEAN already clean, $FAILED errors."
 
     # Reset AI reconnection profiles so peers with accumulated backoff state
     # are retried immediately rather than waiting for their exponential cooldown.
