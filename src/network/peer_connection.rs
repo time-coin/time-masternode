@@ -1152,12 +1152,22 @@ impl PeerConnection {
                             let handle_result = self.handle_message_unified(message, &config, &handler).await;
 
                             if let Err(e) = handle_result {
-                                if e.contains("is blacklisted") || e.contains("DISCONNECT:") {
-                                    // Whitelisted peers are operator-trusted infrastructure:
-                                    // never close them on protocol-violation DISCONNECT signals.
-                                    // The message that triggered the error was already dropped
-                                    // by the handler; the peer stays connected and consensus
-                                    // / sync flows continue.
+                                if e.contains("is blacklisted") {
+                                    // Peer is banned — close the connection regardless of
+                                    // whitelist/masternode status.  A banned connection cannot
+                                    // process any messages; keeping it open only produces log
+                                    // spam (one WARN per incoming message).  The outbound
+                                    // reconnect loop will re-establish the connection after
+                                    // the temporary ban expires.
+                                    warn!(
+                                        "🚫 [{:?}] Closing connection to {} (banned, will reconnect): {}",
+                                        self.direction, self.peer_ip, e
+                                    );
+                                    break;
+                                } else if e.contains("DISCONNECT:") {
+                                    // Protocol-violation DISCONNECT signal.  Suppress for
+                                    // whitelisted/masternode peers so a transient protocol
+                                    // hiccup doesn't drop operator-trusted infrastructure.
                                     if self.is_whitelisted {
                                         warn!(
                                             "⚠️ [{:?}] Suppressing DISCONNECT for whitelisted peer {}: {}",
@@ -1177,6 +1187,10 @@ impl PeerConnection {
                             error!("❌ [{:?}] Error reading from {}: {}", self.direction, self.peer_ip, e);
                             // Clearly malicious oversized frames (>100 MB) — ban the sender,
                             // mirroring the inbound-side logic in server.rs.
+                            // Whitelisted/masternode peers are excluded: they are
+                            // operator-trusted infrastructure and a bad frame from them
+                            // is almost certainly TLS corruption (old code), not an attack.
+                            // Just close the connection; the reconnect loop handles recovery.
                             if e.contains("Frame too large") {
                                 const MALICIOUS_FRAME_BYTES: u64 = 100 * 1024 * 1024;
                                 let frame_bytes: Option<u64> = e
@@ -1188,7 +1202,12 @@ impl PeerConnection {
                                             .ok()
                                     });
                                 if frame_bytes.is_some_and(|b| b > MALICIOUS_FRAME_BYTES) {
-                                    if let Ok(ip) = self.peer_ip.parse::<std::net::IpAddr>() {
+                                    if self.is_whitelisted {
+                                        tracing::warn!(
+                                            "⚠️ [{:?}] Oversized frame from masternode/whitelisted peer {} — closing (stream unrecoverable, peer may need upgrade): {}",
+                                            self.direction, self.peer_ip, e
+                                        );
+                                    } else if let Ok(ip) = self.peer_ip.parse::<std::net::IpAddr>() {
                                         if let Some(ref bl) = config.blacklist {
                                             bl.write().await.record_frame_bomb_violation(ip, &e);
                                         }
