@@ -1654,9 +1654,19 @@ impl Blockchain {
 
         let _ = self.storage.flush();
 
+        // Enter syncing mode immediately so the SYNC GATE in message_handler blocks all
+        // consensus messages (TimeVotePrepare, TimeVotePrecommit, masternode
+        // registrations, etc.) until the re-sync from peers completes.  Without this
+        // there is a window between the rollback and the next sync_from_peers() call
+        // where votes arrive for blocks we don't have, the masternode registry is in an
+        // inconsistent state, and signature verification fails with spurious WARN spam.
+        // sync_from_peers() manages is_syncing via its own RAII guard and will clear
+        // this flag when the catch-up is finished.
+        self.is_syncing.store(true, Ordering::Release);
+
         tracing::info!(
             "🔁 Reverted to genesis: removed {} block(s) and their undo logs. \
-             Height reset to 0. Waiting for peers to build chain from block 1.",
+             Height reset to 0. Syncing mode enabled — waiting for peers to rebuild chain.",
             cleared
         );
     }
@@ -7785,11 +7795,17 @@ impl Blockchain {
         self.current_height.store(target_height, Ordering::Release);
 
         tracing::info!(
-            "✅ Rollback complete: removed {} blocks, rolled back {} UTXOs, now at height {}",
+            "✅ Rollback complete: removed {} blocks, rolled back {} UTXOs, now at height {}. \
+             Syncing mode enabled — waiting for peers to re-fill the chain.",
             blocks_to_remove,
             utxo_rollback_count,
             target_height
         );
+
+        // Enter syncing mode so the SYNC GATE in message_handler blocks all consensus
+        // messages (TimeVotePrepare, TimeVotePrecommit, etc.) until catch-up is done.
+        // sync_from_peers() manages this flag via its own RAII guard.
+        self.is_syncing.store(true, Ordering::Release);
 
         Ok(target_height)
     }

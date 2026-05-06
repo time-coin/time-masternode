@@ -811,10 +811,8 @@ impl RpcHandler {
             // was recorded in the pool entry at submission time.
             let fee = if input_sum > 0 {
                 input_sum.saturating_sub(output_sum)
-            } else if let Some(stored_fee) = self.consensus.tx_pool.get_fee(&txid_array) {
-                stored_fee
             } else {
-                0
+                self.consensus.tx_pool.get_fee(&txid_array).unwrap_or_default()
             };
 
             let net_amount = if wallet_input > 0 {
