@@ -45,6 +45,7 @@ pub enum AttackType {
     ConnectionFlood, // High-rate inbound connections rejected by rate limiter — subnet DoS (AV50)
     FrameBomb, // Crafted TCP frame header claiming multi-GB payload to OOM/crash the node (AV51)
     CollateralHijack, // MasternodeRegistration claiming a UTXO not owned by the registrant (AV52)
+    RewardRedirect, // Claimed collateral UTXO owner address mismatches announced reward address — block rewards siphoning attempt (AV54)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,6 +149,14 @@ pub struct AttackDetector {
     /// Per-IP collateral hijack attempt timestamps for CollateralHijack detection (AV52).
     /// Key: IP address, Value: deque of key-mismatch Unix timestamps.
     collateral_hijack_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
+    /// Per-IP reward-redirect attempt tracking for RewardRedirect detection (AV54).
+    /// Each entry records (unix_timestamp, outpoint_string) per IP so we can detect
+    /// the same IP cycling through multiple outpoints with mismatched reward addresses.
+    /// Key: IP address, Value: deque of (Unix timestamp, outpoint).
+    reward_redirect_times: SubnetEventMap,
+    /// Per-/24-subnet reward-redirect timestamps for detecting coordinated campaigns.
+    /// Key: /24 prefix (e.g. "154.217.246"), Value: deque of (Unix timestamp, IP address).
+    reward_redirect_subnet: SubnetEventMap,
     /// Per-IP zero-value collateral registration timestamps for ZeroCollateralPollution (AV40).
     /// Key: IP address, Value: deque of zero-collateral registration Unix timestamps.
     zero_collateral_pollution_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
@@ -176,6 +185,8 @@ impl AttackDetector {
             connection_flood_times: Arc::new(RwLock::new(HashMap::new())),
             frame_bomb_times: Arc::new(RwLock::new(HashMap::new())),
             collateral_hijack_times: Arc::new(RwLock::new(HashMap::new())),
+            reward_redirect_times: Arc::new(RwLock::new(HashMap::new())),
+            reward_redirect_subnet: Arc::new(RwLock::new(HashMap::new())),
             zero_collateral_pollution_times: Arc::new(RwLock::new(HashMap::new())),
             ban_notify: Arc::new(tokio::sync::Notify::new()),
         })
@@ -515,6 +526,101 @@ impl AttackDetector {
             last_seen: now,
             source_ips: vec![addr.to_string()],
             recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+            mitigation_applied_at: None,
+        });
+    }
+
+    /// Record a reward-redirect attempt (AV54): the node claimed a collateral outpoint whose
+    /// on-chain UTXO is owned by a different address than the announced wallet/reward address.
+    ///
+    /// Single occurrence → `BlockPeer` immediately (the attack is unambiguous and deliberate).
+    /// 3+ distinct IPs from the same /24 within 3 600 s → `BanSubnet` (coordinated campaign
+    /// targeting reward payout for multiple masternodes simultaneously).
+    pub fn record_reward_redirect_attempt(&self, addr: &str, outpoint: &str) {
+        let now = Self::now_secs();
+        let subnet = addr.rsplitn(2, '.').last().unwrap_or(addr).to_string();
+
+        // --- Per-IP tracking ---
+        let distinct_outpoints = {
+            let mut ip_map = self.reward_redirect_times.write();
+            let window = ip_map.entry(addr.to_string()).or_default();
+            // Prune entries older than 3 600 s
+            while window
+                .front()
+                .map(|(t, _)| now.saturating_sub(*t) > 3_600)
+                .unwrap_or(false)
+            {
+                window.pop_front();
+            }
+            window.push_back((now, outpoint.to_string()));
+            // Count distinct outpoints attempted in the window
+            let mut seen = std::collections::HashSet::new();
+            for (_, op) in window.iter() {
+                seen.insert(op.as_str());
+            }
+            seen.len()
+        };
+
+        // --- Per-/24 subnet tracking ---
+        let subnet_ips = {
+            let mut sub_map = self.reward_redirect_subnet.write();
+            let window = sub_map.entry(subnet.clone()).or_default();
+            while window
+                .front()
+                .map(|(t, _)| now.saturating_sub(*t) > 3_600)
+                .unwrap_or(false)
+            {
+                window.pop_front();
+            }
+            window.push_back((now, addr.to_string()));
+            let mut seen_ips = std::collections::HashSet::new();
+            for (_, ip) in window.iter() {
+                seen_ips.insert(ip.as_str());
+            }
+            seen_ips.len()
+        };
+
+        let (action, confidence, severity, campaign_note) = if subnet_ips >= 3 {
+            // 3+ distinct IPs from the same /24 → coordinated reward-siphoning campaign
+            (
+                MitigationAction::BanSubnet(format!("{}.0/24", subnet)),
+                1.0_f64,
+                AttackSeverity::Critical,
+                format!(
+                    "Coordinated reward-redirect campaign: {} distinct IPs from /{}.0/24 \
+                     attempted to siphon block rewards within 1 h",
+                    subnet_ips, subnet
+                ),
+            )
+        } else {
+            (
+                MitigationAction::BlockPeer(addr.to_string()),
+                0.99_f64,
+                AttackSeverity::High,
+                format!(
+                    "Single-IP reward-redirect: {} distinct outpoint(s) attempted with \
+                     mismatched reward address in 1 h window",
+                    distinct_outpoints
+                ),
+            )
+        };
+
+        self.maybe_add_attack(AttackPattern {
+            attack_type: AttackType::RewardRedirect,
+            confidence,
+            severity,
+            indicators: vec![
+                format!(
+                    "Peer {} claimed collateral {} but UTXO owner ≠ announced reward address",
+                    addr, outpoint
+                ),
+                campaign_note,
+                "Old collateral UTXO already gone — attack is unambiguous (not churn)".to_string(),
+            ],
+            first_detected: now,
+            last_seen: now,
+            source_ips: vec![addr.to_string()],
+            recommended_action: action,
             mitigation_applied_at: None,
         });
     }

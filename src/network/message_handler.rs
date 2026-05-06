@@ -4938,6 +4938,54 @@ impl MessageHandler {
                         }
                     }
                 }
+                Err(crate::masternode_registry::RegistryError::CollateralRewardRedirect) => {
+                    // SEVERE: node is claiming collateral whose on-chain UTXO owner address
+                    // does not match the announced wallet/reward address. The old collateral
+                    // is already gone, so this is not ambiguous churn — it is a deliberate
+                    // attempt to route block rewards to an address that doesn't own the
+                    // collateral. Issue an immediate disconnect and record a hard violation.
+                    let violation_ip = if is_relayed { &peer_ip } else { &masternode_ip };
+                    warn!(
+                        "🚨 [{}] SEVERE — Reward-redirect attack: {} announced collateral {} \
+                         but UTXO owner address does not match wallet/reward address — \
+                         recording hard violation against {} and disconnecting{}",
+                        self.direction,
+                        masternode_ip,
+                        outpoint_for_relay,
+                        violation_ip,
+                        if is_relayed {
+                            format!(" (relayed by {})", peer_ip)
+                        } else {
+                            String::new()
+                        }
+                    );
+                    if let Some(ai) = &context.ai_system {
+                        ai.attack_detector.record_reward_redirect_attempt(
+                            violation_ip,
+                            &outpoint_for_relay.to_string(),
+                        );
+                    }
+                    if let Some(blacklist) = &context.blacklist {
+                        let bare_ip = violation_ip.split(':').next().unwrap_or(violation_ip);
+                        if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
+                            // Not rate-limited — reward-redirect is always severe and deliberate.
+                            let mut bl = blacklist.write().await;
+                            bl.record_violation(
+                                ban_ip,
+                                &format!(
+                                    "Reward-redirect: claimed {} but UTXO owner != reward address",
+                                    outpoint_for_relay
+                                ),
+                            );
+                        }
+                    }
+                    if !is_relayed {
+                        return Err(format!(
+                            "DISCONNECT: Reward-redirect attack from {}",
+                            masternode_ip
+                        ));
+                    }
+                }
                 Err(e) => {
                     warn!(
                         "❌ [{}] Failed to register masternode {}: {}",

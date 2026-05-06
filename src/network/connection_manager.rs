@@ -928,7 +928,7 @@ mod tests {
 
         assert!(manager.mark_connecting("10.0.0.2"));
         assert!(manager.mark_connected("10.0.0.2"));
-        assert!(!manager.accept_inbound("10.0.0.2", true));
+        assert!(!manager.accept_inbound("10.0.0.2", false));
 
         let entry = manager.connections.get("10.0.0.2").unwrap();
         assert_eq!(entry.direction, ConnectionDirection::Outbound);

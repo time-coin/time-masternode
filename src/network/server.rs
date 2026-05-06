@@ -851,9 +851,9 @@ async fn handle_peer(
                     // friendly node that briefly exceeds rate (e.g. mempool replay after
                     // reconnect, fork-resolution bursts) must stay connected so block
                     // production doesn't lose consensus quorum.
-                    let gate_rate: f64 = if gate_is_whitelisted { 5000.0 } else { 200.0 };
-                    let gate_burst: f64 = if gate_is_whitelisted { 10000.0 } else { 300.0 };
-                    const GATE_HARD_DROPS: u32 = 300; // consecutive drops → hard kick
+                    let gate_rate: f64 = if gate_is_whitelisted { 5000.0 } else { 500.0 };
+                    let gate_burst: f64 = if gate_is_whitelisted { 10000.0 } else { 1000.0 };
+                    const GATE_HARD_DROPS: u32 = 500; // consecutive drops → hard kick
                     let mut gate_tokens: f64 = gate_burst;
                     let mut gate_last = std::time::Instant::now();
                     let mut gate_drop_streak: u32 = 0;
@@ -964,9 +964,9 @@ async fn handle_peer(
             // friendly node that briefly exceeds rate (e.g. mempool replay after
             // reconnect, fork-resolution bursts) must stay connected so block
             // production doesn't lose consensus quorum.
-            let gate_rate: f64 = if gate_is_whitelisted { 5000.0 } else { 200.0 };
-            let gate_burst: f64 = if gate_is_whitelisted { 10000.0 } else { 300.0 };
-            const GATE_HARD_DROPS: u32 = 300; // consecutive drops → hard kick
+            let gate_rate: f64 = if gate_is_whitelisted { 5000.0 } else { 500.0 };
+            let gate_burst: f64 = if gate_is_whitelisted { 10000.0 } else { 1000.0 };
+            const GATE_HARD_DROPS: u32 = 500; // consecutive drops → hard kick
             let mut gate_tokens: f64 = gate_burst;
             let mut gate_last = std::time::Instant::now();
             let mut gate_drop_streak: u32 = 0;
@@ -1054,6 +1054,10 @@ async fn handle_peer(
     // escalation path (≥10 drops) to actually fire.
     let mut rl_drop_count: u32 = 0;
     let mut rl_last_log = std::time::Instant::now() - std::time::Duration::from_secs(61);
+    // Per-connection counter for invalid transactions. A single invalid tx is often a
+    // legitimate race condition (stale UTXO, double-spend retry). Only record a blacklist
+    // violation once a peer has sent 3 invalid transactions on the same connection.
+    let mut invalid_tx_count: u32 = 0;
 
     let magic_bytes = network_type.magic_bytes();
 
@@ -1130,14 +1134,27 @@ async fn handle_peer(
                                 );
                             }
                         } else if e.contains("Message flood detected") {
+                            // Distinguish legitimate burst traffic from raw flooding attacks:
+                            // - Pre-handshake flood: the peer never authenticated — raw TCP/protocol
+                            //   flood (attacker). Record a violation so repeat offenders get banned.
+                            // - Post-handshake burst: peer authenticated successfully and then sent
+                            //   a large burst (e.g. syncing many blocks, retail checkout processing
+                            //   many simultaneous transactions, mempool replay after reconnect).
+                            //   This is normal network operation — just disconnect and let them
+                            //   reconnect.  Recording a banning violation would permanently cut
+                            //   legitimate masternodes off from consensus and rewards.
                             if is_whitelisted {
-                                // Friendly node on a different version may burst more messages
-                                // than the gate expects right after handshake.  Log only; the
-                                // short-lived-session backoff in the reconnect loop handles pacing.
-                                tracing::debug!("🔌 Message burst from whitelisted peer {} tripped pre-channel gate — version mismatch likely, skipping penalty", peer.addr);
+                                tracing::debug!("🔌 Message burst from whitelisted peer {} tripped pre-channel gate — skipping penalty", peer.addr);
+                            } else if !handshake_done {
+                                // Raw flood before any handshake — likely an attacker.
+                                tracing::warn!("🌊 Pre-handshake flood from {} — recording violation", peer.addr);
+                                blacklist.write().await.record_violation(ip, "Message flood: pre-handshake flood");
+                                if let Some(ai) = &ai_system {
+                                    ai.attack_detector.record_message_flood(&ip_str);
+                                }
                             } else {
-                                tracing::warn!("🌊 Message flood from {} — pre-channel gate triggered, recording violation", peer.addr);
-                                blacklist.write().await.record_violation(ip, "Message flood: sustained >500 msgs/s");
+                                // Burst from authenticated peer — normal operation (sync, commerce, etc.).
+                                tracing::info!("🌊 Message burst from {} tripped pre-channel gate — disconnecting (no ban, peer was authenticated)", peer.addr);
                                 if let Some(ai) = &ai_system {
                                     ai.attack_detector.record_message_flood(&ip_str);
                                 }
@@ -1175,11 +1192,30 @@ async fn handle_peer(
                                                     peer.addr, protocol_version
                                                 );
                                             } else {
-                                                tracing::warn!("🚫 Rejecting {} - protocol version {} is too old (minimum: 2)", peer.addr, protocol_version);
-                                                blacklist.write().await.record_violation(
-                                                    ip,
-                                                    &format!("Protocol version {} below minimum 2", protocol_version)
+                                                tracing::warn!(
+                                                    "🚫 Rejecting {} — protocol version {} is too old (minimum: 2). \
+                                                    Please upgrade: https://github.com/time-coin/time-masternode",
+                                                    peer.addr, protocol_version
                                                 );
+                                                // Send a human-readable upgrade notice before disconnecting.
+                                                let upgrade_msg = crate::network::message::NetworkMessage::ForkAlert {
+                                                    your_height: 0,
+                                                    your_hash: [0u8; 32],
+                                                    consensus_height: 0,
+                                                    consensus_hash: [0u8; 32],
+                                                    consensus_peer_count: 0,
+                                                    message: format!(
+                                                        "Your node is using protocol version {protocol_version}, \
+                                                        which is below the minimum required version (2). \
+                                                        Please upgrade: https://github.com/time-coin/time-masternode"
+                                                    ),
+                                                };
+                                                if let Ok(frame) = crate::network::wire::serialize_frame(&upgrade_msg) {
+                                                    let _ = writer_tx.send(frame);
+                                                }
+                                                // Old software is not an attack — do NOT record a violation.
+                                                // Recording violations here would permanently ban legitimate users
+                                                // who just haven't updated yet.
                                                 let _ = masternode_registry
                                                     .suspend_from_consensus(
                                                         &ip_str,
@@ -1221,10 +1257,10 @@ async fn handle_peer(
                                             if let Ok(frame) = crate::network::wire::serialize_frame(&upgrade_msg) {
                                                 let _ = writer_tx.send(frame);
                                             }
-                                            blacklist.write().await.record_violation(
-                                                ip,
-                                                &format!("Obsolete software: commit {} below minimum {}", commit_count, crate::constants::MIN_PEER_COMMIT_VERSION)
-                                            );
+                                            // Old software is not an attack — do NOT record a violation.
+                                            // Recording violations here would permanently ban legitimate users
+                                            // who just haven't updated yet. They will be rejected on every
+                                            // reconnect until they upgrade; no ban needed.
                                             let _ = masternode_registry
                                                 .suspend_from_consensus(
                                                     &ip_str,
@@ -1476,19 +1512,16 @@ async fn handle_peer(
                                     let mut blacklist_guard = blacklist.write().await;
 
                                     if !limiter.check($msg_type, &ip_str) {
-                                        rl_drop_count += 1;
-
-                                        // Log at most once per 60 s per connection to avoid
-                                        // flooding the journal with thousands of identical lines.
+                                        // Log at first occurrence in each 60s window.
                                         let now = std::time::Instant::now();
-                                        if now.duration_since(rl_last_log).as_secs() >= 60
-                                            || rl_drop_count == 1
-                                        {
-                                            if rl_drop_count > 1 {
+                                        let first_in_window = rl_drop_count == 0
+                                            || now.duration_since(rl_last_log).as_secs() >= 60;
+                                        if first_in_window {
+                                            if rl_drop_count > 0 {
                                                 tracing::warn!(
                                                     "⚠️  Rate limit exceeded for {} from {} \
                                                      ({} msgs suppressed in last 60s)",
-                                                    $msg_type, peer.addr, rl_drop_count - 1
+                                                    $msg_type, peer.addr, rl_drop_count
                                                 );
                                             } else {
                                                 tracing::warn!(
@@ -1497,22 +1530,22 @@ async fn handle_peer(
                                                 );
                                             }
                                             rl_last_log = now;
-                                            rl_drop_count = 0;
                                         }
+                                        rl_drop_count += 1;
 
-                                        // After 10 dropped messages on a single connection,
-                                        // this is a mass-flood, not a reconnect race.
-                                        // Whitelisted peers are operator-trusted: never escalate
-                                        // to record_severe_violation (which bypasses the whitelist).
-                                        // Use record_violation, which is exempt for whitelisted IPs,
-                                        // so a friendly burst from an operator's own node never
-                                        // triggers a ban or kick.
+                                        // Only escalate after multiple drops on this connection.
+                                        // A single transient burst (sync hiccup, reconnect race)
+                                        // should not accumulate toward a ban. Whitelisted peers are
+                                        // operator-trusted and never escalated to record_severe_violation.
                                         let should_ban = if rl_drop_count >= 10 && !is_whitelisted {
                                             blacklist_guard.record_severe_violation(ip,
                                                 &format!("Mass flood: {} ({}+ msgs dropped)", $msg_type, rl_drop_count))
-                                        } else {
+                                        } else if rl_drop_count >= 5 && !is_whitelisted {
+                                            // Sustained rate-limiting (5+ drops) = intentional abuse.
                                             blacklist_guard.record_violation(ip,
-                                                &format!("Rate limit exceeded: {}", $msg_type))
+                                                &format!("Sustained rate-limit flood: {} ({} msgs dropped)", $msg_type, rl_drop_count))
+                                        } else {
+                                            false // First few drops: transient burst, no violation
                                         };
 
                                         if should_ban && !is_whitelisted {
@@ -1724,15 +1757,21 @@ async fn handle_peer(
                                             } else {
                                                 tracing::warn!("❌ Transaction {} rejected locally: {}", hex::encode(txid), e);
 
-                                                // Phase 2.2: Record violation for invalid transaction
-                                                let mut blacklist_guard = blacklist.write().await;
-                                                let should_ban = blacklist_guard.record_violation(ip, "Invalid transaction");
-                                                drop(blacklist_guard);
-
-                                                if should_ban {
-                                                    tracing::warn!("🚫 Disconnecting {} due to repeated invalid transactions", peer.addr);
-                                                    peer_registry.kick_peer(&ip_str).await;
-                                                    break;
+                                                // Only record a violation after 3 invalid transactions
+                                                // on this connection. A single invalid tx is often a
+                                                // legitimate race condition (stale UTXO, rebroadcast of
+                                                // an already-finalized tx). Persistent submission of
+                                                // invalid transactions indicates abuse.
+                                                invalid_tx_count += 1;
+                                                if invalid_tx_count >= 3 {
+                                                    let mut blacklist_guard = blacklist.write().await;
+                                                    let should_ban = blacklist_guard.record_violation(ip, "Repeated invalid transactions");
+                                                    drop(blacklist_guard);
+                                                    if should_ban {
+                                                        tracing::warn!("🚫 Disconnecting {} due to repeated invalid transactions ({})", peer.addr, invalid_tx_count);
+                                                        peer_registry.kick_peer(&ip_str).await;
+                                                        break;
+                                                    }
                                                 }
                                             }
                                         }

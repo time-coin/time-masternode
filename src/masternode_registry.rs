@@ -78,6 +78,12 @@ pub enum RegistryError {
     InvalidSignature,
     #[error("IP cycling detected (AV3)")]
     IpCyclingRejected,
+    /// Claimed collateral UTXO is owned by a different address than the announced
+    /// reward/wallet address. The old collateral is already gone, so this is not
+    /// churn — it is an active attempt to route block rewards to an address that
+    /// does not own the collateral. Treated as a severe, ban-worthy offense.
+    #[error("Reward-redirect: collateral UTXO owner does not match announced reward address")]
+    CollateralRewardRedirect,
     #[error("Storage error: {0}")]
     Storage(String),
 }
@@ -1330,36 +1336,126 @@ impl MasternodeRegistry {
                 // new_outpoint = None. These are NOT an attack — the node is simply
                 // re-announcing without proof. The None → preserve-existing path at line
                 // 1149 handles them correctly; we must not reject them here.
+                //
+                // Three-way outcome when the outpoint differs and BOTH are Some:
+                //
+                //  A. Old UTXO STILL EXISTS → churn/spoof attempt. Block and record a
+                //     soft rate-limited violation. (The legitimate owner would use an
+                //     on-chain MasternodeReg tx, not gossip, to migrate collateral.)
+                //
+                //  B. Old UTXO IS GONE + new UTXO owner address == announced wallet_address
+                //     → legitimate migration (operator spent old collateral and registered
+                //     a new one, but the on-chain reg tx hasn't propagated yet, or didn't
+                //     make it due to a bug). Allow the update without any violation.
+                //
+                //  C. Old UTXO IS GONE + new UTXO owner address != announced wallet_address
+                //     → reward-redirect attack: node is claiming collateral it doesn't own
+                //     and routing block rewards to an unrelated address. Return
+                //     CollateralRewardRedirect so the caller issues an immediate disconnect
+                //     and records a severe violation.
                 if old_outpoint != new_outpoint
                     && old_outpoint.is_some()
                     && new_outpoint.is_some()
                     && matches!(existing.registration_source, RegistrationSource::OnChain(_))
                 {
-                    static CHURN_WARN: std::sync::OnceLock<
-                        dashmap::DashMap<String, std::time::Instant>,
-                    > = std::sync::OnceLock::new();
-                    let warn_map = CHURN_WARN.get_or_init(dashmap::DashMap::new);
-                    let needs_log = warn_map
-                        .get(&masternode.address)
-                        .map(|t| t.elapsed().as_secs() >= 60)
-                        .unwrap_or(true);
-                    if needs_log {
-                        warn_map.insert(masternode.address.clone(), std::time::Instant::now());
-                        tracing::warn!(
-                            "🛡️ [Collateral-Churn] Blocked outpoint replacement for on-chain \
-                             node {} (on-chain: {}, rejected: {})",
-                            masternode.address,
-                            old_outpoint
-                                .as_ref()
-                                .map(|o| o.to_string())
-                                .unwrap_or_default(),
-                            new_outpoint
-                                .as_ref()
-                                .map(|o| o.to_string())
-                                .unwrap_or_default(),
-                        );
+                    let old_collateral_gone = existing_collateral_exists == Some(false);
+
+                    if old_collateral_gone {
+                        // Old UTXO is gone — determine intent via the new UTXO's owner.
+                        match prefetched_utxo_addr.as_deref() {
+                            Some(utxo_owner) if utxo_owner == masternode.wallet_address => {
+                                // Case B: legitimate migration — fall through and allow update.
+                                tracing::info!(
+                                    "🔄 [Collateral-Migration] Allowing outpoint update for {} \
+                                     — old UTXO gone, new UTXO ownership verified via wallet \
+                                     address match (old: {}, new: {})",
+                                    masternode.address,
+                                    old_outpoint
+                                        .as_ref()
+                                        .map(|o| o.to_string())
+                                        .unwrap_or_default(),
+                                    new_outpoint
+                                        .as_ref()
+                                        .map(|o| o.to_string())
+                                        .unwrap_or_default(),
+                                );
+                            }
+                            Some(utxo_owner) => {
+                                // Case C: reward-redirect — claimed collateral is owned by a
+                                // different address than the announced reward/wallet address.
+                                tracing::warn!(
+                                    "🚨 [Reward-Redirect] SEVERE: {} claims outpoint {} but \
+                                     UTXO is owned by {} while wallet_address is {} — \
+                                     attempting to steal rewards",
+                                    masternode.address,
+                                    new_outpoint
+                                        .as_ref()
+                                        .map(|o| o.to_string())
+                                        .unwrap_or_default(),
+                                    utxo_owner,
+                                    masternode.wallet_address,
+                                );
+                                return Err(RegistryError::CollateralRewardRedirect);
+                            }
+                            None => {
+                                // UTXO not found in our local set — may not have synced yet.
+                                // Treat conservatively as soft churn; don't escalate to
+                                // CollateralRewardRedirect because we can't verify ownership.
+                                static CHURN_WARN: std::sync::OnceLock<
+                                    dashmap::DashMap<String, std::time::Instant>,
+                                > = std::sync::OnceLock::new();
+                                let warn_map = CHURN_WARN.get_or_init(dashmap::DashMap::new);
+                                if warn_map
+                                    .get(&masternode.address)
+                                    .map(|t| t.elapsed().as_secs() >= 60)
+                                    .unwrap_or(true)
+                                {
+                                    warn_map.insert(
+                                        masternode.address.clone(),
+                                        std::time::Instant::now(),
+                                    );
+                                    tracing::warn!(
+                                        "🛡️ [Collateral-Churn] Old UTXO gone but new UTXO {} \
+                                         not in local set — blocking update for {} until UTXO \
+                                         syncs (soft churn, no violation)",
+                                        new_outpoint
+                                            .as_ref()
+                                            .map(|o| o.to_string())
+                                            .unwrap_or_default(),
+                                        masternode.address,
+                                    );
+                                }
+                                return Err(RegistryError::CollateralAlreadyLocked);
+                            }
+                        }
+                    } else {
+                        // Case A: old UTXO still exists — genuine churn/spoof attempt.
+                        static CHURN_WARN: std::sync::OnceLock<
+                            dashmap::DashMap<String, std::time::Instant>,
+                        > = std::sync::OnceLock::new();
+                        let warn_map = CHURN_WARN.get_or_init(dashmap::DashMap::new);
+                        let needs_log = warn_map
+                            .get(&masternode.address)
+                            .map(|t| t.elapsed().as_secs() >= 60)
+                            .unwrap_or(true);
+                        if needs_log {
+                            warn_map.insert(masternode.address.clone(), std::time::Instant::now());
+                            tracing::warn!(
+                                "🛡️ [Collateral-Churn] Blocked outpoint replacement for on-chain \
+                                 node {} (on-chain: {}, rejected: {})",
+                                masternode.address,
+                                old_outpoint
+                                    .as_ref()
+                                    .map(|o| o.to_string())
+                                    .unwrap_or_default(),
+                                new_outpoint
+                                    .as_ref()
+                                    .map(|o| o.to_string())
+                                    .unwrap_or_default(),
+                            );
+                        }
+                        return Err(RegistryError::CollateralAlreadyLocked);
                     }
-                    return Err(RegistryError::CollateralAlreadyLocked);
                 }
 
                 let effective_outpoint = if new_outpoint.is_none() && old_outpoint.is_some() {

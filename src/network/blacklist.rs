@@ -427,18 +427,12 @@ impl IPBlacklist {
         // Persist updated violation count
         self.persist_violation(ip, count_snap);
 
-        // Auto-ban based on violation count
+        // Auto-ban based on violation count.
+        // Thresholds are intentionally lenient to avoid banning legitimate nodes
+        // experiencing transient issues (sync bursts, reconnects, stale UTXOs).
+        // Clear attacks (TLS floods, frame bombs, pre-handshake floods) use
+        // record_severe_violation() which bypasses these thresholds.
         match count_snap {
-            3 => {
-                // 3rd violation: 1 minute ban
-                self.add_temp_ban(ip, Duration::from_secs(60), reason);
-                tracing::warn!(
-                    "🚫 Auto-banned {} for 1 minute (3 violations: {})",
-                    ip,
-                    reason
-                );
-                true
-            }
             5 => {
                 // 5th violation: 5 minute ban
                 self.add_temp_ban(ip, Duration::from_secs(300), reason);
@@ -450,12 +444,22 @@ impl IPBlacklist {
                 true
             }
             10 => {
-                // 10th violation: permanent ban
-                self.add_permanent_ban(ip, reason);
-                tracing::warn!("🚫 PERMANENTLY BANNED {} (10 violations: {})", ip, reason);
+                // 10th violation: 1 hour ban
+                self.add_temp_ban(ip, Duration::from_secs(3600), reason);
+                tracing::warn!(
+                    "🚫 Auto-banned {} for 1 hour (10 violations: {})",
+                    ip,
+                    reason
+                );
                 true
             }
-            1 | 2 | 4 | 6..=9 => {
+            20 => {
+                // 20th violation: permanent ban
+                self.add_permanent_ban(ip, reason);
+                tracing::warn!("🚫 PERMANENTLY BANNED {} (20 violations: {})", ip, reason);
+                true
+            }
+            1..=4 | 6..=9 | 11..=19 => {
                 tracing::debug!("⚠️  Violation #{} from {}: {}", count_snap, ip, reason);
                 false
             }
