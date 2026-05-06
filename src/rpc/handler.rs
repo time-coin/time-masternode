@@ -812,7 +812,10 @@ impl RpcHandler {
             let fee = if input_sum > 0 {
                 input_sum.saturating_sub(output_sum)
             } else {
-                self.consensus.tx_pool.get_fee(&txid_array).unwrap_or_default()
+                self.consensus
+                    .tx_pool
+                    .get_fee(&txid_array)
+                    .unwrap_or_default()
             };
 
             let net_amount = if wallet_input > 0 {
