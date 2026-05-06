@@ -91,6 +91,12 @@ struct Args {
     /// Generate default time.conf and masternode.conf, then exit
     #[arg(long)]
     generate_config: bool,
+
+    /// Force a full UTXO + transaction reindex before starting the network.
+    /// The update script can also trigger this automatically by creating the
+    /// file <data-dir>/reindex_requested before restarting the daemon.
+    #[arg(long)]
+    reindex: bool,
 }
 
 // Ensure at least 4 worker threads regardless of CPU count.
@@ -334,6 +340,26 @@ async fn main() {
     println!("  └─ Address Prefix: {}", network_type.address_prefix());
     println!("  └─ Data Dir: {}", config.storage.data_dir);
     println!();
+
+    // Detect startup-reindex triggers:
+    //   1. --reindex CLI flag — operator wants a manual forced reindex.
+    //   2. Sentinel file <data-dir>/reindex_requested — created by update.sh
+    //      before restarting the daemon so the node automatically reindexes
+    //      after a software update without any user interaction.
+    let sentinel_file = std::path::Path::new(&config.storage.data_dir).join("reindex_requested");
+    let reindex_on_startup = args.reindex || sentinel_file.exists();
+    if reindex_on_startup {
+        let reason = if args.reindex {
+            "--reindex flag"
+        } else {
+            "reindex_requested sentinel file"
+        };
+        tracing::info!(
+            "🔄 [STARTUP] Full reindex requested via {} — will run before network starts",
+            reason
+        );
+        println!("🔄 Startup reindex requested ({reason}) — rebuilding UTXO set from genesis");
+    }
 
     // Initialize wallet manager
     let wallet_manager = WalletManager::new(config.storage.data_dir.clone());
@@ -1161,7 +1187,7 @@ async fn main() {
     // to always run it. A stale index (e.g., from an incomplete rollback) causes
     // validate_block_rewards to look up the wrong transaction and reject valid peer blocks.
     if let Some(ref _idx) = tx_index {
-        if blockchain.get_height() > 0 {
+        if blockchain.get_height() > 0 || reindex_on_startup {
             tracing::info!("📊 Building transaction index from blockchain...");
             if let Err(e) = blockchain.build_tx_index().await {
                 tracing::warn!("Failed to build transaction index: {}", e);
@@ -1179,12 +1205,21 @@ async fn main() {
     //
     // Must run before rebuild_collateral_locks so purge_stale_collateral_locks can
     // validate locks against real UTXO states rather than an empty set.
-    if blockchain.get_height() > 0 {
+    //
+    // reindex_on_startup forces this even at height 0 (e.g., first-run after update).
+    if blockchain.get_height() > 0 || reindex_on_startup {
         let h = blockchain.get_height();
-        tracing::info!(
-            "🔄 [STARTUP] Rebuilding in-memory UTXO set from {} stored block(s)...",
-            h
-        );
+        if reindex_on_startup {
+            tracing::info!(
+                "🔄 [STARTUP] Forced full reindex: rebuilding UTXO set from {} stored block(s)...",
+                h
+            );
+        } else {
+            tracing::info!(
+                "🔄 [STARTUP] Rebuilding in-memory UTXO set from {} stored block(s)...",
+                h
+            );
+        }
         match blockchain.reindex_utxos().await {
             Ok((blocks, utxos)) => {
                 tracing::info!(
@@ -1192,12 +1227,28 @@ async fn main() {
                     blocks,
                     utxos
                 );
+                // Delete the sentinel file now that reindex succeeded, so the
+                // next restart is normal (no unnecessary rebuild).
+                if sentinel_file.exists() {
+                    if let Err(e) = std::fs::remove_file(&sentinel_file) {
+                        tracing::warn!(
+                            "⚠️ Failed to remove reindex sentinel file {:?}: {}",
+                            sentinel_file,
+                            e
+                        );
+                    } else {
+                        tracing::info!(
+                            "✅ [STARTUP] Reindex sentinel file removed — next restart will be normal"
+                        );
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(
                     "⚠️ [STARTUP] UTXO reindex failed: {} — collateral verification may reject valid masternodes",
                     e
                 );
+                // Keep the sentinel file so the next restart retries.
             }
         }
     }

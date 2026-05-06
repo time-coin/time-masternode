@@ -88,6 +88,15 @@ for NET in mainnet testnet; do
     [[ "$NETWORK" != "both" && "$NETWORK" != "$NET" ]] && continue
 
     SVC=$(service_name "$NET")
+
+    # Touch the reindex sentinel file so the daemon automatically runs a full
+    # UTXO + transaction reindex on startup — no manual `time-cli reindex` needed.
+    DATA_DIR="/root/.timecoin"
+    [[ "$NET" == "testnet" ]] && DATA_DIR="/root/.timecoin/testnet"
+    mkdir -p "$DATA_DIR"
+    touch "$DATA_DIR/reindex_requested"
+    echo "    Reindex sentinel created — daemon will reindex on startup"
+
     echo "==> Starting $NET ($SVC)..."
     systemctl start "$SVC" && journalctl -u "$SVC" -f | ccze -A
 done
