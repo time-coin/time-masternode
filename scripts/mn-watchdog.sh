@@ -302,16 +302,26 @@ while true; do
         # fork resolution or a reconnection storm can starve its tokio RPC thread
         # for up to ~90s while still alive and registered.
         if daemon_recently_active "$DAEMON_ACTIVE_SECS"; then
+            # Daemon is alive — any fail_streak counts from the "not logging" path
+            # were false positives caused by a brief journald lull.  Clear them now
+            # so they don't combine with a later busy_streak escalation and trigger
+            # an unwarranted restart.
+            if [ "$fail_streak" -gt 0 ]; then
+                log "Daemon is logging again — clearing stale fail_streak (was ${fail_streak}) to prevent false-positive restart"
+                fail_streak=0
+            fi
             rpc_busy_streak=$(( rpc_busy_streak + 1 ))
             logw "⏳ RPC timeout — daemon is alive and logging (busy_streak: ${rpc_busy_streak}/${RPC_BUSY_MAX}); NOT counting as de-registration"
             # Dump diagnostics on the first poll of every stall, then every 5 polls.
             if [ "$rpc_busy_streak" -eq 1 ] || [ $(( rpc_busy_streak % 5 )) -eq 0 ]; then
                 log_stall_diagnostics "$rpc_busy_streak"
             fi
-            # Only escalate to a restart trigger after sustained unresponsiveness.
+            # Sustained RPC unresponsiveness while logging is conclusive on its own —
+            # jump straight to FAIL_THRESHOLD so the restart triggers immediately
+            # instead of waiting for N more escalation cycles (~minutes of delay).
             if [ "$rpc_busy_streak" -ge "$RPC_BUSY_MAX" ]; then
-                logw "🔴 Daemon has been RPC-unresponsive for $((rpc_busy_streak * POLL_INTERVAL))s while logging — escalating to fail_streak"
-                fail_streak=$(( fail_streak + 1 ))
+                logw "🔴 Daemon has been RPC-unresponsive for $((rpc_busy_streak * POLL_INTERVAL))s while logging — triggering restart"
+                fail_streak=$FAIL_THRESHOLD
                 rpc_busy_streak=0
             fi
         else
