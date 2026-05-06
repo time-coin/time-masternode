@@ -376,39 +376,46 @@ impl PeerConnection {
                     format!("TLS handshake failed with {}: {}", addr, e)
                 })?;
             let peer_addr = addr.clone();
-            // Split TLS stream into independent read/write halves to avoid
-            // tokio::select! cancellation corrupting in-progress reads.
-            let (tls_r, tls_w) = tokio::io::split(tls_stream);
-            let peer_addr_r = peer_addr.clone();
-            tokio::spawn(async move {
-                let mut reader = tls_r;
-                loop {
-                    let result = crate::network::wire::read_message(&mut reader).await;
-                    let is_eof = matches!(&result, Ok(None));
-                    let is_err = result.is_err();
-                    if msg_read_tx.send(result).is_err() {
-                        break;
-                    }
-                    if is_eof || is_err {
-                        break;
-                    }
-                }
-                tracing::debug!("🔒 TLS reader task exiting for {}", peer_addr_r);
-            });
+            // Single I/O bridge task: owns the TLS stream whole.
+            // tokio::io::split() on a TLS stream is unsafe — the TLS record layer
+            // needs cross-direction access (alerts, renegotiation) and split()
+            // serialises R and W through an AtomicBool lock, which can deadlock or
+            // corrupt frames when both halves are driven concurrently from separate
+            // tasks.  The bridge pattern (one task, tokio::select!) is the same
+            // approach used by server.rs for inbound TLS connections.
             tokio::spawn(async move {
                 use tokio::io::AsyncWriteExt;
-                let mut writer = tls_w;
-                while let Some(data) = write_rx.recv().await {
-                    if let Err(e) = writer.write_all(&data).await {
-                        tracing::debug!("🔒 TLS write error for {}: {}", peer_addr, e);
-                        break;
-                    }
-                    if let Err(e) = writer.flush().await {
-                        tracing::debug!("🔒 TLS flush error for {}: {}", peer_addr, e);
-                        break;
+                let mut stream = tls_stream;
+                loop {
+                    tokio::select! {
+                        result = crate::network::wire::read_message(&mut stream) => {
+                            let is_eof = matches!(&result, Ok(None));
+                            let is_err = result.is_err();
+                            if msg_read_tx.send(result).is_err() {
+                                break;
+                            }
+                            if is_eof || is_err {
+                                break;
+                            }
+                        }
+                        bytes = write_rx.recv() => {
+                            match bytes {
+                                Some(data) => {
+                                    if let Err(e) = stream.write_all(&data).await {
+                                        tracing::debug!("🔒 TLS write error for {}: {}", peer_addr, e);
+                                        break;
+                                    }
+                                    if let Err(e) = stream.flush().await {
+                                        tracing::debug!("🔒 TLS flush error for {}: {}", peer_addr, e);
+                                        break;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
                     }
                 }
-                tracing::debug!("🔒 TLS writer task exiting for {}", peer_addr);
+                tracing::debug!("🔒 TLS I/O bridge exiting for {}", peer_addr);
             });
         } else {
             let (r, w) = stream.into_split();
@@ -504,39 +511,42 @@ impl PeerConnection {
                 .await
                 .map_err(|e| format!("TLS accept failed from {}: {}", peer_addr, e))?;
             let addr_str = peer_addr.to_string();
-            // Split TLS stream into independent read/write halves to avoid
-            // tokio::select! cancellation corrupting in-progress reads.
-            let (tls_r, tls_w) = tokio::io::split(tls_stream);
-            let addr_str_r = addr_str.clone();
-            tokio::spawn(async move {
-                let mut reader = tls_r;
-                loop {
-                    let result = crate::network::wire::read_message(&mut reader).await;
-                    let is_eof = matches!(&result, Ok(None));
-                    let is_err = result.is_err();
-                    if msg_read_tx.send(result).is_err() {
-                        break;
-                    }
-                    if is_eof || is_err {
-                        break;
-                    }
-                }
-                tracing::debug!("🔒 TLS reader task exiting for {}", addr_str_r);
-            });
+            // Single I/O bridge task: same pattern as server.rs inbound TLS.
+            // See new_outbound() comment above for why tokio::io::split() is unsafe
+            // on TLS streams.
             tokio::spawn(async move {
                 use tokio::io::AsyncWriteExt;
-                let mut writer = tls_w;
-                while let Some(data) = write_rx.recv().await {
-                    if let Err(e) = writer.write_all(&data).await {
-                        tracing::debug!("🔒 TLS write error for {}: {}", addr_str, e);
-                        break;
-                    }
-                    if let Err(e) = writer.flush().await {
-                        tracing::debug!("🔒 TLS flush error for {}: {}", addr_str, e);
-                        break;
+                let mut stream = tls_stream;
+                loop {
+                    tokio::select! {
+                        result = crate::network::wire::read_message(&mut stream) => {
+                            let is_eof = matches!(&result, Ok(None));
+                            let is_err = result.is_err();
+                            if msg_read_tx.send(result).is_err() {
+                                break;
+                            }
+                            if is_eof || is_err {
+                                break;
+                            }
+                        }
+                        bytes = write_rx.recv() => {
+                            match bytes {
+                                Some(data) => {
+                                    if let Err(e) = stream.write_all(&data).await {
+                                        tracing::debug!("🔒 TLS write error for {}: {}", addr_str, e);
+                                        break;
+                                    }
+                                    if let Err(e) = stream.flush().await {
+                                        tracing::debug!("🔒 TLS flush error for {}: {}", addr_str, e);
+                                        break;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
                     }
                 }
-                tracing::debug!("🔒 TLS writer task exiting for {}", addr_str);
+                tracing::debug!("🔒 TLS I/O bridge exiting for {}", addr_str);
             });
         } else {
             let (r, w) = stream.into_split();
