@@ -569,7 +569,10 @@ impl TransactionPool {
     /// Get fee for a specific transaction
     #[allow(dead_code)]
     pub fn get_fee(&self, txid: &Hash256) -> Option<u64> {
-        self.pending.get(txid).map(|e| e.fee)
+        self.pending
+            .get(txid)
+            .map(|e| e.fee)
+            .or_else(|| self.confirmed.get(txid).map(|e| e.fee))
     }
 
     /// Get pool metrics

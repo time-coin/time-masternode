@@ -806,7 +806,16 @@ impl RpcHandler {
                 }
             }
 
-            let fee = input_sum.saturating_sub(output_sum);
+            // If all UTXO lookups missed (e.g. self-send whose inputs were already
+            // marked spent-finalized before this query), fall back to the fee that
+            // was recorded in the pool entry at submission time.
+            let fee = if input_sum > 0 {
+                input_sum.saturating_sub(output_sum)
+            } else if let Some(stored_fee) = self.consensus.tx_pool.get_fee(&txid_array) {
+                stored_fee
+            } else {
+                0
+            };
 
             let net_amount = if wallet_input > 0 {
                 (wallet_output as i64) - (wallet_input as i64)
