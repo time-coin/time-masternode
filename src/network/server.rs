@@ -1533,19 +1533,37 @@ async fn handle_peer(
                                         }
                                         rl_drop_count += 1;
 
-                                        // Only escalate after multiple drops on this connection.
-                                        // A single transient burst (sync hiccup, reconnect race)
-                                        // should not accumulate toward a ban. Whitelisted peers are
-                                        // operator-trusted and never escalated to record_severe_violation.
-                                        let should_ban = if rl_drop_count >= 10 && !is_whitelisted {
+                                        // Sync-safe messages are fundamental to network operation
+                                        // (chain sync, peer discovery, liveness). Rate-limiting them
+                                        // is correct — dropping excess protects our resources — but
+                                        // they must never escalate to a ban. A syncing node legitimately
+                                        // sends bursts of get_blocks and block messages during IBD; a
+                                        // node coming online sends get_peers and pings. None of these
+                                        // are abuse signals.
+                                        //
+                                        // Only abuse-prone messages (tx spam, announce spam, etc.)
+                                        // should score violations when sustained rate-limiting occurs.
+                                        let is_sync_safe = matches!(
+                                            $msg_type,
+                                            "get_blocks"
+                                                | "block"
+                                                | "get_peers"
+                                                | "ping"
+                                                | "pong"
+                                                | "genesis_request"
+                                        );
+
+                                        let should_ban = if is_sync_safe {
+                                            false // Never ban for sync/discovery/liveness bursts
+                                        } else if rl_drop_count >= 10 && !is_whitelisted {
                                             blacklist_guard.record_severe_violation(ip,
                                                 &format!("Mass flood: {} ({}+ msgs dropped)", $msg_type, rl_drop_count))
                                         } else if rl_drop_count >= 5 && !is_whitelisted {
-                                            // Sustained rate-limiting (5+ drops) = intentional abuse.
+                                            // Sustained rate-limiting of an abuse-prone message type.
                                             blacklist_guard.record_violation(ip,
                                                 &format!("Sustained rate-limit flood: {} ({} msgs dropped)", $msg_type, rl_drop_count))
                                         } else {
-                                            false // First few drops: transient burst, no violation
+                                            false
                                         };
 
                                         if should_ban && !is_whitelisted {
