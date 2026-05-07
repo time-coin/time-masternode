@@ -14,7 +14,7 @@
 use crate::ai::adaptive_reconnection::{AdaptiveReconnectionAI, ReconnectionConfig};
 use crate::blockchain::Blockchain;
 use crate::masternode_registry::MasternodeRegistry;
-use crate::network::blacklist::IPBlacklist;
+use crate::network::banlist::IPBanlist;
 use crate::network::connection_manager::ConnectionManager;
 use crate::network::peer_connection::{PeerConnection, PeerStateManager};
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
@@ -37,9 +37,9 @@ pub struct NetworkClient {
     max_peers: usize,
     reserved_masternode_slots: usize,
     local_ip: Option<String>,
-    blacklisted_peers: HashSet<String>,
-    /// Real-time blacklist for rejecting messages from banned peers
-    ip_blacklist: Option<Arc<RwLock<IPBlacklist>>>,
+    banned_peers: HashSet<String>,
+    /// Real-time banlist for rejecting messages from banned peers
+    ip_banlist: Option<Arc<RwLock<IPBanlist>>>,
     /// AI-powered adaptive reconnection
     reconnection_ai: Arc<AdaptiveReconnectionAI>,
     /// TLS configuration for encrypted connections
@@ -67,8 +67,8 @@ impl NetworkClient {
         peer_state: Arc<PeerStateManager>,
         connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
         local_ip: Option<String>,
-        blacklisted_peers: Vec<String>,
-        ip_blacklist: Option<Arc<RwLock<IPBlacklist>>>,
+        banned_peers: Vec<String>,
+        ip_banlist: Option<Arc<RwLock<IPBanlist>>>,
     ) -> Self {
         let reserved_masternode_slots = (max_peers * 40 / 100).clamp(20, 100);
 
@@ -96,8 +96,8 @@ impl NetworkClient {
             max_peers,
             reserved_masternode_slots,
             local_ip,
-            blacklisted_peers: blacklisted_peers.into_iter().collect(),
-            ip_blacklist,
+            banned_peers: banned_peers.into_iter().collect(),
+            ip_banlist,
             reconnection_ai,
             tls_config: None,
             network_type,
@@ -136,7 +136,7 @@ impl NetworkClient {
         let max_peers = self.max_peers;
         let reserved_masternode_slots = self.reserved_masternode_slots;
         let local_ip = self.local_ip.clone();
-        let blacklisted_peers = self.blacklisted_peers.clone();
+        let banned_peers = self.banned_peers.clone();
         let discovered_peer_ips = self.discovered_peer_ips.clone();
 
         let res = ConnectionResources {
@@ -148,7 +148,7 @@ impl NetworkClient {
             peer_registry: peer_registry.clone(),
             local_ip: local_ip.clone(),
             reconnection_ai: self.reconnection_ai.clone(),
-            ip_blacklist: self.ip_blacklist.clone(),
+            ip_banlist: self.ip_banlist.clone(),
             tls_config: self.tls_config.clone(),
             network_type: self.network_type,
             attack_detector: self.attack_detector.clone(),
@@ -173,7 +173,7 @@ impl NetworkClient {
                         return true;
                     }
                 }
-                if blacklisted_peers.contains(ip) {
+                if banned_peers.contains(ip) {
                     return true;
                 }
                 // ConnectionManager is authoritative for both directions — is_active
@@ -219,10 +219,10 @@ impl NetworkClient {
                     if should_skip(ip) {
                         continue;
                     }
-                    if let Some(ref bl) = res.ip_blacklist {
+                    if let Some(ref bl) = res.ip_banlist {
                         if let Ok(parsed_ip) = ip.parse::<std::net::IpAddr>() {
-                            if bl.write().await.is_blacklisted(parsed_ip).is_some() {
-                                tracing::debug!("⏭️  [PHASE0] Skipping {} (blacklisted)", ip);
+                            if bl.write().await.is_banned(parsed_ip).is_some() {
+                                tracing::debug!("⏭️  [PHASE0] Skipping {} (banned)", ip);
                                 continue;
                             }
                         }
@@ -499,11 +499,11 @@ impl NetworkClient {
                     if should_skip(ip) {
                         continue;
                     }
-                    // Skip IPs that are currently blacklisted — same guard as PHASE3.
-                    if let Some(ref bl) = res.ip_blacklist {
+                    // Skip IPs that are currently banned — same guard as PHASE3.
+                    if let Some(ref bl) = res.ip_banlist {
                         if let Ok(parsed_ip) = ip.parse::<std::net::IpAddr>() {
-                            if bl.write().await.is_blacklisted(parsed_ip).is_some() {
-                                tracing::debug!("⏭️  [PHASE2] Skipping {} (blacklisted)", ip);
+                            if bl.write().await.is_banned(parsed_ip).is_some() {
+                                tracing::debug!("⏭️  [PHASE2] Skipping {} (banned)", ip);
                                 continue;
                             }
                         }
@@ -616,7 +616,7 @@ impl NetworkClient {
                         //   (a) paid-tier node on a priority-wake signal → reconnect immediately
                         //   (b) whitelisted peer → always bypass AI cooldown (operator trust)
                         let is_paid_tier = !matches!(mn_info.masternode.tier, MasternodeTier::Free);
-                        let mn_is_whitelisted = if let Some(ref bl) = res.ip_blacklist {
+                        let mn_is_whitelisted = if let Some(ref bl) = res.ip_banlist {
                             if let Ok(parsed) = mn_ip.parse::<std::net::IpAddr>() {
                                 bl.read().await.is_whitelisted(parsed)
                             } else {
@@ -656,15 +656,12 @@ impl NetworkClient {
                                 continue;
                             }
                         }
-                        // Skip IPs that are currently blacklisted — avoids full TCP+TLS
+                        // Skip IPs that are currently banned — avoids full TCP+TLS
                         // round-trip to banned subnets, which wastes tokio tasks + memory.
-                        if let Some(ref bl) = res.ip_blacklist {
+                        if let Some(ref bl) = res.ip_banlist {
                             if let Ok(parsed_ip) = mn_ip.parse::<std::net::IpAddr>() {
-                                if bl.write().await.is_blacklisted(parsed_ip).is_some() {
-                                    tracing::debug!(
-                                        "⏭️  [PHASE3-MN] Skipping {} (blacklisted)",
-                                        mn_ip
-                                    );
+                                if bl.write().await.is_banned(parsed_ip).is_some() {
+                                    tracing::debug!("⏭️  [PHASE3-MN] Skipping {} (banned)", mn_ip);
                                     continue;
                                 }
                             }
@@ -781,14 +778,11 @@ impl NetworkClient {
                             );
                             continue;
                         }
-                        // Skip IPs that are currently blacklisted (including banned subnets)
-                        if let Some(ref bl) = res.ip_blacklist {
+                        // Skip IPs that are currently banned (including banned subnets)
+                        if let Some(ref bl) = res.ip_banlist {
                             if let Ok(parsed_ip) = ip.parse::<std::net::IpAddr>() {
-                                if bl.write().await.is_blacklisted(parsed_ip).is_some() {
-                                    tracing::debug!(
-                                        "⏭️  [PHASE3-PEER] Skipping {} (blacklisted)",
-                                        ip
-                                    );
+                                if bl.write().await.is_banned(parsed_ip).is_some() {
+                                    tracing::debug!("⏭️  [PHASE3-PEER] Skipping {} (banned)", ip);
                                     continue;
                                 }
                             }
@@ -839,7 +833,7 @@ struct ConnectionResources {
     peer_registry: Arc<PeerConnectionRegistry>,
     local_ip: Option<String>,
     reconnection_ai: Arc<AdaptiveReconnectionAI>,
-    ip_blacklist: Option<Arc<RwLock<IPBlacklist>>>,
+    ip_banlist: Option<Arc<RwLock<IPBanlist>>>,
     tls_config: Option<Arc<TlsConfig>>,
     network_type: NetworkType,
     attack_detector: Option<Arc<crate::ai::attack_detector::AttackDetector>>,
@@ -858,7 +852,7 @@ impl ConnectionResources {
             // Whitelisted peers bypass AI cooldown — operator trust is absolute.
             // If a whitelisted node keeps failing, reconnect immediately rather
             // than letting backoff hold it offline for minutes.
-            let peer_is_whitelisted = if let Some(ref bl) = res.ip_blacklist {
+            let peer_is_whitelisted = if let Some(ref bl) = res.ip_banlist {
                 if let Ok(parsed) = ip.parse::<std::net::IpAddr>() {
                     bl.read().await.is_whitelisted(parsed)
                 } else {
@@ -895,7 +889,7 @@ impl ConnectionResources {
                 res.peer_registry.clone(),
                 res.local_ip.clone(),
                 is_masternode,
-                res.ip_blacklist.clone(),
+                res.ip_banlist.clone(),
                 res.tls_config.clone(),
                 res.network_type,
             )
@@ -989,7 +983,7 @@ async fn maintain_peer_connection(
     peer_registry: Arc<PeerConnectionRegistry>,
     _local_ip: Option<String>,
     is_masternode: bool,
-    ip_blacklist: Option<Arc<RwLock<IPBlacklist>>>,
+    ip_banlist: Option<Arc<RwLock<IPBanlist>>>,
     tls_config: Option<Arc<TlsConfig>>,
     network_type: NetworkType,
 ) -> Result<(), String> {
@@ -1067,9 +1061,9 @@ async fn maintain_peer_connection(
         .with_masternode_registry(masternode_registry.clone())
         .with_blockchain(blockchain.clone());
 
-    // Add blacklist for message filtering
-    if let Some(blacklist) = ip_blacklist {
-        config = config.with_blacklist(blacklist);
+    // Add banlist for message filtering
+    if let Some(banlist) = ip_banlist {
+        config = config.with_banlist(banlist);
     }
 
     // Subscribe to broadcast channel if available

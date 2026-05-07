@@ -59,7 +59,7 @@ TimeCoin implements several security measures:
    - `.cookie` file for CLI tool authentication
 
 3. **Network Security**
-   - IP blacklisting for malicious peers (auto-ban after 3/5/10 violations)
+   - IP banning for malicious peers (auto-ban after 3/5/10 violations)
    - Per-peer, per-message-type rate limiting
    - Per-/24 subnet connection rate limiter (>20 connections/min dropped before TLS)
    - `bansubnet=` config option for static CIDR-level bans
@@ -67,7 +67,7 @@ TimeCoin implements several security measures:
    - Whitelist for trusted nodes (bypass connection limits and rate limiting)
    - Message timestamp validation (5-minute window)
    - Pre-handshake 10-second timeout (prevents ghost connection OOM)
-   - Outbound PHASE3 loop checks live blacklist before TCP connect (no wasted TLS to banned IPs)
+   - Outbound PHASE3 loop checks live banlist before TCP connect (no wasted TLS to banned IPs)
 
 4. **Consensus Security**
    - TimeVote 51% stake-weighted finality

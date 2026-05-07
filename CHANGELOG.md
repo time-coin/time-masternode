@@ -80,7 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Block size cap in producer**: `get_finalized_transactions_with_fees_for_block` now accumulates serialized transaction sizes and truncates the transaction set once the payload would exceed `MAX_BLOCK_ASSEMBLY_SIZE` (1.9 MB). Previously all finalized transactions were included unconditionally, allowing blocks to grow to 3+ MB and be rejected by every peer's validation check. Excess transactions remain in the finalized pool and are included in the next block.
 - **Dual block size constants**: `MAX_BLOCK_SIZE` (validation cap, 4 MB) and `MAX_BLOCK_ASSEMBLY_SIZE` (producer cap, 1.9 MB) are now separate constants. Raising the validation cap allows nodes to accept legacy oversized blocks already on the majority chain while the producer cap prevents new oversized blocks from being created.
 - **TLS I/O race condition**: Both inbound and outbound TLS connection paths used a single `tokio::select!` loop to interleave reads and writes on a shared `TlsStream`. When a write became ready while `read_message` was mid-read, Tokio cancelled and dropped the in-progress read future, silently discarding partially-consumed bytes from the TCP kernel buffer. The next `read_message` call picked up at the wrong frame offset, producing garbage frame lengths (e.g. 318,767,104 bytes). This fired at 30-second intervals matching `PING_INTERVAL_SECS`. Fixed by replacing the `select!` bridge with `tokio::io::split()` + two independent tasks (reader + writer), mirroring the existing non-TLS path.
-- **Ping/pong rate limit no longer records blacklist violations**: Excess pings from peers reconnecting due to sync failures accumulated as blacklist violations, eventually triggering 1-hour bans on legitimate masternodes. Ping and pong now use a soft rate limit (`check_rate_limit_soft!`) that drops excess messages silently without recording a violation.
+- **Ping/pong rate limit no longer records banlist violations**: Excess pings from peers reconnecting due to sync failures accumulated as banlist violations, eventually triggering 1-hour bans on legitimate masternodes. Ping and pong now use a soft rate limit (`check_rate_limit_soft!`) that drops excess messages silently without recording a violation.
 - **Reduced ban escalation durations**: 3rd violation ban reduced from 5 min → 1 min; 5th violation ban reduced from 1 hr → 5 min. Severe protocol violations (corrupted blocks, reorg attacks) retain 1-hour bans via `record_severe_violation`.
 
 ## [1.2.3] - 2026-03-14
@@ -462,7 +462,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Improved - AI Attack Mitigation Enforcement
 
-- **Wired Attack Detector to Blacklist**: Attack detector now enforces recommended mitigations
+- **Wired Attack Detector to Banlist**: Attack detector now enforces recommended mitigations
   - `BlockPeer` → records violations (auto-escalating: 3→5min ban, 5→1hr, 10→permanent)
   - `RateLimitPeer` → records violations (escalates to ban on repeat offenses)
   - `AlertOperator` → logs critical alert

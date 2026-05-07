@@ -495,10 +495,10 @@ The primary gossip primitives are:
 
 Incoming messages are rejected if their magic bytes do not match, providing network-level partition between mainnet and testnet.
 
-### 13.5 Rate Limiting and Blacklisting
+### 13.5 Rate Limiting and Banning
 
 - Per-peer rate limiting: 100 requests per 60-second window
-- Automatic IP blacklisting after repeated invalid block submissions (≥5)
+- Automatic IP banning after repeated invalid block submissions (≥5)
 - Ping/pong keepalive every 30 seconds; disconnect after 3 missed pongs
 
 ---

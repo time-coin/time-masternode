@@ -125,7 +125,7 @@ pub struct RpcHandler {
     utxo_manager: Arc<UTXOStateManager>,
     registry: Arc<MasternodeRegistry>,
     blockchain: Arc<crate::blockchain::Blockchain>,
-    blacklist: Arc<tokio::sync::RwLock<crate::network::blacklist::IPBlacklist>>,
+    banlist: Arc<tokio::sync::RwLock<crate::network::banlist::IPBanlist>>,
     start_time: SystemTime,
     network: NetworkType,
     /// Broadcast channel for notifying WebSocket clients of new transactions
@@ -141,14 +141,14 @@ impl RpcHandler {
         network: NetworkType,
         registry: Arc<MasternodeRegistry>,
         blockchain: Arc<crate::blockchain::Blockchain>,
-        blacklist: Arc<tokio::sync::RwLock<crate::network::blacklist::IPBlacklist>>,
+        banlist: Arc<tokio::sync::RwLock<crate::network::banlist::IPBanlist>>,
     ) -> Self {
         Self {
             consensus,
             utxo_manager,
             registry,
             blockchain,
-            blacklist,
+            banlist,
             start_time: SystemTime::now(),
             network,
             tx_event_sender: None,
@@ -223,7 +223,7 @@ impl RpcHandler {
             "getwhitelist" => self.get_whitelist().await,
             "addwhitelist" => self.add_whitelist(&params_array).await,
             "removewhitelist" => self.remove_whitelist(&params_array).await,
-            "getbanlist" | "getblacklist" => self.get_blacklist().await,
+            "getbanlist" => self.get_banlist().await,
             "ban" => self.ban_ip(&params_array).await,
             "unban" => self.unban(&params_array).await,
             "unbansubnet" => self.unban_subnet(&params_array).await,
@@ -4350,7 +4350,7 @@ impl RpcHandler {
 
     /// Get whitelist info (list of whitelisted IPs)
     async fn get_whitelist(&self) -> Result<Value, RpcError> {
-        let bl = self.blacklist.read().await;
+        let bl = self.banlist.read().await;
         let (_, _, _, whitelist_count) = bl.stats();
 
         Ok(json!({
@@ -4401,7 +4401,7 @@ impl RpcHandler {
         }
         // ────────────────────────────────────────────────────────────────────
 
-        let mut bl = self.blacklist.write().await;
+        let mut bl = self.banlist.write().await;
         if bl.is_whitelisted(ip_addr) {
             Ok(json!({
                 "result": "already_whitelisted",
@@ -4441,9 +4441,9 @@ impl RpcHandler {
         }))
     }
 
-    /// Get blacklist statistics
-    async fn get_blacklist(&self) -> Result<Value, RpcError> {
-        let bl = self.blacklist.read().await;
+    /// Get banlist statistics
+    async fn get_banlist(&self) -> Result<Value, RpcError> {
+        let bl = self.banlist.read().await;
         let (permanent, temporary, subnets, violations) = bl.list_bans();
         let (perm_count, temp_count, viol_count, wl_count) = bl.stats();
         let subnet_count = subnets.len();
@@ -4502,7 +4502,7 @@ impl RpcHandler {
             .and_then(|v| v.as_str())
             .unwrap_or("manual ban via RPC");
 
-        let mut bl = self.blacklist.write().await;
+        let mut bl = self.banlist.write().await;
         bl.add_permanent_ban(ip_addr, reason);
         tracing::info!(
             "🔨 RPC: Permanently banned {} (reason: {})",
@@ -4554,7 +4554,7 @@ impl RpcHandler {
                 let _ = self.utxo_manager.unlock_collateral(&outpoint);
                 let bare = ip.split(':').next().unwrap_or(&ip);
                 if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
-                    let mut bl = self.blacklist.write().await;
+                    let mut bl = self.banlist.write().await;
                     bl.add_permanent_ban(
                         ban_ip,
                         "collateral squatter: reward_address ≠ UTXO owner (manual audit)",
@@ -4628,7 +4628,7 @@ impl RpcHandler {
                     let _ = self.utxo_manager.unlock_collateral(&outpoint);
                     let bare = sq_ip.split(':').next().unwrap_or(sq_ip.as_str());
                     if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
-                        let mut bl = self.blacklist.write().await;
+                        let mut bl = self.banlist.write().await;
                         bl.add_permanent_ban(
                             ban_ip,
                             "collateral squatter: duplicate outpoint claim (manual audit)",
@@ -4671,7 +4671,7 @@ impl RpcHandler {
             message: format!("Invalid IP address: {}", ip_str),
         })?;
 
-        let mut bl = self.blacklist.write().await;
+        let mut bl = self.banlist.write().await;
         let was_banned = bl.unban(ip_addr);
 
         if was_banned {
@@ -4692,7 +4692,7 @@ impl RpcHandler {
             message: "Subnet CIDR parameter required".to_string(),
         })?;
 
-        let mut bl = self.blacklist.write().await;
+        let mut bl = self.banlist.write().await;
         let removed = bl.unban_subnet(subnet);
 
         if removed {
@@ -4712,7 +4712,7 @@ impl RpcHandler {
     }
 
     /// Delete the sled `collateral_anchor:{txid}:{vout}` entry for an outpoint
-    /// and clear any blacklist entries banned for "Collateral hijack attempt
+    /// and clear any banlist entries banned for "Collateral hijack attempt
     /// for <that outpoint>".  Used to recover from a stuck anchor that points
     /// at the wrong IP (e.g. set by a stale relay before AV36 hardening), so
     /// the legitimate owner's next V4 announce can re-anchor cleanly.
@@ -4757,7 +4757,7 @@ impl RpcHandler {
         // Auto-unban any IP previously banned with a reason mentioning this
         // outpoint, so the legitimate owner can reconnect immediately.
         let unbanned: Vec<String> = {
-            let mut bl = self.blacklist.write().await;
+            let mut bl = self.banlist.write().await;
             let needle_a = format!("Collateral hijack attempt for {}", outpoint_str);
             let needle_b = format!(
                 "Collateral already locked under different anchor for {}",
@@ -4801,7 +4801,7 @@ impl RpcHandler {
 
     /// Remove ALL bans and violation counts. Whitelisted peers are unaffected.
     async fn clear_ban_list(&self) -> Result<Value, RpcError> {
-        let mut bl = self.blacklist.write().await;
+        let mut bl = self.banlist.write().await;
         let (perm_count, temp_count, subnet_count, viol_count) = bl.clear_all_bans();
 
         tracing::info!(
@@ -8077,7 +8077,7 @@ mod tests {
             registry,
             blockchain,
             Arc::new(tokio::sync::RwLock::new(
-                crate::network::blacklist::IPBlacklist::new(),
+                crate::network::banlist::IPBanlist::new(),
             )),
         );
 

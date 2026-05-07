@@ -79,8 +79,8 @@ pub struct PeerConnectionRegistry {
     // WebSocket transaction event sender for real-time wallet notifications
     ws_tx_event_sender:
         Arc<RwLock<Option<broadcast::Sender<crate::rpc::websocket::TransactionEvent>>>>,
-    // Blacklist reference for checking whitelist status
-    blacklist: Arc<RwLock<Option<Arc<RwLock<crate::network::blacklist::IPBlacklist>>>>>,
+    // Banlist reference for checking whitelist status
+    banlist: Arc<RwLock<Option<Arc<RwLock<crate::network::banlist::IPBanlist>>>>>,
     // Discovered peer candidates from peer exchange
     discovered_peers: Arc<RwLock<HashSet<String>>>,
     // Peers on incompatible chains (different hash calculation)
@@ -145,7 +145,7 @@ impl PeerConnectionRegistry {
             timelock_block_cache: Arc::new(RwLock::new(None)),
             timelock_broadcast: Arc::new(RwLock::new(None)),
             ws_tx_event_sender: Arc::new(RwLock::new(None)),
-            blacklist: Arc::new(RwLock::new(None)),
+            banlist: Arc::new(RwLock::new(None)),
             discovered_peers: Arc::new(RwLock::new(HashSet::new())),
             incompatible_peers: Arc::new(RwLock::new(HashMap::new())),
             fork_error_counts: DashMap::new(),
@@ -159,20 +159,17 @@ impl PeerConnectionRegistry {
         }
     }
 
-    /// Set blacklist reference (called once after server initialization)
-    pub async fn set_blacklist(
-        &self,
-        blacklist: Arc<RwLock<crate::network::blacklist::IPBlacklist>>,
-    ) {
-        *self.blacklist.write().await = Some(blacklist);
+    /// Set banlist reference (called once after server initialization)
+    pub async fn set_banlist(&self, banlist: Arc<RwLock<crate::network::banlist::IPBanlist>>) {
+        *self.banlist.write().await = Some(banlist);
     }
 
     /// Check if a peer IP is whitelisted (trusted masternode from time-coin.io)
     pub async fn is_whitelisted(&self, peer_ip: &str) -> bool {
         let ip_only = extract_ip(peer_ip);
         if let Ok(ip_addr) = ip_only.parse::<IpAddr>() {
-            if let Some(blacklist) = self.blacklist.read().await.as_ref() {
-                return blacklist.read().await.is_whitelisted(ip_addr);
+            if let Some(banlist) = self.banlist.read().await.as_ref() {
+                return banlist.read().await.is_whitelisted(ip_addr);
             }
         }
         false
@@ -183,8 +180,8 @@ impl PeerConnectionRegistry {
     /// entry yielded a valid IP — otherwise a brand-new node with no
     /// whitelist would be unable to sync at all.
     pub async fn has_whitelist(&self) -> bool {
-        if let Some(blacklist) = self.blacklist.read().await.as_ref() {
-            return blacklist.read().await.whitelist_count() > 0;
+        if let Some(banlist) = self.banlist.read().await.as_ref() {
+            return banlist.read().await.whitelist_count() > 0;
         }
         false
     }
@@ -448,7 +445,7 @@ impl PeerConnectionRegistry {
                 // GetGenesisHash message.  This is NOT evidence of an incompatible chain —
                 // it simply means the peer hasn't been upgraded yet.  Treating timeout as
                 // incompatible causes a complete network partition on startup because ALL
-                // pre-upgrade nodes would be blacklisted simultaneously.
+                // pre-upgrade nodes would be banned simultaneously.
                 //
                 // Policy: timeout → assume compatible.  Only mark incompatible if the peer
                 // actually replies with a DIFFERENT genesis hash (strong proof of wrong chain).

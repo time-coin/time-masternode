@@ -2,12 +2,12 @@
 //!
 //! Centralises the per-/24 subnet connection-rate tracking and provides a
 //! `DDoSStats` snapshot used by the periodic health log.  The existing
-//! blacklist, rate limiter, connection manager, and AI attack detector remain
+//! banlist, rate limiter, connection manager, and AI attack detector remain
 //! the enforcement mechanisms — this module is the coordination layer that
 //! ties them together.
 //!
 //! ## Defence layers (in order of application)
-//! 1. **Blacklist** — permanent + temp IP/subnet bans, persisted via sled
+//! 1. **Banlist** — permanent + temp IP/subnet bans, persisted via sled
 //! 2. **Subnet rate** — max 20 new connections/min from any /24 (this module)
 //! 3. **Connection limits** — per-IP max 3, global max 125 (connection_manager.rs)
 //! 4. **Token-bucket gate** — 200 msg/s per peer, hard-kick after 300 drops (server.rs)
@@ -30,7 +30,7 @@ pub const MAX_SUBNET_CONNECTS_PER_MIN: usize = 20;
 /// Lightweight DDoS coordination struct.
 ///
 /// Owns the per-/24 subnet rate-tracking table consumed by the accept loop.
-/// Thin shim — actual ban/kick enforcement stays in the blacklist and
+/// Thin shim — actual ban/kick enforcement stays in the banlist and
 /// connection manager; this struct just provides the shared state and helpers.
 pub struct DDoSGuard {
     /// Per-/24 subnet inbound connection timestamps.

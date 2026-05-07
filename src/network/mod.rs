@@ -1,5 +1,5 @@
 pub mod attack_log;
-pub mod blacklist;
+pub mod banlist;
 pub mod block_cache;
 pub mod client;
 pub mod connection_manager;

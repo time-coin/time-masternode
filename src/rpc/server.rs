@@ -236,7 +236,7 @@ const PUBLIC_METHODS: &[&str] = &[
     "getconsensusinfo",
     "gettimevotestatus",
     "getwhitelist",
-    "getblacklist",
+    "getbanlist",
     "gettreasurybalance",
     "getfeeschedule",
     // Payment requests — signed by the requester/payer; signature is the authentication
@@ -271,7 +271,7 @@ impl RpcServer {
         network: NetworkType,
         registry: Arc<MasternodeRegistry>,
         blockchain: Arc<crate::blockchain::Blockchain>,
-        blacklist: Arc<tokio::sync::RwLock<crate::network::blacklist::IPBlacklist>>,
+        banlist: Arc<tokio::sync::RwLock<crate::network::banlist::IPBanlist>>,
         tx_event_sender: Option<tokio::sync::broadcast::Sender<super::websocket::TransactionEvent>>,
         reconnection_ai: Option<Arc<crate::ai::adaptive_reconnection::AdaptiveReconnectionAI>>,
         rpcuser: String,
@@ -285,7 +285,7 @@ impl RpcServer {
             network,
             registry,
             blockchain,
-            blacklist,
+            banlist,
         );
         if let Some(sender) = tx_event_sender {
             handler.set_tx_event_sender(sender);

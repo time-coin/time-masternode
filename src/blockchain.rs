@@ -9,7 +9,7 @@ use crate::consensus::ConsensusEngine;
 use crate::constants;
 use crate::masternode_registry::MasternodeRegistry;
 
-use crate::network::blacklist::IPBlacklist;
+use crate::network::banlist::IPBanlist;
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
 use crate::types::{Hash256, OutPoint, Transaction, TxInput, TxOutput, UTXOState, UTXO};
@@ -253,8 +253,8 @@ pub struct Blockchain {
     /// Buffer for blocks downloaded ahead of current tip during parallel sync.
     /// Blocks are stored by height and drained in order as gaps fill in.
     pending_sync_blocks: Arc<RwLock<BTreeMap<u64, Block>>>,
-    /// IP blacklist — sync coordinator uses this to skip banned peers
-    blacklist: Arc<RwLock<Option<Arc<RwLock<IPBlacklist>>>>>,
+    /// IP banlist — sync coordinator uses this to skip banned peers
+    banlist: Arc<RwLock<Option<Arc<RwLock<IPBanlist>>>>>,
     /// Height of the last locally confirmed block.
     /// Once a valid block is committed here, no reorg can go below this height.
     /// This implements BFT-style finality: confirmed blocks are irreversible.
@@ -410,7 +410,7 @@ impl Blockchain {
             active_block_reward: Arc::new(AtomicU64::new(BLOCK_REWARD_SATOSHIS)),
             governance: None,
             pending_sync_blocks: Arc::new(RwLock::new(BTreeMap::new())),
-            blacklist: Arc::new(RwLock::new(None)),
+            banlist: Arc::new(RwLock::new(None)),
             last_locally_confirmed_height: Arc::new(AtomicU64::new(loaded_height)),
             finality_lock_blocked_since: Arc::new(RwLock::new(None)),
             fork_resolution_blocked_until: Arc::new(AtomicU64::new(0)),
@@ -727,9 +727,9 @@ impl Blockchain {
         self.peer_registry.read().await.clone()
     }
 
-    /// Set the IP blacklist so the sync coordinator can skip banned peers
-    pub async fn set_blacklist(&self, blacklist: Arc<RwLock<IPBlacklist>>) {
-        *self.blacklist.write().await = Some(blacklist);
+    /// Set the IP banlist so the sync coordinator can skip banned peers
+    pub async fn set_banlist(&self, banlist: Arc<RwLock<IPBanlist>>) {
+        *self.banlist.write().await = Some(banlist);
     }
 
     /// Get the list of peers currently on the consensus chain
@@ -2287,14 +2287,14 @@ impl Blockchain {
             // Use filtered list unconditionally — if empty, request fresh tips and abort
             sync_peers = peers_with_needed_blocks;
 
-            // Filter out blacklisted peers — they will always fail or send invalid blocks.
-            if let Some(bl_arc) = self.blacklist.read().await.as_ref().cloned() {
+            // Filter out banned peers — they will always fail or send invalid blocks.
+            if let Some(bl_arc) = self.banlist.read().await.as_ref().cloned() {
                 let mut bl = bl_arc.write().await;
                 sync_peers.retain(|peer| {
                     let bare = peer.split(':').next().unwrap_or(peer.as_str());
                     if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-                        if bl.is_blacklisted(ip).is_some() {
-                            tracing::debug!("🔍 Excluding blacklisted peer {} from sync", bare);
+                        if bl.is_banned(ip).is_some() {
+                            tracing::debug!("🔍 Excluding banned peer {} from sync", bare);
                             return false;
                         }
                     }
@@ -2598,18 +2598,18 @@ impl Blockchain {
                         };
                         // Also exclude every peer that failed earlier in this sync session.
                         excluded.extend(failed_peers.iter().cloned());
-                        // Snapshot the blacklist once for the whole loop.
-                        let bl_snap = self.blacklist.read().await.as_ref().cloned();
+                        // Snapshot the banlist once for the whole loop.
+                        let bl_snap = self.banlist.read().await.as_ref().cloned();
                         let mut candidates = Vec::new();
                         for p in connected_peers.iter() {
                             if excluded.contains(p) {
                                 continue;
                             }
-                            // Skip blacklisted peers — they always fail or send invalid blocks.
+                            // Skip banned peers — they always fail or send invalid blocks.
                             if let Some(ref bl_arc) = bl_snap {
                                 let bare = p.split(':').next().unwrap_or(p.as_str());
                                 if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-                                    if bl_arc.write().await.is_blacklisted(ip).is_some() {
+                                    if bl_arc.write().await.is_banned(ip).is_some() {
                                         continue;
                                     }
                                 }
@@ -10795,7 +10795,7 @@ impl Blockchain {
                                 "🚫 Peer {} supplied pre-launch fork chain — 1-hour temp ban: {}",
                                 peer_addr, e
                             );
-                            if let Some(bl_opt) = self.blacklist.read().await.as_ref() {
+                            if let Some(bl_opt) = self.banlist.read().await.as_ref() {
                                 let bare_ip = peer_addr.split(':').next().unwrap_or(&peer_addr);
                                 if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
                                     bl_opt.write().await.add_temp_ban(
@@ -11650,7 +11650,7 @@ impl Clone for Blockchain {
             active_block_reward: self.active_block_reward.clone(),
             governance: self.governance.clone(),
             pending_sync_blocks: self.pending_sync_blocks.clone(),
-            blacklist: self.blacklist.clone(),
+            banlist: self.banlist.clone(),
             last_locally_confirmed_height: self.last_locally_confirmed_height.clone(),
             finality_lock_blocked_since: self.finality_lock_blocked_since.clone(),
             fork_resolution_blocked_until: self.fork_resolution_blocked_until.clone(),

@@ -31,7 +31,7 @@ This document outlines the development roadmap for TimeCoin.
 - PeerExchange with load info and tier-aware routing
 - Overload redirect (>70% capacity → redirect inbound to less-loaded peers)
 - Post-handshake-only connected peer tracking
-- IP blacklisting, rate limiting, dedup filter
+- IP banning, rate limiting, dedup filter
 - TLS support (optional, wired but not enforced)
 - **ConnectionManager as single authority** — inbound connections registered via `accept_inbound()`, PHASE3 uses CM for both directions, duplicate inbounds dropped atomically
 - **Conflict-only TimeVote** — non-contested transactions auto-finalize immediately; full 67% vote only for genuine double-spends

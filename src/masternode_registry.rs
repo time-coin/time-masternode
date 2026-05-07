@@ -262,7 +262,7 @@ pub struct MasternodeRegistry {
 pub struct SquatterEviction {
     /// The IP (and optional port) that was evicted.
     pub ip: String,
-    /// Human-readable reason, suitable for passing to `IPBlacklist::add_temp_ban()`.
+    /// Human-readable reason, suitable for passing to `IPBanlist::add_temp_ban()`.
     pub reason: String,
     /// Recommended temporary-ban duration (2 hours for audit-detected squatters).
     pub ban_duration: std::time::Duration,
@@ -4901,7 +4901,7 @@ impl MasternodeRegistry {
     /// For each confirmed squatter the registry is immediately updated
     /// (`unregister` + `unlock_collateral`) and a `SquatterEviction` is returned.
     /// The **network layer** is responsible for banning the IP and closing the
-    /// TCP connection — no blacklist logic lives in this method.
+    /// TCP connection — no banlist logic lives in this method.
     ///
     /// `local_ip` and `whitelist_ips` are exempted from eviction so the local
     /// node can never self-evict and operator-trusted peers are preserved.

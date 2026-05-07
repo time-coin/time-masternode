@@ -47,7 +47,7 @@ The TIME Coin network layer implements a production-ready P2P system with:
 - Secure TLS encryption
 - Message signing and verification
 - Rate limiting and DOS protection
-- IP blacklisting
+- IP banning
 - Peer discovery and bootstrap
 - State synchronization
 - Fork alert chain tip propagation (v1.2.2)
@@ -65,7 +65,7 @@ The inbound and outbound TLS paths previously used a single `tokio::select!` loo
 `MAX_BLOCK_SIZE` (validation, 4 MB) and `MAX_BLOCK_ASSEMBLY_SIZE` (producer cap, 1.9 MB) are now separate constants. The block producer truncates its transaction set at `MAX_BLOCK_ASSEMBLY_SIZE`; the validator accepts legacy blocks up to `MAX_BLOCK_SIZE`.
 
 ### Ping/Pong Soft Rate Limit
-Excess pings are now dropped silently (`check_rate_limit_soft!`) rather than recording blacklist violations. Previously, connection-churn during sync failures accumulated ping violations and triggered hour-long bans on legitimate masternodes.
+Excess pings are now dropped silently (`check_rate_limit_soft!`) rather than recording banlist violations. Previously, connection-churn during sync failures accumulated ping violations and triggered hour-long bans on legitimate masternodes.
 
 ### Reduced Ban Escalation (Non-Severe Violations)
 - 3rd violation: 5 min → **1 min**
@@ -242,7 +242,7 @@ Additionally, `list_by_tier()` now filters for `is_active`, so PHASE 1 startup c
 - Rate limiting per peer
 
 **Security Features:**
-- IP blacklisting
+- IP banning
 - Rate limiting (token bucket)
 - Message size validation
 - Handshake validation
@@ -319,15 +319,15 @@ pub fn is_timestamp_valid(&self, max_age_seconds) -> bool
 | `subscribe` | 60s | 10 |
 | `general` | 1s | 100 |
 
-> **Note:** `ping` and `pong` use a *soft* rate limit (`check_rate_limit_soft!`) — excess messages are dropped silently without recording a blacklist violation. Pings burst during connection churn (e.g. sync retries) and should not penalise legitimate peers.
+> **Note:** `ping` and `pong` use a *soft* rate limit (`check_rate_limit_soft!`) — excess messages are dropped silently without recording a banlist violation. Pings burst during connection churn (e.g. sync retries) and should not penalise legitimate peers.
 
 ---
 
-#### `blacklist.rs`
-**Purpose:** IP blacklisting with TTL expiration
+#### `banlist.rs`
+**Purpose:** IP banning with TTL expiration
 
 **Features:**
-- Temporary and permanent blacklist entries
+- Temporary and permanent banlist entries
 - Whitelist (masternodes exempt from minor violations)
 - Automatic cleanup (TTL-based)
 - Thread-safe operations
@@ -350,7 +350,7 @@ pub fn is_timestamp_valid(&self, max_age_seconds) -> bool
 pub fn record_violation(&mut self, ip: IpAddr, reason: &str) -> bool
 pub fn record_severe_violation(&mut self, ip: IpAddr, reason: &str) -> bool
 pub fn add_temp_ban(&mut self, ip: IpAddr, duration: Duration, reason: &str)
-pub fn is_blacklisted(&mut self, ip: IpAddr) -> Option<String>
+pub fn is_banned(&mut self, ip: IpAddr) -> Option<String>
 pub fn add_to_whitelist(&mut self, ip: IpAddr, reason: &str)
 pub fn cleanup(&mut self)
 ```
@@ -449,7 +449,7 @@ Entries are sorted by tier (Gold first) then ascending `connection_count` so con
 │  ┌──────────────────────────────────────────────────┐     │
 │  │  Security & Filtering                            │     │
 │  │  - TLS encryption  - Rate limiting               │     │
-│  │  - Message signing - Blacklist                   │     │
+│  │  - Message signing - Banlist                   │     │
 │  │  - Deduplication                                 │     │
 │  └──────────────────────────────────────────────────┘     │
 │                                                             │
@@ -477,9 +477,9 @@ Consensus Layer (TimeVote + TimeLock)
            │
            ▼
 ┌──────────────────────────────────┐
-│  Rate Limiting & Blacklist       │
+│  Rate Limiting & Banlist       │
 │  - Token bucket per peer         │
-│  - Verify not blacklisted        │
+│  - Verify not banned        │
 └──────────┬───────────────────────┘
            │
            ▼

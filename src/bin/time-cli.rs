@@ -1267,7 +1267,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         println!(
-            "=== Aggregated Blacklist ({} nodes queried) ===\n",
+            "=== Aggregated Banlist ({} nodes queried) ===\n",
             query_urls.len()
         );
         println!("Node Summary:");

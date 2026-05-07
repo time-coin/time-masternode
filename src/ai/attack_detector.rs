@@ -59,7 +59,7 @@ pub struct AttackPattern {
     pub source_ips: Vec<String>,
     pub recommended_action: MitigationAction,
     /// Set when the server enforcement loop has applied this pattern's mitigation action.
-    /// Prevents the same detection from triggering repeated blacklist violations.
+    /// Prevents the same detection from triggering repeated banlist violations.
     #[serde(default)]
     pub mitigation_applied_at: Option<u64>,
 }
@@ -1585,7 +1585,7 @@ impl AttackDetector {
 
     /// Return attack patterns whose mitigation action has not yet been applied, and mark them
     /// as applied.  The enforcement loop calls this instead of `get_recent_attacks` so that each
-    /// detected attack only triggers one blacklist violation — preventing rapid escalation to
+    /// detected attack only triggers one banlist violation — preventing rapid escalation to
     /// permanent ban from a single detection event.
     pub fn take_pending_mitigations(&self) -> Vec<AttackPattern> {
         let now = Self::now_secs();

@@ -11,7 +11,7 @@ use tokio::time::{interval, Instant};
 use tracing::{debug, error, info, warn};
 
 use crate::blockchain::Blockchain;
-use crate::network::blacklist::IPBlacklist;
+use crate::network::banlist::IPBanlist;
 use crate::network::message::NetworkMessage;
 use crate::network::message_handler::{ConnectionDirection, MessageContext, MessageHandler};
 use crate::network::tls::TlsConfig;
@@ -260,8 +260,8 @@ pub struct MessageLoopConfig {
     pub broadcast_rx:
         Option<tokio::sync::broadcast::Receiver<crate::network::message::NetworkMessage>>,
 
-    /// Optional: Blacklist for rejecting messages from banned peers
-    pub blacklist: Option<Arc<RwLock<IPBlacklist>>>,
+    /// Optional: Banlist for rejecting messages from banned peers
+    pub banlist: Option<Arc<RwLock<IPBanlist>>>,
 
     /// Optional: AI System for recording events and making intelligent decisions
     pub ai_system: Option<Arc<crate::ai::AISystem>>,
@@ -277,7 +277,7 @@ impl MessageLoopConfig {
             masternode_registry: None,
             blockchain: None,
             broadcast_rx: None,
-            blacklist: None,
+            banlist: None,
             ai_system: None,
         }
     }
@@ -306,9 +306,9 @@ impl MessageLoopConfig {
         self
     }
 
-    /// Add blacklist (builder pattern)
-    pub fn with_blacklist(mut self, blacklist: Arc<RwLock<IPBlacklist>>) -> Self {
-        self.blacklist = Some(blacklist);
+    /// Add banlist (builder pattern)
+    pub fn with_banlist(mut self, banlist: Arc<RwLock<IPBanlist>>) -> Self {
+        self.banlist = Some(banlist);
         self
     }
 
@@ -945,9 +945,9 @@ impl PeerConnection {
             )
             .await;
 
-            // Add blacklist if available
-            if let Some(ref blacklist) = config.blacklist {
-                ctx = ctx.with_blacklist(Arc::clone(blacklist));
+            // Add banlist if available
+            if let Some(ref banlist) = config.banlist {
+                ctx = ctx.with_banlist(Arc::clone(banlist));
             }
 
             // Add AI system if available
@@ -980,8 +980,8 @@ impl PeerConnection {
                 Ok(())
             }
             Err(e) => {
-                if e.contains("is blacklisted") {
-                    // Blacklisted peer — signal the message loop to disconnect
+                if e.contains("is banned") {
+                    // Banned peer — signal the message loop to disconnect
                     return Err(e);
                 }
                 debug!(
@@ -1152,7 +1152,7 @@ impl PeerConnection {
                             let handle_result = self.handle_message_unified(message, &config, &handler).await;
 
                             if let Err(e) = handle_result {
-                                if e.contains("is blacklisted") {
+                                if e.contains("is banned") {
                                     // Peer is banned — close the connection regardless of
                                     // whitelist/masternode status.  A banned connection cannot
                                     // process any messages; keeping it open only produces log
@@ -1208,7 +1208,7 @@ impl PeerConnection {
                                             self.direction, self.peer_ip, e
                                         );
                                     } else if let Ok(ip) = self.peer_ip.parse::<std::net::IpAddr>() {
-                                        if let Some(ref bl) = config.blacklist {
+                                        if let Some(ref bl) = config.banlist {
                                             bl.write().await.record_frame_bomb_violation(ip, &e);
                                         }
                                         if let Some(ref ai) = config.ai_system {
@@ -1267,15 +1267,15 @@ impl PeerConnection {
                                 "🚫 [{:?}] Disconnecting {} — genesis hash mismatch (wrong network/fork). Banning.",
                                 self.direction, self.peer_ip
                             );
-                            if let Some(ref blacklist) = config.blacklist {
+                            if let Some(ref banlist) = config.banlist {
                                 let bare = self
                                     .peer_ip
                                     .split(':')
                                     .next()
                                     .unwrap_or(&self.peer_ip);
                                 if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-                                    if !blacklist.read().await.is_whitelisted(ip) {
-                                        blacklist
+                                    if !banlist.read().await.is_whitelisted(ip) {
+                                        banlist
                                             .write()
                                             .await
                                             .add_permanent_ban(ip, "genesis hash mismatch");

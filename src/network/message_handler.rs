@@ -9,7 +9,7 @@ use crate::block::types::Block;
 use crate::blockchain::Blockchain;
 use crate::consensus::ConsensusEngine;
 use crate::masternode_registry::MasternodeRegistry;
-use crate::network::blacklist::IPBlacklist;
+use crate::network::banlist::IPBanlist;
 use crate::network::dedup_filter::DeduplicationFilter;
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
@@ -218,7 +218,7 @@ fn spawn_fork_resolution(
     blockchain: Arc<Blockchain>,
     blocks: Vec<Block>,
     peer_ip: String,
-    blacklist: Option<Arc<RwLock<IPBlacklist>>>,
+    banlist: Option<Arc<RwLock<IPBanlist>>>,
     peer_registry: Arc<PeerConnectionRegistry>,
     masternode_registry: Arc<MasternodeRegistry>,
 ) {
@@ -240,7 +240,7 @@ fn spawn_fork_resolution(
                         "⚠️ Reorg from {} had invalid reward distribution — temp-banning 6h: {}",
                         peer_ip, e
                     );
-                    if let Some(bl) = &blacklist {
+                    if let Some(bl) = &banlist {
                         let bare = peer_ip.split(':').next().unwrap_or(&peer_ip);
                         if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
                             bl.write().await.add_temp_ban(
@@ -300,8 +300,8 @@ pub struct MessageContext {
     pub seen_transactions: Option<Arc<DeduplicationFilter>>,
     // Node identity for voting
     pub node_masternode_address: Option<String>,
-    // Blacklist for rejecting messages from banned peers
-    pub blacklist: Option<Arc<RwLock<IPBlacklist>>>,
+    // Banlist for rejecting messages from banned peers
+    pub banlist: Option<Arc<RwLock<IPBanlist>>>,
     // AI System for recording events and making intelligent decisions
     pub ai_system: Option<Arc<crate::ai::AISystem>>,
     // WebSocket transaction event sender for real-time wallet notifications
@@ -329,7 +329,7 @@ impl MessageContext {
             seen_blocks: None,
             seen_transactions: None,
             node_masternode_address: None,
-            blacklist: None,
+            banlist: None,
             ai_system: None,
             tx_event_sender: None,
             drift_tracker: None,
@@ -358,7 +358,7 @@ impl MessageContext {
             seen_blocks: None,
             seen_transactions: None,
             node_masternode_address,
-            blacklist: None,
+            banlist: None,
             ai_system: None,
             tx_event_sender: None,
             drift_tracker: None,
@@ -398,7 +398,7 @@ impl MessageContext {
             seen_blocks: None,
             seen_transactions: None,
             node_masternode_address,
-            blacklist: None,
+            banlist: None,
             ai_system,
             tx_event_sender,
             drift_tracker: None,
@@ -411,9 +411,9 @@ impl MessageContext {
         self
     }
 
-    /// Set the blacklist for rejecting messages from banned peers
-    pub fn with_blacklist(mut self, blacklist: Arc<RwLock<IPBlacklist>>) -> Self {
-        self.blacklist = Some(blacklist);
+    /// Set the banlist for rejecting messages from banned peers
+    pub fn with_banlist(mut self, banlist: Arc<RwLock<IPBanlist>>) -> Self {
+        self.banlist = Some(banlist);
         self
     }
 
@@ -551,7 +551,7 @@ impl MessageHandler {
     /// Returns Ok(true) if valid, Ok(false) if invalid/rejected.
     ///
     /// Security: records violations against the sending peer for AV27 (forged
-    /// signatures) and AV28 (unregistered voter spam), so the blacklist escalation
+    /// signatures) and AV28 (unregistered voter spam), so the banlist escalation
     /// ladder can ban repeat offenders.
     async fn verify_vote_signature(
         &self,
@@ -635,12 +635,12 @@ impl MessageHandler {
 
     /// AV27: record a vote violation against the sending peer immediately.
     /// Used for structurally malformed votes (missing/wrong-length signature).
-    /// Uses the blacklist escalation ladder: 3 → 1-min ban, 5 → 5-min ban,
+    /// Uses the banlist escalation ladder: 3 → 1-min ban, 5 → 5-min ban,
     /// 10 → permanent ban.
     async fn record_vote_violation(&self, context: &MessageContext, reason: &str) {
-        if let Some(blacklist) = &context.blacklist {
+        if let Some(banlist) = &context.banlist {
             if let Ok(ip) = self.peer_ip.parse::<IpAddr>() {
-                blacklist.write().await.record_violation(ip, reason);
+                banlist.write().await.record_violation(ip, reason);
             }
         }
     }
@@ -649,17 +649,17 @@ impl MessageHandler {
     /// Whitelisted peers are never permanently banned — they are operator-trusted
     /// and a permanent ban would cut off Michigan from its reference peers.
     async fn permanent_ban_ip(&self, context: &MessageContext, reason: &str) {
-        if let Some(blacklist) = &context.blacklist {
+        if let Some(banlist) = &context.banlist {
             let bare = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
             if let Ok(ip) = bare.parse::<IpAddr>() {
-                if blacklist.read().await.is_whitelisted(ip) {
+                if banlist.read().await.is_whitelisted(ip) {
                     warn!(
                         "⚠️ Suppressing permanent ban for whitelisted peer {} — reason: {}",
                         self.peer_ip, reason
                     );
                     return;
                 }
-                blacklist.write().await.add_permanent_ban(ip, reason);
+                banlist.write().await.add_permanent_ban(ip, reason);
             }
         }
         self.suspend_peer_from_consensus(context, reason).await;
@@ -745,16 +745,16 @@ impl MessageHandler {
         msg: &NetworkMessage,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
-        // SECURITY: Check blacklist before processing ANY message
-        if let Some(blacklist) = &context.blacklist {
+        // SECURITY: Check banlist before processing ANY message
+        if let Some(banlist) = &context.banlist {
             if let Ok(ip) = self.peer_ip.parse::<IpAddr>() {
-                let mut bl = blacklist.write().await;
-                if let Some(reason) = bl.is_blacklisted(ip) {
+                let mut bl = banlist.write().await;
+                if let Some(reason) = bl.is_banned(ip) {
                     warn!(
-                        "🚫 [{:?}] REJECTING message from blacklisted peer {}: {}",
+                        "🚫 [{:?}] REJECTING message from banned peer {}: {}",
                         self.direction, self.peer_ip, reason
                     );
-                    return Err(format!("Peer {} is blacklisted: {}", self.peer_ip, reason));
+                    return Err(format!("Peer {} is banned: {}", self.peer_ip, reason));
                 }
             }
         }
@@ -2583,10 +2583,10 @@ impl MessageHandler {
                 &format!("Pre-launch block announcement {}", block_height),
             )
             .await;
-            if let Some(blacklist) = &context.blacklist {
+            if let Some(banlist) = &context.banlist {
                 let bare_ip = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
                 if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
-                    blacklist.write().await.record_violation(
+                    banlist.write().await.record_violation(
                         ip,
                         &format!(
                             "Announced block {} before genesis launch (max valid height: {})",
@@ -2800,9 +2800,9 @@ impl MessageHandler {
                         "⚠️ [{}] Invalid reward distribution in block {} from {} — temp-banning 6h: {}",
                         self.direction, block_height, self.peer_ip, e
                     );
-                    if let Some(blacklist) = &context.blacklist {
+                    if let Some(banlist) = &context.banlist {
                         if let Ok(ip) = self.peer_ip.parse::<std::net::IpAddr>() {
-                            blacklist.write().await.add_temp_ban(
+                            banlist.write().await.add_temp_ban(
                                 ip,
                                 std::time::Duration::from_secs(6 * 3600),
                                 &format!("Invalid reward block {}: {}", block_height, e),
@@ -2841,10 +2841,10 @@ impl MessageHandler {
                         "🚫 [{}] Pre-launch block {} from {} — 1-hour temp ban ({})",
                         self.direction, block_height, self.peer_ip, e
                     );
-                    if let Some(blacklist) = &context.blacklist {
+                    if let Some(banlist) = &context.banlist {
                         let bare_ip = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
                         if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
-                            blacklist.write().await.add_temp_ban(
+                            banlist.write().await.add_temp_ban(
                                 ip,
                                 std::time::Duration::from_secs(3600),
                                 &format!("Sent pre-launch block {}: {}", block_height, e),
@@ -2971,7 +2971,7 @@ impl MessageHandler {
         )
         .await;
 
-        // Permanently ban the peer in the IP blacklist — a wrong genesis
+        // Permanently ban the peer in the IP banlist — a wrong genesis
         // means this peer is on a completely different chain and will never
         // be useful to us.
         self.permanent_ban_ip(
@@ -3920,7 +3920,7 @@ impl MessageHandler {
                                         if let Ok(ban_ip) =
                                             bare_squatter.parse::<std::net::IpAddr>()
                                         {
-                                            if let Some(bl) = &context.blacklist {
+                                            if let Some(bl) = &context.banlist {
                                                 let mut guard = bl.write().await;
                                                 guard.add_permanent_ban(
                                                     ban_ip,
@@ -3956,7 +3956,7 @@ impl MessageHandler {
                                             .next()
                                             .unwrap_or(&masternode_ip);
                                         if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
-                                            if let Some(bl) = &context.blacklist {
+                                            if let Some(bl) = &context.banlist {
                                                 let mut guard = bl.write().await;
                                                 guard.add_permanent_ban(
                                                     ban_ip,
@@ -4077,7 +4077,7 @@ impl MessageHandler {
                                                     warn!(
                                                         "🚨 [{}] COLLATERAL HIJACK BLOCKED: {} \
                                                          tried V4 eviction of local node {} \
-                                                         for {} — blacklisting attacker{}",
+                                                         for {} — banning attacker{}",
                                                         self.direction,
                                                         masternode_ip,
                                                         squatter_ip,
@@ -4089,9 +4089,9 @@ impl MessageHandler {
                                                         }
                                                     );
                                                 }
-                                                // Immediately record blacklist violation against
+                                                // Immediately record banlist violation against
                                                 // the actual attacker (masternode_ip), not the relay.
-                                                if let Some(bl) = &context.blacklist {
+                                                if let Some(bl) = &context.banlist {
                                                     let bare = masternode_ip
                                                         .split(':')
                                                         .next()
@@ -4274,7 +4274,7 @@ impl MessageHandler {
                                             if let Ok(ban_ip) =
                                                 bare_squatter.parse::<std::net::IpAddr>()
                                             {
-                                                if let Some(bl) = &context.blacklist {
+                                                if let Some(bl) = &context.banlist {
                                                     let mut guard = bl.write().await;
                                                     if has_valid_proof {
                                                         guard.add_permanent_ban(
@@ -4438,7 +4438,7 @@ impl MessageHandler {
                                         warn!(
                                             "🚨 [{}] COLLATERAL HIJACK BLOCKED: {} tried V4 \
                                              eviction of local node {} for {} (registry path) \
-                                             — blacklisting attacker{}",
+                                             — banning attacker{}",
                                             self.direction,
                                             masternode_ip,
                                             registry_squatter,
@@ -4451,7 +4451,7 @@ impl MessageHandler {
                                         );
                                     }
                                     // Record violation against the actual attacker (masternode_ip).
-                                    if let Some(bl) = &context.blacklist {
+                                    if let Some(bl) = &context.banlist {
                                         let bare = masternode_ip
                                             .split(':')
                                             .next()
@@ -4593,7 +4593,7 @@ impl MessageHandler {
                                     .next()
                                     .unwrap_or(&registry_squatter);
                                 if let Ok(ban_ip) = bare_squatter.parse::<std::net::IpAddr>() {
-                                    if let Some(bl) = &context.blacklist {
+                                    if let Some(bl) = &context.banlist {
                                         let mut guard = bl.write().await;
                                         if has_valid_proof {
                                             guard.add_permanent_ban(
@@ -4638,11 +4638,11 @@ impl MessageHandler {
                                 }
 
                                 // Record a violation against the actual claimant (masternode_ip).
-                                if let Some(blacklist) = &context.blacklist {
+                                if let Some(banlist) = &context.banlist {
                                     let bare_ip =
                                         masternode_ip.split(':').next().unwrap_or(&masternode_ip);
                                     if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
-                                        let mut bl = blacklist.write().await;
+                                        let mut bl = banlist.write().await;
                                         bl.record_violation(
                                             ban_ip,
                                             "Registry conflict: claimed collateral without proof",
@@ -4682,9 +4682,9 @@ impl MessageHandler {
                                     drop(entry);
 
                                     if unique_count >= 5 {
-                                        if let Some(blacklist) = &context.blacklist {
+                                        if let Some(banlist) = &context.banlist {
                                             let cidr = format!("{}.0/24", subnet_key);
-                                            let mut bl = blacklist.write().await;
+                                            let mut bl = banlist.write().await;
                                             if bl.subnet_ban_count() < 256 {
                                                 bl.add_subnet_ban(
                                                     &cidr,
@@ -4763,17 +4763,19 @@ impl MessageHandler {
                 now,
             );
 
-            // Ghost-registration guard: if the announced masternode IP is itself blacklisted
+            // Ghost-registration guard: if the announced masternode IP is itself banned
             // (e.g., permanently banned for prior attacks), don't let it re-enter the registry
             // through a relay path.  Banned nodes can gossip through legitimate peers and
-            // would otherwise bypass the per-connection blacklist check at the TCP layer.
-            if let Some(blacklist) = &context.blacklist {
+            // would otherwise bypass the per-connection banlist check at the TCP layer.
+            if let Some(banlist) = &context.banlist {
                 let bare_ip = masternode_ip.split(':').next().unwrap_or(&masternode_ip);
                 if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
-                    if let Some(reason) = blacklist.write().await.is_blacklisted(ban_ip) {
+                    if let Some(reason) = banlist.write().await.is_banned(ban_ip) {
                         tracing::debug!(
-                            "🚫 [{}] Skipping gossip registration of blacklisted masternode {} ({})",
-                            self.direction, masternode_ip, reason
+                            "🚫 [{}] Skipping gossip registration of banned masternode {} ({})",
+                            self.direction,
+                            masternode_ip,
+                            reason
                         );
                         return Ok(None);
                     }
@@ -4902,9 +4904,9 @@ impl MessageHandler {
                     // banning them in that case is exactly the bug we're fixing.
                     //
                     // Rate-limit a soft violation per (peer, outpoint) so a determined
-                    // squatter still accumulates blacklist signal slowly; legitimate-owner
+                    // squatter still accumulates banlist signal slowly; legitimate-owner
                     // reannounces every 60s no longer ratchet to a permaban within minutes.
-                    if let Some(blacklist) = &context.blacklist {
+                    if let Some(banlist) = &context.banlist {
                         let bare_ip = violation_ip.split(':').next().unwrap_or(violation_ip);
                         if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
                             static LOCKED_VIOLATION_RL: std::sync::OnceLock<
@@ -4913,7 +4915,7 @@ impl MessageHandler {
                             let rl = LOCKED_VIOLATION_RL.get_or_init(dashmap::DashMap::new);
                             let key = format!("{}:{}", bare_ip, outpoint_for_relay);
                             if should_warn_now(rl, &key, 600) {
-                                let mut bl = blacklist.write().await;
+                                let mut bl = banlist.write().await;
                                 bl.record_violation(
                                     ban_ip,
                                     &format!(
@@ -4927,10 +4929,10 @@ impl MessageHandler {
                     }
                 }
                 Err(crate::masternode_registry::RegistryError::IpCyclingRejected) => {
-                    if let Some(blacklist) = &context.blacklist {
+                    if let Some(banlist) = &context.banlist {
                         let bare_ip = masternode_ip.split(':').next().unwrap_or(&masternode_ip);
                         if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
-                            let mut bl = blacklist.write().await;
+                            let mut bl = banlist.write().await;
                             let should_disconnect = bl.record_violation(ban_ip, "IP cycling (AV3)");
                             if should_disconnect && !is_relayed {
                                 return Err(format!("DISCONNECT: IP cycling banned {}", ban_ip));
@@ -4965,11 +4967,11 @@ impl MessageHandler {
                             &outpoint_for_relay.to_string(),
                         );
                     }
-                    if let Some(blacklist) = &context.blacklist {
+                    if let Some(banlist) = &context.banlist {
                         let bare_ip = violation_ip.split(':').next().unwrap_or(violation_ip);
                         if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
                             // Not rate-limited — reward-redirect is always severe and deliberate.
-                            let mut bl = blacklist.write().await;
+                            let mut bl = banlist.write().await;
                             bl.record_violation(
                                 ban_ip,
                                 &format!(
@@ -5000,13 +5002,15 @@ impl MessageHandler {
 
             // Ghost-registration guard: banned nodes must not re-enter the registry
             // via gossip relay from legitimate peers.
-            if let Some(blacklist) = &context.blacklist {
+            if let Some(banlist) = &context.banlist {
                 let bare_ip = masternode_ip.split(':').next().unwrap_or(&masternode_ip);
                 if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
-                    if let Some(reason) = blacklist.write().await.is_blacklisted(ban_ip) {
+                    if let Some(reason) = banlist.write().await.is_banned(ban_ip) {
                         tracing::debug!(
-                            "🚫 [{}] Skipping gossip registration of blacklisted Free-tier node {} ({})",
-                            self.direction, masternode_ip, reason
+                            "🚫 [{}] Skipping gossip registration of banned Free-tier node {} ({})",
+                            self.direction,
+                            masternode_ip,
+                            reason
                         );
                         return Ok(None);
                     }
@@ -5092,10 +5096,10 @@ impl MessageHandler {
                                 .record_collateral_spoof_attempt(&masternode_ip, "free-tier-claim");
                         }
                     }
-                    if let Some(blacklist) = &context.blacklist {
+                    if let Some(banlist) = &context.banlist {
                         let bare_ip = violation_ip.split(':').next().unwrap_or(violation_ip);
                         if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
-                            let mut bl = blacklist.write().await;
+                            let mut bl = banlist.write().await;
                             let should_disconnect = if is_relayed {
                                 bl.record_violation(
                                     ban_ip,
@@ -5117,10 +5121,10 @@ impl MessageHandler {
                     }
                 }
                 Err(crate::masternode_registry::RegistryError::IpCyclingRejected) => {
-                    if let Some(blacklist) = &context.blacklist {
+                    if let Some(banlist) = &context.banlist {
                         let bare_ip = masternode_ip.split(':').next().unwrap_or(&masternode_ip);
                         if let Ok(ban_ip) = bare_ip.parse::<std::net::IpAddr>() {
-                            let mut bl = blacklist.write().await;
+                            let mut bl = banlist.write().await;
                             let should_disconnect = bl.record_violation(ban_ip, "IP cycling (AV3)");
                             if should_disconnect && !is_relayed {
                                 return Err(format!("DISCONNECT: IP cycling banned {}", ban_ip));
@@ -6095,7 +6099,7 @@ impl MessageHandler {
             // window_start) triple.  If we sent GetBlocks to this peer within
             // FORK_ALERT_RESPONSE_COOLDOWN and their last response was rejected,
             // suppress this alert.  After FORK_ALERT_BAN_THRESHOLD rejected cycles
-            // within FORK_ALERT_WINDOW, record a blacklist violation (→ eventual ban).
+            // within FORK_ALERT_WINDOW, record a banlist violation (→ eventual ban).
             {
                 let now = Instant::now();
                 let tracker = incoming_fork_alert_tracker();
@@ -6116,7 +6120,7 @@ impl MessageHandler {
                         cycles,
                         FORK_ALERT_WINDOW.as_secs()
                     );
-                    if let Some(bl) = &context.blacklist {
+                    if let Some(bl) = &context.banlist {
                         let bare = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
                         if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
                             bl.write().await.record_violation(
@@ -6678,7 +6682,7 @@ impl MessageHandler {
                         context.blockchain.clone(),
                         blocks,
                         self.peer_ip.clone(),
-                        context.blacklist.clone(),
+                        context.banlist.clone(),
                         context.peer_registry.clone(),
                         context.masternode_registry.clone(),
                     );
@@ -6859,7 +6863,7 @@ impl MessageHandler {
                         context.blockchain.clone(),
                         blocks.to_vec(),
                         self.peer_ip.clone(),
-                        context.blacklist.clone(),
+                        context.banlist.clone(),
                         context.peer_registry.clone(),
                         context.masternode_registry.clone(),
                     );
@@ -6988,10 +6992,10 @@ impl MessageHandler {
                         "🚫 [{}] Pre-launch block {} from {} rejected — 1-hour temp ban: {}",
                         self.direction, block.header.height, self.peer_ip, e
                     );
-                    if let Some(blacklist) = &context.blacklist {
+                    if let Some(banlist) = &context.banlist {
                         let bare_ip = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
                         if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
-                            blacklist.write().await.add_temp_ban(
+                            banlist.write().await.add_temp_ban(
                                 ip,
                                 std::time::Duration::from_secs(3600),
                                 &format!(

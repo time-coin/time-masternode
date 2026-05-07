@@ -956,9 +956,9 @@ pub struct BlockHeader {
 
 **Code References:**
 - `src/network/message_handler.rs` — Registry conflict path with rate limiting, violation recording, and Sybil auto-detection
-- `src/network/blacklist.rs` — `add_subnet_ban()`, `in_banned_subnet()`, `subnet_ban_count()`
-- `src/config.rs` — `blacklisted_subnets` field; `bansubnet=` parser
-- `src/network/server.rs` — Subnet ban enforcement at TCP accept; `new_with_blacklist()` subnet init loop
+- `src/network/banlist.rs` — `add_subnet_ban()`, `in_banned_subnet()`, `subnet_ban_count()`
+- `src/config.rs` — `banned_subnets` field; `bansubnet=` parser
+- `src/network/server.rs` — Subnet ban enforcement at TCP accept; `new_with_banlist()` subnet init loop
 
 ---
 
@@ -975,7 +975,7 @@ pub struct BlockHeader {
 ```
 
 **Fix Applied:**
-- ✅ **`blacklist.record_violation()` called immediately** on every pre-handshake message (in addition to AI detection)
+- ✅ **`banlist.record_violation()` called immediately** on every pre-handshake message (in addition to AI detection)
 - ✅ **Auto-banned** after 5 violations (5-minute ban); permanent after 10
 
 **Code References:**
@@ -1011,8 +1011,8 @@ pub struct BlockHeader {
 
 **Observed Behavior (live logs):**
 ```
-Peer 69.167.168.176 is blacklisted: Temporarily banned for 3416s: SEVERE: GossipEvictionStorm
-[Outbound] REJECTING message from blacklisted peer 69.167.168.176
+Peer 69.167.168.176 is banned: Temporarily banned for 3416s: SEVERE: GossipEvictionStorm
+[Outbound] REJECTING message from banned peer 69.167.168.176
 ```
 The node kept attempting to reconnect but was correctly rejected every time.
 
@@ -1020,7 +1020,7 @@ The node kept attempting to reconnect but was correctly rejected every time.
 
 **Code References:**
 - `src/ai/attack_detector.rs` — `GossipEvictionStorm` attack type
-- `src/network/server.rs` — Blacklist check at TCP accept and outbound message receipt
+- `src/network/server.rs` — Banlist check at TCP accept and outbound message receipt
 
 ---
 
@@ -1035,9 +1035,9 @@ Connection from 188.166.243.108:60880 ended: Frame too large: 2823396163 bytes (
 ```
 
 **Fix Applied:**
-- ✅ **`blacklist.record_violation()` on "Frame too large" error** — attacker is penalized: 3 oversized frames → 1-minute ban, 5 → 5-minute ban, 10 → permanent ban
+- ✅ **`banlist.record_violation()` on "Frame too large" error** — attacker is penalized: 3 oversized frames → 1-minute ban, 5 → 5-minute ban, 10 → permanent ban
 
-**Note:** In the observed instance, `188.166.243.108` is a legitimate node running an outdated binary with a serialization bug (not a malicious attacker). The fix is still correct: whitelisted IPs bypass the blacklist check, so the operator's own node will not be penalized.
+**Note:** In the observed instance, `188.166.243.108` is a legitimate node running an outdated binary with a serialization bug (not a malicious attacker). The fix is still correct: whitelisted IPs bypass the banlist check, so the operator's own node will not be penalized.
 
 **Code References:**
 - `src/network/server.rs` — `Err(e)` branch in message read loop; `record_violation()` when `e.contains("Frame too large")`
@@ -1126,20 +1126,20 @@ Connection from 188.166.243.108:60880 ended: Frame too large: 2823396163 bytes (
 ### 14.9 ✅ FIXED — PHASE3 Reconnect Loop to Banned Peers
 **Status:** **FIXED in v1.4.34** (commit `a028b52`)
 
-**Attack:** The PHASE3 outbound connection loop (`client.rs`) iterates all registered masternodes and peers every 30 seconds. The `should_skip()` closure only checked the static config `blacklisted_peers` set — it did **not** check `res.ip_blacklist`, the live `Arc<RwLock<IPBlacklist>>` that holds subnet bans applied by the AI enforcement loop. As a result, the PHASE3 loop opened full TCP + TLS handshakes to all ~15 IPs on the banned `154.217.246.0/24` subnet on every 30-second cycle, consuming tokio tasks and TLS memory:
+**Attack:** The PHASE3 outbound connection loop (`client.rs`) iterates all registered masternodes and peers every 30 seconds. The `should_skip()` closure only checked the static config `banned_peers` set — it did **not** check `res.ip_banlist`, the live `Arc<RwLock<IPBanlist>>` that holds subnet bans applied by the AI enforcement loop. As a result, the PHASE3 loop opened full TCP + TLS handshakes to all ~15 IPs on the banned `154.217.246.0/24` subnet on every 30-second cycle, consuming tokio tasks and TLS memory:
 
 ```
 [PHASE3-MN] Connected to peer: 154.217.246.34:24000
-[PHASE3-MN] REJECTING message from blacklisted peer 154.217.246.34: Subnet banned
+[PHASE3-MN] REJECTING message from banned peer 154.217.246.34: Subnet banned
 ```
 
 During the ghost connection OOM this contributed ~15 extra concurrent futures every 30 seconds.
 
 **Fix Applied:**
-- ✅ Both PHASE3-MN and PHASE3-PEER loops check `ip_blacklist.write().await.is_blacklisted()` before `mark_connecting`. Banned IPs are skipped at zero cost — no socket opened, no TLS round-trip, no tokio task spawned.
+- ✅ Both PHASE3-MN and PHASE3-PEER loops check `ip_banlist.write().await.is_banned()` before `mark_connecting`. Banned IPs are skipped at zero cost — no socket opened, no TLS round-trip, no tokio task spawned.
 
 **Code References:**
-- `src/network/client.rs` — PHASE3-MN loop (~line 438); PHASE3-PEER loop (~line 519); `ip_blacklist.write().await.is_blacklisted()` check before `mark_connecting`
+- `src/network/client.rs` — PHASE3-MN loop (~line 438); PHASE3-PEER loop (~line 519); `ip_banlist.write().await.is_banned()` check before `mark_connecting`
 
 ---
 
@@ -1365,7 +1365,7 @@ OOM prevention is retained via an overall PHASE3 reconnect concurrency cap (not 
 
 **Scenario:** An attacker sets the TLS SNI field in connection attempts to a victim node's own IP address (e.g., hex-encoded `69.167.168.176`), making log entries appear to attribute TLS violations to a friendly node. An operator observing `getbanlist` output might mistakenly believe a trusted peer is attacking the network.
 
-**Why This Is Not a Real Attack:** Ban attribution in `IPBlacklist` is always based on the real TCP source IP obtained from `TcpStream::peer_addr()` at `accept()` time — not from the TLS SNI field. An attacker can forge the SNI value but not the TCP source IP (without IP spoofing, which breaks the TCP handshake). The `getbanlist` CLI command (added in commit `a4d7daa`) allows operators to inspect actual banned IPs and verify that no friendly nodes have been incorrectly penalized.
+**Why This Is Not a Real Attack:** Ban attribution in `IPBanlist` is always based on the real TCP source IP obtained from `TcpStream::peer_addr()` at `accept()` time — not from the TLS SNI field. An attacker can forge the SNI value but not the TCP source IP (without IP spoofing, which breaks the TCP handshake). The `getbanlist` CLI command (added in commit `a4d7daa`) allows operators to inspect actual banned IPs and verify that no friendly nodes have been incorrectly penalized.
 
 **Code References:**
 - `src/network/server.rs` — `peer_addr()` from `accept()` used for all violation attribution
@@ -1451,7 +1451,7 @@ OOM prevention is retained via an overall PHASE3 reconnect concurrency cap (not 
 
 ---
 
-### 15.15 ✅ FIXED — Reputation Poisoning / Blacklist Manipulation (AV36)
+### 15.15 ✅ FIXED — Reputation Poisoning / Banlist Manipulation (AV36)
 **Status:** **FIXED**
 **Severity:** High — targeted banning of honest nodes; can silence legitimate block producers
 
@@ -1757,7 +1757,7 @@ Applied at all four enforcement points:
 **Status:** **FIXED in v1.5.x** (April 20, 2026)
 **Severity:** Critical — 4 bytes of TCP data trigger a multi-GB OOM attempt
 
-**Attack:** A peer sends a TCP frame with a 4-byte length header claiming a body of `4,083,387,062 bytes` (~3.8 GB), observed twice from `64.91.224.76` within the same 10-second window (April 20, 2026). Only 4 bytes need to be transmitted — the node reads the length prefix, attempts to allocate the buffer, and is killed by the OS OOM killer or panics. The existing 8 MB frame size cap in `wire.rs` correctly disconnects the peer, and the blacklist recorded a violation — but the AI had no record, so it could not correlate repeated attempts or escalate to a permanent ban.
+**Attack:** A peer sends a TCP frame with a 4-byte length header claiming a body of `4,083,387,062 bytes` (~3.8 GB), observed twice from `64.91.224.76` within the same 10-second window (April 20, 2026). Only 4 bytes need to be transmitted — the node reads the length prefix, attempts to allocate the buffer, and is killed by the OS OOM killer or panics. The existing 8 MB frame size cap in `wire.rs` correctly disconnects the peer, and the banlist recorded a violation — but the AI had no record, so it could not correlate repeated attempts or escalate to a permanent ban.
 
 **Observed (live log, April 20, 2026):**
 ```
@@ -1765,11 +1765,11 @@ Connection from 64.91.224.76:36020 ended: Frame too large: 4083387062 bytes (max
 Connection from 64.91.224.76:36048 ended: Frame too large: 4083387062 bytes (max: 8388608)
 ```
 
-**Root Cause:** The `is_large_frame && clearly_malicious` branch in `server.rs` called `blacklist.record_violation()` but did not call any AI method. A single peer sending the same frame bomb twice (identical 4083387062-byte header) had no AI visibility, so the detector could not escalate to `BlockPeer`.
+**Root Cause:** The `is_large_frame && clearly_malicious` branch in `server.rs` called `banlist.record_violation()` but did not call any AI method. A single peer sending the same frame bomb twice (identical 4083387062-byte header) had no AI visibility, so the detector could not escalate to `BlockPeer`.
 
 **Fix Applied:**
 - ✅ **`record_frame_bomb()` method** added to `AttackDetector` with per-IP sliding window: 1st frame → `RateLimitPeer` (gentle, in case IP is shared); 2nd frame within 120s → `BlockPeer` (clearly deliberate repeat)
-- ✅ **Wired after `blacklist.record_violation()`** in the `is_large_frame && clearly_malicious` branch in `server.rs`
+- ✅ **Wired after `banlist.record_violation()`** in the `is_large_frame && clearly_malicious` branch in `server.rs`
 
 **Code References:**
 - `src/ai/attack_detector.rs` — `FrameBomb` attack type; `record_frame_bomb()`; `frame_bomb_times` sliding window
@@ -1835,7 +1835,7 @@ Connection from 64.91.224.76:36048 ended: Frame too large: 4083387062 bytes (max
 | AV33 | Producer pool self-award | High | ✅ Fixed |
 | AV34 | Targeted disconnect / reward theft | Medium | ✅ Fixed |
 | AV35 | Free-tier reward monopolisation | High | ✅ Fixed |
-| AV36 | Reputation poisoning / blacklist manipulation | High | ✅ Fixed |
+| AV36 | Reputation poisoning / banlist manipulation | High | ✅ Fixed |
 | AV37 | Registration spam / slot ID exhaustion | High | ✅ Fixed (height-gated, fork height 200) |
 | AV40 | `tx_finalized` rate-limit saturation without peer escalation | Medium | ✅ Fixed |
 | AV41 | Ghost special_data transaction mempool flood (incl. forged-sig phase) | High | ✅ Fixed |
@@ -1890,7 +1890,7 @@ Connection from 64.91.224.76:36048 ended: Frame too large: 4083387062 bytes (max
 - ✅ **Per-connection rate limiter** (commit `22e056a`) — `handle_peer()` now creates a local `RateLimiter::new()` that shadows the shared parameter; each peer's rate checks are fully independent with zero cross-peer lock contention
 - ✅ **Pre-channel message gate** (commit `22e056a`) — TLS and plaintext I/O bridge tasks count raw messages per second before forwarding to the processing channel; soft limit 200/s (silent drop), hard limit 500/s (error → `record_violation()` + `record_message_flood()` → disconnect)
 - ✅ **Ping flood escalation** (commit `22e056a`) — `ping_excess_streak` counter escalates 3 consecutive rate-limit exceedances to `record_violation()` + `record_ping_flood()`; peer is disconnected on ban threshold
-- ✅ **`PingFlood` / `MessageFlood` in `AttackDetector`** (commit `22e056a`) — new `AttackType` variants with sliding-window detection methods; feed the 30s enforcement loop → `IPBlacklist` auto-ban
+- ✅ **`PingFlood` / `MessageFlood` in `AttackDetector`** (commit `22e056a`) — new `AttackType` variants with sliding-window detection methods; feed the 30s enforcement loop → `IPBanlist` auto-ban
 
 **Code References:**
 - `src/blockchain.rs` — `fork_resolution_blocked_until`, `MIN_PEERS_FINALITY_OVERRIDE`, `longer_chain_escape`
@@ -2015,7 +2015,7 @@ Connection from 64.91.224.76:36048 ended: Frame too large: 4083387062 bytes (max
 | **General Message Signing** | ⚠️ Not Enforced | 🟡 Medium | SignedMessage exists but unused for non-votes |
 | **Reconnection Storm → Tokio Starvation** | ✅ Fixed | 🟢 Low | Per-connection rate-limiter, pre-channel gate, ping flood escalation (22e056a) |
 | **Watchdog False-Restart via RPC Timeout** | ✅ Fixed | 🟢 Low | `daemon_recently_active()` check added; watchdog v1.1 (Apr 2026) |
-| **Ping Flood (no escalation)** | ✅ Fixed | 🟢 Low | `ping_excess_streak` → `record_ping_flood()` → blacklist (22e056a) |
+| **Ping Flood (no escalation)** | ✅ Fixed | 🟢 Low | `ping_excess_streak` → `record_ping_flood()` → banlist (22e056a) |
 | **Pre-channel Message Flood** | ✅ Fixed | 🟢 Low | Soft 200/s + hard 500/s gate in TLS and plaintext I/O bridge tasks (22e056a) |
 | **Inbound Connection Flood (AV50)** | ✅ Fixed | 🟢 Low | `record_connection_flood()` now distinguishes single-IP churn from coordinated floods: per-IP `RateLimitPeer`/`BlockPeer`; subnet ban only after ≥10 rejections/60s from ≥3 IPs |
 | **Frame Bomb (AV51)** | ✅ Fixed | 🟢 Low | `record_frame_bomb()` → `RateLimitPeer` on first; `BlockPeer` on second within 120s (Apr 2026) |
@@ -2202,7 +2202,7 @@ touch the masternode registry.
 
 **Evidence from logs:**
 ```
-WARN ⚠️  47.82.240.104:34204 sent message before handshake - closing connection (not blacklisting)
+WARN ⚠️  47.82.240.104:34204 sent message before handshake - closing connection (not banning)
 INFO 🔌 Peer 47.82.240.104:34204 disconnected
 ```
 
@@ -2382,7 +2382,7 @@ With unique TXIDs on every injection, the bloom-filter dedup never fires, and th
 **Fix:**
 - **Structural guard in `process_transaction()`**: Rejects any TX where `inputs.is_empty() && special_data.is_none()` OR `outputs.is_empty() && special_data.is_none()`. Masternode TXs are exempt because they always carry `special_data`.
 - **Structural guard in `TransactionFinalized` handler**: Same check applied on arrival of `TransactionFinalized` messages, before any pool operation (addresses AV38+AV39 combined attack path).
-- **Relay-safe error handling in `TransactionBroadcast` handler**: Null TX errors (`"no inputs"` / `"no outputs"`) silently call `record_null_tx_flood()` without recording a blacklist violation. Only ≥ 3 null TXs / 60 s from the same peer triggers `BlockPeer`.
+- **Relay-safe error handling in `TransactionBroadcast` handler**: Null TX errors (`"no inputs"` / `"no outputs"`) silently call `record_null_tx_flood()` without recording a banlist violation. Only ≥ 3 null TXs / 60 s from the same peer triggers `BlockPeer`.
 - **Fork-induction prevention**: By dropping null TXs before pool admission, all nodes maintain identical finalized TX sets, preventing the chain-split side effect.
 
 **Code References:**

@@ -1320,7 +1320,7 @@ let canonical = consensus.resolve_timeproof_fork(txid)?;
 
 - ❌ Prevent double-spends (UTXO locking does that)
 - ❌ Handle consensus forks (TimeGuard fallback does that)
-- ❌ Blacklist validators (AI anomaly detector does that)
+- ❌ Banlist validators (AI anomaly detector does that)
 - ❌ Require network coordination (works unilaterally)
 
 ### Future Enhancements

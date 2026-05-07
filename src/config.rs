@@ -93,13 +93,13 @@ pub struct NetworkConfig {
     pub enable_upnp: bool,
     pub enable_peer_discovery: bool,
     pub bootstrap_peers: Vec<String>,
-    /// IPs to permanently blacklist (will not connect to or accept connections from)
+    /// IPs to permanently banlist (will not connect to or accept connections from)
     #[serde(default)]
-    pub blacklisted_peers: Vec<String>,
+    pub banned_peers: Vec<String>,
     /// IPv4 subnets to ban in CIDR notation, e.g. "154.217.246.0/24"
     /// All IPs in the subnet are rejected at the TCP level. Key in time.conf: bansubnet=
     #[serde(default)]
-    pub blacklisted_subnets: Vec<String>,
+    pub banned_subnets: Vec<String>,
     /// IPs to whitelist (exempt from rate limiting and bans).
     /// Populated at runtime from the official DNS/peer discovery feed only.
     /// Not user-configurable — any `whitelist=` entries in time.conf are ignored.
@@ -577,8 +577,8 @@ impl Config {
                 enable_upnp: false,
                 enable_peer_discovery: true,
                 bootstrap_peers: vec![],
-                blacklisted_peers: vec![],
-                blacklisted_subnets: vec![],
+                banned_peers: vec![],
+                banned_subnets: vec![],
                 whitelisted_peers: vec![],
                 whitelist_only: false,
             },
@@ -664,7 +664,7 @@ impl Config {
             let saved_listen = config.network.listen_address.clone();
             let saved_external = config.network.external_address.clone();
             let saved_peers = config.network.bootstrap_peers.clone();
-            let saved_blacklist = config.network.blacklisted_peers.clone();
+            let saved_banlist = config.network.banned_peers.clone();
             let saved_rpc_enabled = config.rpc.enabled;
             let saved_rpc_addr = config.rpc.listen_address.clone();
             let saved_rpc_origins = config.rpc.allow_origins.clone();
@@ -680,7 +680,7 @@ impl Config {
             config.network.listen_address = saved_listen;
             config.network.external_address = saved_external;
             config.network.bootstrap_peers = saved_peers;
-            config.network.blacklisted_peers = saved_blacklist;
+            config.network.banned_peers = saved_banlist;
             config.rpc.enabled = saved_rpc_enabled;
             config.rpc.listen_address = saved_rpc_addr;
             config.rpc.allow_origins = saved_rpc_origins;
@@ -726,7 +726,7 @@ impl Config {
         self.network.max_peers = 250;
         self.network.enable_upnp = false;
         self.network.enable_peer_discovery = true;
-        // Don't clear blacklist/whitelist — those may be set intentionally
+        // Don't clear banlist/whitelist — those may be set intentionally
 
         // Storage — backend and performance are not user-tunable
         self.storage.backend = "sled".to_string();
@@ -902,10 +902,10 @@ impl Config {
                 config.network.bootstrap_peers = v.clone();
             }
             if let Some(v) = entries.get("ban") {
-                config.network.blacklisted_peers = v.clone();
+                config.network.banned_peers = v.clone();
             }
             if let Some(v) = entries.get("bansubnet") {
-                config.network.blacklisted_subnets = v.clone();
+                config.network.banned_subnets = v.clone();
             }
             if let Some(v) = entries.get("whitelistonly") {
                 config.network.whitelist_only = v.last().is_some_and(|s| s == "1");

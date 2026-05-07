@@ -284,7 +284,7 @@ time-masternode/
 │   │   ├── peer_discovery.rs           # Bootstrap peer service
 │   │   ├── peer_scoring.rs             # Peer reputation system
 │   │   ├── partition_detector.rs       # Network partition detection
-│   │   ├── blacklist.rs                # IP blacklisting
+│   │   ├── banlist.rs                # IP banning
 │   │   ├── rate_limiter.rs             # Rate limiting
 │   │   ├── dedup_filter.rs             # Message deduplication
 │   │   ├── block_cache.rs              # Block propagation cache
@@ -487,7 +487,7 @@ for the full configuration reference.
 - ✅ TCP P2P transport with Ed25519 signing
 - ✅ Peer discovery and gossip protocol
 - ✅ Connection management (DashMap)
-- ✅ Rate limiting and blacklisting
+- ✅ Rate limiting and banning
 - ✅ Message deduplication
 - ✅ State synchronization
 

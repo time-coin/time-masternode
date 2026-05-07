@@ -6,7 +6,7 @@
 
 use crate::consensus::ConsensusEngine;
 use crate::network::attack_log::AttackLog;
-use crate::network::blacklist::IPBlacklist;
+use crate::network::banlist::IPBanlist;
 use crate::network::block_cache::BlockCache;
 use crate::network::ddos_guard::DDoSGuard;
 use crate::network::dedup_filter::DeduplicationFilter;
@@ -55,7 +55,7 @@ pub struct NetworkServer {
     pub utxo_manager: Arc<UTXOStateManager>,
     pub consensus: Arc<ConsensusEngine>,
     pub rate_limiter: Arc<RwLock<RateLimiter>>,
-    pub blacklist: Arc<RwLock<IPBlacklist>>,
+    pub banlist: Arc<RwLock<IPBanlist>>,
     pub masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
     pub blockchain: Arc<crate::blockchain::Blockchain>,
     pub peer_manager: Arc<crate::peer_manager::PeerManager>,
@@ -99,7 +99,7 @@ impl NetworkServer {
         local_ip: Option<String>,
         network_type: crate::network_type::NetworkType,
     ) -> Result<Self, std::io::Error> {
-        Self::new_with_blacklist(
+        Self::new_with_banlist(
             bind_addr,
             utxo_manager,
             consensus,
@@ -120,7 +120,7 @@ impl NetworkServer {
 
     #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)] // Used by binary (main.rs)
-    pub async fn new_with_blacklist(
+    pub async fn new_with_banlist(
         bind_addr: &str,
         utxo_manager: Arc<UTXOStateManager>,
         consensus: Arc<ConsensusEngine>,
@@ -131,34 +131,34 @@ impl NetworkServer {
         peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
         peer_state: Arc<PeerStateManager>,
         local_ip: Option<String>,
-        blacklisted_peers: Vec<String>,
-        blacklisted_subnets: Vec<String>,
+        banned_peers: Vec<String>,
+        banned_subnets: Vec<String>,
         whitelisted_peers: Vec<String>,
         network_type: crate::network_type::NetworkType,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(bind_addr).await?;
         let (tx, _) = broadcast::channel(1024);
 
-        // Initialize blacklist with configured IPs
-        let mut blacklist = IPBlacklist::new();
-        for peer in &blacklisted_peers {
+        // Initialize banlist with configured IPs
+        let mut banlist = IPBanlist::new();
+        for peer in &banned_peers {
             if let Ok(ip) = peer.parse::<std::net::IpAddr>() {
-                blacklist.add_permanent_ban(ip, "Configured in blacklisted_peers");
-                tracing::info!("🚫 Blacklisted peer from config: {}", ip);
+                banlist.add_permanent_ban(ip, "Configured in banned_peers");
+                tracing::info!("🚫 Banned peer from config: {}", ip);
             } else {
-                tracing::warn!("⚠️  Invalid IP in blacklisted_peers: {}", peer);
+                tracing::warn!("⚠️  Invalid IP in banned_peers: {}", peer);
             }
         }
 
         // Initialize subnet bans from config
-        for subnet in &blacklisted_subnets {
-            blacklist.add_subnet_ban(subnet, "Configured in bansubnet");
+        for subnet in &banned_subnets {
+            banlist.add_subnet_ban(subnet, "Configured in bansubnet");
         }
 
         // Initialize whitelist with configured IPs (BEFORE server starts accepting connections)
         for peer in &whitelisted_peers {
             if let Ok(ip) = peer.parse::<std::net::IpAddr>() {
-                blacklist.add_to_whitelist(ip, "Pre-configured whitelist");
+                banlist.add_to_whitelist(ip, "Pre-configured whitelist");
                 tracing::debug!("✅ Whitelisted peer before server start: {}", ip);
             } else {
                 tracing::warn!("⚠️  Invalid IP in whitelisted_peers: {}", peer);
@@ -173,7 +173,7 @@ impl NetworkServer {
             utxo_manager,
             consensus,
             rate_limiter: Arc::new(RwLock::new(RateLimiter::new())),
-            blacklist: Arc::new(RwLock::new(blacklist)),
+            banlist: Arc::new(RwLock::new(banlist)),
             masternode_registry: masternode_registry.clone(),
             blockchain,
             peer_manager,
@@ -208,24 +208,24 @@ impl NetworkServer {
         self.attack_log = Some(log);
     }
 
-    /// Attach a sled database for blacklist persistence across restarts.
+    /// Attach a sled database for banlist persistence across restarts.
     ///
     /// Loads previously banned IPs/subnets/violations from sled and enables
-    /// write-through on all future mutations.  Call once after `new_with_blacklist`.
+    /// write-through on all future mutations.  Call once after `new_with_banlist`.
     ///
     /// After reloading persisted subnet bans, this also runs an **eviction sweep**:
     /// any Free-tier masternodes from a previously-banned /24 that somehow re-registered
     /// before the ban was enforced are immediately evicted and their TCP connections kicked.
-    pub async fn enable_blacklist_persistence(&self, db: &sled::Db) {
-        self.blacklist.write().await.attach_storage(db);
-        tracing::info!("🔒 Blacklist persistence enabled — bans will survive restarts");
+    pub async fn enable_banlist_persistence(&self, db: &sled::Db) {
+        self.banlist.write().await.attach_storage(db);
+        tracing::info!("🔒 Banlist persistence enabled — bans will survive restarts");
         // After loading persisted bans, ensure we never ban our own IP.
         // This clears any accidental self-ban that accumulated from self-connection
         // TLS failures (the node briefly connecting to its own IP via the peer list).
         if let Some(ref own_ip) = self.local_ip {
             if let Ok(ip) = own_ip.parse::<IpAddr>() {
-                let mut bl = self.blacklist.write().await;
-                if bl.is_blacklisted(ip).is_some() {
+                let mut bl = self.banlist.write().await;
+                if bl.is_banned(ip).is_some() {
                     bl.unban(ip);
                     tracing::info!("🏠 Cleared self-ban for local IP {} on startup", own_ip);
                 }
@@ -242,7 +242,7 @@ impl NetworkServer {
         //       yet in memory.
         // We do NOT evict paid-tier nodes — they have on-chain collateral, and a subnet ban
         // should never be used as a mechanism to remove a legitimately funded node.
-        let banned_subnets = self.blacklist.read().await.list_banned_subnets();
+        let banned_subnets = self.banlist.read().await.list_banned_subnets();
         if !banned_subnets.is_empty() {
             tracing::info!(
                 "🔒 Running startup eviction sweep for {} persisted banned subnet(s)",
@@ -286,22 +286,22 @@ impl NetworkServer {
 
     #[allow(dead_code)] // Used by binary (main.rs)
     pub async fn run(&mut self) -> Result<(), std::io::Error> {
-        // Spawn cleanup task for blacklist + DDoS subnet rate buckets + periodic DDoS stats log
-        let blacklist_cleanup = self.blacklist.clone();
+        // Spawn cleanup task for banlist + DDoS subnet rate buckets + periodic DDoS stats log
+        let banlist_cleanup = self.banlist.clone();
         let ddos_cleanup = self.ddos_guard.clone();
-        let stats_blacklist = self.blacklist.clone();
+        let stats_banlist = self.banlist.clone();
         let stats_conn_mgr = self.connection_manager.clone();
         let stats_rate_limiter = self.rate_limiter.clone();
         let stats_subnet_rates = self.ddos_guard.subnet_rates.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(300)).await; // Every 5 minutes
-                blacklist_cleanup.write().await.cleanup();
+                banlist_cleanup.write().await.cleanup();
                 ddos_cleanup.cleanup_subnet_rates();
 
                 // DDoS health snapshot
-                let (perm, temp, subnets, violations) = stats_blacklist.read().await.list_bans();
-                let whitelist_count = stats_blacklist.read().await.whitelist_count();
+                let (perm, temp, subnets, violations) = stats_banlist.read().await.list_bans();
+                let whitelist_count = stats_banlist.read().await.whitelist_count();
                 let active = stats_conn_mgr.connected_count();
                 let inbound = stats_conn_mgr.inbound_count();
                 let rl_entries = stats_rate_limiter.read().await.entry_count();
@@ -338,7 +338,7 @@ impl NetworkServer {
         // and falls back to a 30-second poll so transient misses are still caught.
         if let Some(ai) = &self.ai_system {
             let enforce_ai = ai.clone();
-            let enforce_blacklist = self.blacklist.clone();
+            let enforce_banlist = self.banlist.clone();
             let enforce_registry = self.peer_registry.clone();
             let enforce_mn_registry = self.masternode_registry.clone();
             let enforce_attack_log = self.attack_log.clone();
@@ -369,19 +369,19 @@ impl NetworkServer {
                         log.log_all(&attacks).await;
                     }
 
-                    // Collect peers to kick *before* dropping the blacklist lock.
+                    // Collect peers to kick *before* dropping the banlist lock.
                     // kick_peer() is async and must not be called while holding the lock.
                     let mut to_kick: Vec<String> = Vec::new();
                     // Collect subnet prefixes (3-octet) that need registry eviction.
                     let mut to_evict_subnets: Vec<String> = Vec::new();
 
                     {
-                        let mut blacklist = enforce_blacklist.write().await;
+                        let mut banlist = enforce_banlist.write().await;
                         for attack in &attacks {
                             match &attack.recommended_action {
                                 crate::ai::MitigationAction::BlockPeer(ip_str) => {
                                     if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
-                                        if blacklist.is_whitelisted(ip) {
+                                        if banlist.is_whitelisted(ip) {
                                             // Whitelisted peers are operator-trusted — never
                                             // disconnect them regardless of AI confidence.
                                             // They may be relaying attacker traffic innocently;
@@ -391,7 +391,7 @@ impl NetworkServer {
                                                 ip, attack.attack_type
                                             );
                                         } else {
-                                            let should_disconnect = blacklist.record_violation(
+                                            let should_disconnect = banlist.record_violation(
                                                 ip,
                                                 &format!("{:?}", attack.attack_type),
                                             );
@@ -409,7 +409,7 @@ impl NetworkServer {
                                 }
                                 crate::ai::MitigationAction::RateLimitPeer(ip_str) => {
                                     if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
-                                        if blacklist.is_whitelisted(ip) {
+                                        if banlist.is_whitelisted(ip) {
                                             // Never penalize whitelisted peers for rate-limit
                                             // violations — they may be relaying legitimately.
                                             tracing::warn!(
@@ -418,7 +418,7 @@ impl NetworkServer {
                                             );
                                         } else {
                                             // Rate limit = record as violation (escalates automatically)
-                                            let should_disconnect = blacklist.record_violation(
+                                            let should_disconnect = banlist.record_violation(
                                                 ip,
                                                 &format!("Rate limited: {:?}", attack.attack_type),
                                             );
@@ -442,7 +442,7 @@ impl NetworkServer {
                                     );
                                 }
                                 crate::ai::MitigationAction::BanSubnet(subnet_str) => {
-                                    blacklist.add_subnet_ban(
+                                    banlist.add_subnet_ban(
                                         subnet_str,
                                         &format!("AI-detected: {:?}", attack.attack_type),
                                     );
@@ -473,7 +473,7 @@ impl NetworkServer {
                                 _ => {} // Monitor, EmergencySync, HaltProduction — log only
                             }
                         }
-                    } // blacklist write lock released here
+                    } // banlist write lock released here
 
                     // Evict Free-tier masternodes from banned subnets and kick their connections.
                     for subnet_prefix in &to_evict_subnets {
@@ -506,7 +506,7 @@ impl NetworkServer {
         {
             let audit_registry = self.masternode_registry.clone();
             let audit_utxo = self.utxo_manager.clone();
-            let audit_blacklist = self.blacklist.clone();
+            let audit_banlist = self.banlist.clone();
             let audit_peer_registry = self.peer_registry.clone();
             tokio::spawn(async move {
                 // Stagger the first run by 2 minutes so UTXOs from recently-synced
@@ -514,13 +514,13 @@ impl NetworkServer {
                 tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
                 loop {
                     // Collect the local node's IP and the whitelist so the registry
-                    // can exempt them without importing the blacklist module.
+                    // can exempt them without importing the banlist module.
                     let local_ip = audit_registry
                         .get_local_masternode()
                         .await
                         .map(|mn| mn.masternode.address.clone())
                         .unwrap_or_default();
-                    let whitelist_ips = audit_blacklist.read().await.whitelist_ips();
+                    let whitelist_ips = audit_banlist.read().await.whitelist_ips();
 
                     let evictions = audit_registry
                         .audit_squatters(&audit_utxo, &local_ip, &whitelist_ips)
@@ -530,7 +530,7 @@ impl NetworkServer {
                     for eviction in &evictions {
                         let bare = eviction.ip.split(':').next().unwrap_or(&eviction.ip);
                         if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-                            audit_blacklist.write().await.add_temp_ban(
+                            audit_banlist.write().await.add_temp_ban(
                                 ip,
                                 eviction.ban_duration,
                                 &eviction.reason,
@@ -593,11 +593,11 @@ impl NetworkServer {
             let ip: IpAddr = addr.ip();
             let ip_str = ip.to_string();
 
-            // Check blacklist BEFORE accepting connection
+            // Check banlist BEFORE accepting connection
             {
-                let mut blacklist = self.blacklist.write().await;
-                if let Some(reason) = blacklist.is_blacklisted(ip) {
-                    tracing::debug!("🚫 Rejected blacklisted IP {}: {}", ip, reason);
+                let mut banlist = self.banlist.write().await;
+                if let Some(reason) = banlist.is_banned(ip) {
+                    tracing::debug!("🚫 Rejected banned IP {}: {}", ip, reason);
                     drop(stream); // Close immediately
                     continue;
                 }
@@ -605,8 +605,8 @@ impl NetworkServer {
 
             // Phase 3: Check if this IP is whitelisted (trusted masternode)
             let is_whitelisted = {
-                let blacklist = self.blacklist.read().await;
-                blacklist.is_whitelisted(ip)
+                let banlist = self.banlist.read().await;
+                banlist.is_whitelisted(ip)
             };
 
             // DDoS guard: per-/24 subnet rate limit (non-whitelisted only)
@@ -654,7 +654,7 @@ impl NetworkServer {
             let utxo_mgr = self.utxo_manager.clone();
             let consensus = self.consensus.clone();
             let rate_limiter = self.rate_limiter.clone();
-            let blacklist = self.blacklist.clone();
+            let banlist = self.banlist.clone();
             let mn_registry = self.masternode_registry.clone();
             let blockchain = self.blockchain.clone();
             let peer_mgr = self.peer_manager.clone();
@@ -682,7 +682,7 @@ impl NetworkServer {
                     utxo_mgr,
                     consensus,
                     rate_limiter,
-                    blacklist,
+                    banlist,
                     mn_registry,
                     blockchain,
                     peer_mgr,
@@ -749,7 +749,7 @@ async fn handle_peer(
     utxo_mgr: Arc<UTXOStateManager>,
     consensus: Arc<ConsensusEngine>,
     _rate_limiter: Arc<RwLock<RateLimiter>>,
-    blacklist: Arc<RwLock<IPBlacklist>>,
+    banlist: Arc<RwLock<IPBanlist>>,
     masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
     blockchain: Arc<crate::blockchain::Blockchain>,
     peer_manager: Arc<crate::peer_manager::PeerManager>,
@@ -820,7 +820,7 @@ async fn handle_peer(
                                 ip, sni_desc
                             );
                         } else {
-                            blacklist
+                            banlist
                                 .write()
                                 .await
                                 .record_violation(ip, &format!("Invalid TLS SNI: {}", sni_desc));
@@ -929,13 +929,13 @@ async fn handle_peer(
                     // TLS mode mismatches are operator config errors, not attacks — using
                     // the standard record_violation path would permanently ban legitimate
                     // nodes after only 10 retries.
-                    blacklist
+                    banlist
                         .write()
                         .await
                         .record_tls_violation(ip, &format!("TLS handshake failed: {}", e));
                     // Also feed into the AI detector — it tracks distributed TLS floods
                     // from multiple IPs in the same /24 that each stay below the per-IP
-                    // blacklist threshold (AV13 subnet variant).
+                    // banlist threshold (AV13 subnet variant).
                     if let Some(ref ai) = ai_system {
                         ai.attack_detector.record_tls_failure(&ip_str);
                     }
@@ -1055,7 +1055,7 @@ async fn handle_peer(
     let mut rl_drop_count: u32 = 0;
     let mut rl_last_log = std::time::Instant::now() - std::time::Duration::from_secs(61);
     // Per-connection counter for invalid transactions. A single invalid tx is often a
-    // legitimate race condition (stale UTXO, double-spend retry). Only record a blacklist
+    // legitimate race condition (stale UTXO, double-spend retry). Only record a banlist
     // violation once a peer has sent 3 invalid transactions on the same connection.
     let mut invalid_tx_count: u32 = 0;
 
@@ -1126,9 +1126,9 @@ async fn handle_peer(
                                 // after reading a multi-GB length header the stream state is lost
                                 // and there is no way to find the next valid frame boundary.
                                 // The node will reconnect immediately (no ban applied).
-                                blacklist.write().await.record_frame_bomb_violation(ip, &e);
+                                banlist.write().await.record_frame_bomb_violation(ip, &e);
                             } else {
-                                blacklist.write().await.record_violation(
+                                banlist.write().await.record_violation(
                                     ip,
                                     &format!("Oversized frame header: {}", e),
                                 );
@@ -1148,7 +1148,7 @@ async fn handle_peer(
                             } else if !handshake_done {
                                 // Raw flood before any handshake — likely an attacker.
                                 tracing::warn!("🌊 Pre-handshake flood from {} — recording violation", peer.addr);
-                                blacklist.write().await.record_violation(ip, "Message flood: pre-handshake flood");
+                                banlist.write().await.record_violation(ip, "Message flood: pre-handshake flood");
                                 if let Some(ai) = &ai_system {
                                     ai.attack_detector.record_message_flood(&ip_str);
                                 }
@@ -1175,7 +1175,7 @@ async fn handle_peer(
                                                 );
                                             } else {
                                                 tracing::warn!("🚫 Rejecting {} - invalid magic bytes: {:?}", peer.addr, magic);
-                                                blacklist.write().await.record_violation(
+                                                banlist.write().await.record_violation(
                                                     ip,
                                                     &format!("Invalid magic bytes: {:?}", magic)
                                                 );
@@ -1257,20 +1257,28 @@ async fn handle_peer(
                                             if let Ok(frame) = crate::network::wire::serialize_frame(&upgrade_msg) {
                                                 let _ = writer_tx.send(frame);
                                             }
-                                            // Old software is not an attack — do NOT record a violation.
-                                            // Recording violations here would permanently ban legitimate users
-                                            // who just haven't updated yet. They will be rejected on every
-                                            // reconnect until they upgrade; no ban needed.
-                                            let _ = masternode_registry
-                                                .suspend_from_consensus(
-                                                    &ip_str,
-                                                    &format!(
-                                                        "Obsolete software: commit {} below minimum {}",
-                                                        commit_count,
-                                                        crate::constants::MIN_PEER_COMMIT_VERSION
-                                                    ),
-                                                )
-                                                .await;
+                                            // Old software is not an attack — do NOT record a violation
+                                            // (that escalates to a permanent ban). Instead, add a short
+                                            // temp ban so the peer stops hammering us every ~30 s while
+                                            // they haven't upgraded yet.  PHASE3 also checks the banlist
+                                            // before attempting outbound reconnects, so this one call
+                                            // suppresses both the inbound spam and outbound reconnect
+                                            // noise until the ban expires and they can try again.
+                                            {
+                                                let reason = format!(
+                                                    "Obsolete software: commit {} below minimum {}",
+                                                    commit_count,
+                                                    crate::constants::MIN_PEER_COMMIT_VERSION
+                                                );
+                                                banlist.write().await.add_temp_ban(
+                                                    ip,
+                                                    Duration::from_secs(4 * 3600),
+                                                    &reason,
+                                                );
+                                                let _ = masternode_registry
+                                                    .suspend_from_consensus(&ip_str, &reason)
+                                                    .await;
+                                            }
                                             break;
                                         }
                                         if *commit_count < crate::constants::MIN_PEER_COMMIT_VERSION && is_whitelisted {
@@ -1486,11 +1494,11 @@ async fn handle_peer(
                                         if let Some(ref ai) = ai_system {
                                             ai.attack_detector.record_pre_handshake_violation(&ip_str);
                                         }
-                                        // Record a direct blacklist violation per occurrence so
+                                        // Record a direct banlist violation per occurrence so
                                         // persistent pre-handshake probers accumulate bans even
                                         // if they disconnect before the 30s AI enforcement loop.
                                         {
-                                            let mut bl = blacklist.write().await;
+                                            let mut bl = banlist.write().await;
                                             bl.record_violation(ip, "Sent message before completing handshake");
                                         }
                                         break;
@@ -1500,7 +1508,7 @@ async fn handle_peer(
 
                             tracing::debug!("📦 Parsed message type from {}: {:?}", peer.addr, std::mem::discriminant(&msg));
 
-                            // Phase 2.2: Rate limiting and blacklist enforcement
+                            // Phase 2.2: Rate limiting and banlist enforcement
                             //
                             // rl_drop_count / rl_last_log are declared outside this loop so
                             // they accumulate across messages on the same connection.
@@ -1509,7 +1517,7 @@ async fn handle_peer(
                             macro_rules! check_rate_limit {
                                 ($msg_type:expr) => {{
                                     let mut limiter = rate_limiter.write().await;
-                                    let mut blacklist_guard = blacklist.write().await;
+                                    let mut banlist_guard = banlist.write().await;
 
                                     if !limiter.check($msg_type, &ip_str) {
                                         // Log at first occurrence in each 60s window.
@@ -1556,11 +1564,11 @@ async fn handle_peer(
                                         let should_ban = if is_sync_safe {
                                             false // Never ban for sync/discovery/liveness bursts
                                         } else if rl_drop_count >= 10 && !is_whitelisted {
-                                            blacklist_guard.record_severe_violation(ip,
+                                            banlist_guard.record_severe_violation(ip,
                                                 &format!("Mass flood: {} ({}+ msgs dropped)", $msg_type, rl_drop_count))
                                         } else if rl_drop_count >= 5 && !is_whitelisted {
                                             // Sustained rate-limiting of an abuse-prone message type.
-                                            blacklist_guard.record_violation(ip,
+                                            banlist_guard.record_violation(ip,
                                                 &format!("Sustained rate-limit flood: {} ({} msgs dropped)", $msg_type, rl_drop_count))
                                         } else {
                                             false
@@ -1571,7 +1579,7 @@ async fn handle_peer(
                                                 "🚫 Disconnecting {} due to rate limit flood ({} dropped)",
                                                 peer.addr, rl_drop_count
                                             );
-                                            drop(blacklist_guard);
+                                            drop(banlist_guard);
                                             drop(limiter);
                                             peer_registry.kick_peer(&ip_str).await;
                                             break; // Exit connection loop
@@ -1580,7 +1588,7 @@ async fn handle_peer(
                                     }
 
                                     drop(limiter);
-                                    drop(blacklist_guard);
+                                    drop(banlist_guard);
                                 }};
                             }
 
@@ -1782,9 +1790,9 @@ async fn handle_peer(
                                                 // invalid transactions indicates abuse.
                                                 invalid_tx_count += 1;
                                                 if invalid_tx_count >= 3 {
-                                                    let mut blacklist_guard = blacklist.write().await;
-                                                    let should_ban = blacklist_guard.record_violation(ip, "Repeated invalid transactions");
-                                                    drop(blacklist_guard);
+                                                    let mut banlist_guard = banlist.write().await;
+                                                    let should_ban = banlist_guard.record_violation(ip, "Repeated invalid transactions");
+                                                    drop(banlist_guard);
                                                     if should_ban {
                                                         tracing::warn!("🚫 Disconnecting {} due to repeated invalid transactions ({})", peer.addr, invalid_tx_count);
                                                         peer_registry.kick_peer(&ip_str).await;
@@ -1818,11 +1826,11 @@ async fn handle_peer(
                                                     ai.attack_detector.record_finality_injection(&ip_str);
                                                 }
                                                 // Direct escalation: each 5-excess cycle is a
-                                                // sustained flood — record a blacklist violation
+                                                // sustained flood — record a banlist violation
                                                 // so the ban escalates without waiting for the
                                                 // 30s AI enforcement loop.  Legitimate relays
                                                 // never hit 5 consecutive rate-limit excess.
-                                                let should_disconnect = blacklist
+                                                let should_disconnect = banlist
                                                     .write()
                                                     .await
                                                     .record_violation(
@@ -2380,12 +2388,12 @@ async fn handle_peer(
                                     check_message_size!(MAX_BLOCK_SIZE, "Block");
                                     check_rate_limit!("block");
 
-                                    // SECURITY: Check blacklist before processing ANY block
+                                    // SECURITY: Check banlist before processing ANY block
                                     {
-                                        let mut bl = blacklist.write().await;
-                                        if let Some(reason) = bl.is_blacklisted(ip) {
+                                        let mut bl = banlist.write().await;
+                                        if let Some(reason) = bl.is_banned(ip) {
                                             tracing::warn!(
-                                                "🚫 REJECTING BlockResponse from blacklisted peer {}: {}",
+                                                "🚫 REJECTING BlockResponse from banned peer {}: {}",
                                                 peer.addr, reason
                                             );
                                             continue;
@@ -2448,7 +2456,7 @@ async fn handle_peer(
                                                     "🚨 CORRUPTED BLOCK {} from {} - recording severe violation: {}",
                                                     block_height, peer.addr, e
                                                 );
-                                                let should_ban = blacklist.write().await.record_severe_violation(
+                                                let should_ban = banlist.write().await.record_severe_violation(
                                                     ip,
                                                     &format!("Sent corrupted block {}: {}", block_height, e)
                                                 );
@@ -2469,12 +2477,12 @@ async fn handle_peer(
                                     check_message_size!(MAX_BLOCK_SIZE, "Block");
                                     check_rate_limit!("block");
 
-                                    // SECURITY: Check blacklist before processing ANY block
+                                    // SECURITY: Check banlist before processing ANY block
                                     {
-                                        let mut bl = blacklist.write().await;
-                                        if let Some(reason) = bl.is_blacklisted(ip) {
+                                        let mut bl = banlist.write().await;
+                                        if let Some(reason) = bl.is_banned(ip) {
                                             tracing::warn!(
-                                                "🚫 REJECTING BlockAnnouncement from blacklisted peer {}: {}",
+                                                "🚫 REJECTING BlockAnnouncement from banned peer {}: {}",
                                                 peer.addr, reason
                                             );
                                             continue;
@@ -2534,7 +2542,7 @@ async fn handle_peer(
                                                     "🚨 CORRUPTED BLOCK {} from {} (announcement) - recording severe violation: {}",
                                                     block_height, peer.addr, e
                                                 );
-                                                let should_ban = blacklist.write().await.record_severe_violation(
+                                                let should_ban = banlist.write().await.record_severe_violation(
                                                     ip,
                                                     &format!("Sent corrupted block {}: {}", block_height, e)
                                                 );
@@ -2694,7 +2702,7 @@ async fn handle_peer(
                                                     "🌊 Ping flood from {} (excess streak {}): recording violation",
                                                     peer.addr, ping_excess_streak
                                                 );
-                                                let should_ban = blacklist.write().await.record_violation(
+                                                let should_ban = banlist.write().await.record_violation(
                                                     ip,
                                                     "Ping flood: sustained excess pings"
                                                 );
@@ -3086,12 +3094,12 @@ async fn handle_peer(
                                 NetworkMessage::TimeLockBlockProposal { .. }
                                 | NetworkMessage::TimeVotePrepare { .. }
                                 | NetworkMessage::TimeVotePrecommit { .. } => {
-                                    // SECURITY: Check blacklist before processing ANY consensus messages
+                                    // SECURITY: Check banlist before processing ANY consensus messages
                                     {
-                                        let mut bl = blacklist.write().await;
-                                        if let Some(reason) = bl.is_blacklisted(ip) {
+                                        let mut bl = banlist.write().await;
+                                        if let Some(reason) = bl.is_banned(ip) {
                                             tracing::warn!(
-                                                "🚫 REJECTING TimeLock message from blacklisted peer {}: {}",
+                                                "🚫 REJECTING TimeLock message from banned peer {}: {}",
                                                 peer.addr, reason
                                             );
                                             continue;
@@ -3110,7 +3118,7 @@ async fn handle_peer(
                                         block_cache.clone(),
                                         broadcast_tx.clone(),
                                         local_mn_addr,
-                                    ).with_blacklist(Arc::clone(&blacklist));
+                                    ).with_banlist(Arc::clone(&banlist));
 
                                     if let Err(e) = handler.handle_message(&msg, &context).await {
                                         tracing::warn!("[Inbound] Error handling TimeLock message from {}: {}", peer.addr, e);
@@ -3270,7 +3278,7 @@ async fn handle_peer(
                     "⏰ Pre-handshake timeout from {} — no handshake received within 10s, closing",
                     peer.addr
                 );
-                blacklist.write().await.record_violation(
+                banlist.write().await.record_violation(
                     ip,
                     "Pre-handshake timeout: no handshake message within 10s",
                 );

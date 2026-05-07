@@ -1,6 +1,6 @@
-//! IP blacklisting for misbehaving peers.
+//! IP banning for misbehaving peers.
 //!
-//! Phase 2.2: DoS Protection - IP Blacklisting
+//! Phase 2.2: DoS Protection - IP Banning
 //! Tracks violations and automatically bans repeat offenders to prevent resource exhaustion.
 //!
 //! Bans are persisted to sled so they survive daemon restarts. Call
@@ -10,18 +10,18 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Tracks misbehaving IPs and automatically blacklists repeat offenders
-pub struct IPBlacklist {
-    /// Permanently blacklisted IPs
-    permanent_blacklist: HashMap<IpAddr, String>,
-    /// Temporarily blacklisted IPs with expiry time
-    temp_blacklist: HashMap<IpAddr, (Instant, String)>,
+/// Tracks misbehaving IPs and automatically bans repeat offenders
+pub struct IPBanlist {
+    /// Permanently banned IPs
+    permanent_banlist: HashMap<IpAddr, String>,
+    /// Temporarily banned IPs with expiry time
+    temp_banlist: HashMap<IpAddr, (Instant, String)>,
     /// Violation tracking: IP -> (violation_count, last_violation_time)
     violations: HashMap<IpAddr, (u32, Instant)>,
     /// Whitelisted IPs (exempt from all bans and rate limits) - typically masternodes
     whitelist: HashMap<IpAddr, String>,
     /// Banned IPv4 subnets (network_addr, prefix_len, reason) — e.g. 154.217.246.0/24
-    subnet_blacklist: Vec<(std::net::Ipv4Addr, u8, String)>,
+    subnet_banlist: Vec<(std::net::Ipv4Addr, u8, String)>,
     // ── Sled persistence (None = in-memory only) ──────────────────────────
     db_permanent: Option<sled::Tree>,
     db_temp: Option<sled::Tree>,
@@ -29,14 +29,14 @@ pub struct IPBlacklist {
     db_violations: Option<sled::Tree>,
 }
 
-impl IPBlacklist {
+impl IPBanlist {
     pub fn new() -> Self {
         Self {
-            permanent_blacklist: HashMap::new(),
-            temp_blacklist: HashMap::new(),
+            permanent_banlist: HashMap::new(),
+            temp_banlist: HashMap::new(),
             violations: HashMap::new(),
             whitelist: HashMap::new(),
-            subnet_blacklist: Vec::new(),
+            subnet_banlist: Vec::new(),
             db_permanent: None,
             db_temp: None,
             db_subnet: None,
@@ -80,12 +80,12 @@ impl IPBlacklist {
                         continue;
                     }
                     let reason = String::from_utf8_lossy(&v).into_owned();
-                    self.permanent_blacklist.insert(ip, reason);
+                    self.permanent_banlist.insert(ip, reason);
                 }
             }
             tracing::info!(
                 "🔒 Loaded {} permanent IP ban(s) from sled",
-                self.permanent_blacklist.len()
+                self.permanent_banlist.len()
             );
         }
 
@@ -110,7 +110,7 @@ impl IPBlacklist {
                         } else {
                             let remaining = expiry_unix - now_unix;
                             let expiry = Instant::now() + Duration::from_secs(remaining);
-                            self.temp_blacklist.insert(ip, (expiry, reason));
+                            self.temp_banlist.insert(ip, (expiry, reason));
                             loaded += 1;
                         }
                     }
@@ -142,18 +142,18 @@ impl IPBlacklist {
                         // Avoid duplicates (config may have already added some)
                         let cidr_str = format!("{}/{}", network, prefix_len);
                         let already = self
-                            .subnet_blacklist
+                            .subnet_banlist
                             .iter()
                             .any(|(n, p, _)| format!("{}/{}", n, p) == cidr_str);
                         if !already {
-                            self.subnet_blacklist.push((network, prefix_len, reason));
+                            self.subnet_banlist.push((network, prefix_len, reason));
                         }
                     }
                 }
             }
             tracing::info!(
                 "🔒 Loaded {} subnet ban(s) from sled",
-                self.subnet_blacklist.len()
+                self.subnet_banlist.len()
             );
         }
 
@@ -249,8 +249,8 @@ impl IPBlacklist {
     pub fn add_to_whitelist(&mut self, ip: IpAddr, reason: &str) {
         self.whitelist.insert(ip, reason.to_string());
         // Remove any existing bans or violations for whitelisted IPs
-        self.permanent_blacklist.remove(&ip);
-        self.temp_blacklist.remove(&ip);
+        self.permanent_banlist.remove(&ip);
+        self.temp_banlist.remove(&ip);
         self.violations.remove(&ip);
         self.remove_permanent(ip);
         self.remove_temp(ip);
@@ -285,7 +285,7 @@ impl IPBlacklist {
         if let Ok(network) = addr_str.parse::<std::net::Ipv4Addr>() {
             let canonical = format!("{}/{}", network, prefix_len);
             tracing::info!("🚫 Banning subnet {}: {}", canonical, reason);
-            self.subnet_blacklist
+            self.subnet_banlist
                 .push((network, prefix_len, reason.to_string()));
             self.persist_subnet(&canonical, reason);
         } else {
@@ -309,10 +309,10 @@ impl IPBlacklist {
         };
 
         let canonical = format!("{}/{}", network, prefix_len);
-        let before = self.subnet_blacklist.len();
-        self.subnet_blacklist
+        let before = self.subnet_banlist.len();
+        self.subnet_banlist
             .retain(|(net, prefix, _)| !(*net == network && *prefix == prefix_len));
-        let removed = self.subnet_blacklist.len() != before;
+        let removed = self.subnet_banlist.len() != before;
 
         if removed {
             self.remove_subnet(&canonical);
@@ -326,7 +326,7 @@ impl IPBlacklist {
     /// Used on startup to evict any Free-tier masternodes from subnets that were banned in
     /// a previous session (i.e. loaded back from persistent storage).
     pub fn list_banned_subnets(&self) -> Vec<String> {
-        self.subnet_blacklist
+        self.subnet_banlist
             .iter()
             .map(|(network, prefix_len, _)| format!("{}/{}", network, prefix_len))
             .collect()
@@ -336,7 +336,7 @@ impl IPBlacklist {
     fn in_banned_subnet(&self, ip: IpAddr) -> Option<String> {
         if let IpAddr::V4(v4) = ip {
             let ip_bits = u32::from(v4);
-            for (network, prefix_len, reason) in &self.subnet_blacklist {
+            for (network, prefix_len, reason) in &self.subnet_banlist {
                 let mask = if *prefix_len == 0 {
                     0u32
                 } else {
@@ -356,35 +356,35 @@ impl IPBlacklist {
 
     /// Number of configured subnet bans
     pub fn subnet_ban_count(&self) -> usize {
-        self.subnet_blacklist.len()
+        self.subnet_banlist.len()
     }
 
-    /// Check if an IP is currently blacklisted.
+    /// Check if an IP is currently banned.
     /// Whitelisted IPs are exempt from all bans (permanent, temporary, and subnet).
-    pub fn is_blacklisted(&mut self, ip: IpAddr) -> Option<String> {
+    pub fn is_banned(&mut self, ip: IpAddr) -> Option<String> {
         // Whitelisted IPs are exempt from all bans — check first.
         if self.is_whitelisted(ip) {
             return None;
         }
 
-        // Check temporary blacklist
-        if let Some((expiry, reason)) = self.temp_blacklist.get(&ip) {
+        // Check temporary banlist
+        if let Some((expiry, reason)) = self.temp_banlist.get(&ip) {
             if Instant::now() < *expiry {
                 let remaining = expiry.duration_since(Instant::now()).as_secs();
                 return Some(format!("Temporarily banned for {}s: {}", remaining, reason));
             } else {
                 // Expired — remove from memory and sled
-                self.temp_blacklist.remove(&ip);
+                self.temp_banlist.remove(&ip);
                 self.remove_temp(ip);
             }
         }
 
-        // Check permanent blacklist
-        if let Some(reason) = self.permanent_blacklist.get(&ip) {
+        // Check permanent banlist
+        if let Some(reason) = self.permanent_banlist.get(&ip) {
             return Some(format!("Permanently banned: {}", reason));
         }
 
-        // Check subnet blacklist
+        // Check subnet banlist
         if let Some(reason) = self.in_banned_subnet(ip) {
             return Some(reason);
         }
@@ -591,7 +591,7 @@ impl IPBlacklist {
     /// Add a temporary ban
     pub fn add_temp_ban(&mut self, ip: IpAddr, duration: Duration, reason: &str) {
         let expiry = Instant::now() + duration;
-        self.temp_blacklist.insert(ip, (expiry, reason.to_string()));
+        self.temp_banlist.insert(ip, (expiry, reason.to_string()));
         // Persist: convert to unix timestamp so it survives restarts
         let expiry_unix = unix_now() + duration.as_secs();
         self.persist_temp(ip, expiry_unix, reason);
@@ -599,8 +599,8 @@ impl IPBlacklist {
 
     /// Add a permanent ban
     pub fn add_permanent_ban(&mut self, ip: IpAddr, reason: &str) {
-        self.permanent_blacklist.insert(ip, reason.to_string());
-        self.temp_blacklist.remove(&ip);
+        self.permanent_banlist.insert(ip, reason.to_string());
+        self.temp_banlist.remove(&ip);
         self.persist_permanent(ip, reason);
         self.remove_temp(ip);
     }
@@ -612,13 +612,13 @@ impl IPBlacklist {
 
         // Remove expired temp bans (and prune from sled)
         let expired_ips: Vec<IpAddr> = self
-            .temp_blacklist
+            .temp_banlist
             .iter()
             .filter(|(_, (expiry, _))| now >= *expiry)
             .map(|(ip, _)| *ip)
             .collect();
         for ip in &expired_ips {
-            self.temp_blacklist.remove(ip);
+            self.temp_banlist.remove(ip);
             self.remove_temp(*ip);
         }
 
@@ -643,8 +643,8 @@ impl IPBlacklist {
     #[allow(dead_code)]
     pub fn stats(&self) -> (usize, usize, usize, usize) {
         (
-            self.permanent_blacklist.len(),
-            self.temp_blacklist.len(),
+            self.permanent_banlist.len(),
+            self.temp_banlist.len(),
             self.violations.len(),
             self.whitelist.len(),
         )
@@ -664,13 +664,13 @@ impl IPBlacklist {
         let now = Instant::now();
 
         let permanent: Vec<(String, String)> = self
-            .permanent_blacklist
+            .permanent_banlist
             .iter()
             .map(|(ip, reason)| (ip.to_string(), reason.clone()))
             .collect();
 
         let temporary: Vec<(String, u64, String)> = self
-            .temp_blacklist
+            .temp_banlist
             .iter()
             .filter(|(_, (expiry, _))| now < *expiry)
             .map(|(ip, (expiry, reason))| {
@@ -680,7 +680,7 @@ impl IPBlacklist {
             .collect();
 
         let subnets: Vec<(String, String)> = self
-            .subnet_blacklist
+            .subnet_banlist
             .iter()
             .map(|(net, prefix, reason)| (format!("{}/{}", net, prefix), reason.clone()))
             .collect();
@@ -697,8 +697,8 @@ impl IPBlacklist {
     /// Remove an IP from permanent and temporary bans, and clear its violations.
     /// Returns true if the IP was actually banned (and is now cleared).
     pub fn unban(&mut self, ip: IpAddr) -> bool {
-        let was_banned = self.permanent_blacklist.remove(&ip).is_some()
-            | self.temp_blacklist.remove(&ip).is_some();
+        let was_banned =
+            self.permanent_banlist.remove(&ip).is_some() | self.temp_banlist.remove(&ip).is_some();
         self.violations.remove(&ip);
         self.remove_permanent(ip);
         self.remove_temp(ip);
@@ -709,8 +709,8 @@ impl IPBlacklist {
     /// Remove all permanent, temporary, subnet bans, and violation counters.
     /// Returns counts of what was cleared: (permanent, temporary, subnet, violations).
     pub fn clear_all_bans(&mut self) -> (usize, usize, usize, usize) {
-        let permanent: Vec<IpAddr> = self.permanent_blacklist.keys().copied().collect();
-        let temporary: Vec<IpAddr> = self.temp_blacklist.keys().copied().collect();
+        let permanent: Vec<IpAddr> = self.permanent_banlist.keys().copied().collect();
+        let temporary: Vec<IpAddr> = self.temp_banlist.keys().copied().collect();
         let violations: Vec<IpAddr> = self.violations.keys().copied().collect();
         let subnets = self.list_banned_subnets();
 
@@ -732,10 +732,10 @@ impl IPBlacklist {
             self.remove_subnet(cidr);
         }
 
-        self.permanent_blacklist.clear();
-        self.temp_blacklist.clear();
+        self.permanent_banlist.clear();
+        self.temp_banlist.clear();
         self.violations.clear();
-        self.subnet_blacklist.clear();
+        self.subnet_banlist.clear();
 
         (perm_count, temp_count, subnet_count, viol_count)
     }
@@ -743,14 +743,14 @@ impl IPBlacklist {
     /// Record a SEVERE violation (corrupted blocks, invalid chain data, reorg attacks)
     /// These are treated more harshly - immediate 1-hour ban on first offense,
     /// permanent ban on second offense
-    /// SECURITY: Severe violations apply even to whitelisted peers (blacklist overrides whitelist)
+    /// SECURITY: Severe violations apply even to whitelisted peers (banlist overrides whitelist)
     /// Returns true if the IP should be disconnected
     pub fn record_severe_violation(&mut self, ip: IpAddr, reason: &str) -> bool {
         let is_whitelisted = self.is_whitelisted(ip);
 
         if is_whitelisted {
             tracing::warn!(
-                "🛡️ SECURITY: Recording severe violation for WHITELISTED peer {} - blacklist will override: {}",
+                "🛡️ SECURITY: Recording severe violation for WHITELISTED peer {} - banlist will override: {}",
                 ip,
                 reason
             );
@@ -795,7 +795,7 @@ impl IPBlacklist {
     }
 }
 
-impl Default for IPBlacklist {
+impl Default for IPBanlist {
     fn default() -> Self {
         Self::new()
     }
@@ -807,19 +807,19 @@ mod tests {
 
     #[test]
     fn clear_all_bans_removes_subnets_too() {
-        let mut blacklist = IPBlacklist::new();
+        let mut banlist = IPBanlist::new();
         let ip: IpAddr = "192.0.2.10".parse().unwrap();
 
-        blacklist.add_permanent_ban(ip, "test");
-        blacklist.add_temp_ban(ip, Duration::from_secs(60), "temp");
-        blacklist.add_subnet_ban("198.51.100.0/24", "subnet");
-        blacklist.record_violation("192.0.2.11".parse().unwrap(), "violation");
+        banlist.add_permanent_ban(ip, "test");
+        banlist.add_temp_ban(ip, Duration::from_secs(60), "temp");
+        banlist.add_subnet_ban("198.51.100.0/24", "subnet");
+        banlist.record_violation("192.0.2.11".parse().unwrap(), "violation");
 
-        let counts = blacklist.clear_all_bans();
+        let counts = banlist.clear_all_bans();
 
         assert_eq!(counts, (1, 1, 1, 1));
-        assert!(blacklist.list_banned_subnets().is_empty());
-        let (permanent, temporary, subnets, violations) = blacklist.list_bans();
+        assert!(banlist.list_banned_subnets().is_empty());
+        let (permanent, temporary, subnets, violations) = banlist.list_bans();
         assert!(permanent.is_empty());
         assert!(temporary.is_empty());
         assert!(subnets.is_empty());
@@ -828,14 +828,14 @@ mod tests {
 
     #[test]
     fn unban_subnet_removes_only_requested_cidr() {
-        let mut blacklist = IPBlacklist::new();
-        blacklist.add_subnet_ban("198.51.100.0/24", "subnet-a");
-        blacklist.add_subnet_ban("203.0.113.0/24", "subnet-b");
+        let mut banlist = IPBanlist::new();
+        banlist.add_subnet_ban("198.51.100.0/24", "subnet-a");
+        banlist.add_subnet_ban("203.0.113.0/24", "subnet-b");
 
-        assert!(blacklist.unban_subnet("198.51.100.0/24"));
-        assert!(!blacklist.unban_subnet("198.51.100.0/24"));
+        assert!(banlist.unban_subnet("198.51.100.0/24"));
+        assert!(!banlist.unban_subnet("198.51.100.0/24"));
 
-        let subnets = blacklist.list_banned_subnets();
+        let subnets = banlist.list_banned_subnets();
         assert_eq!(subnets, vec!["203.0.113.0/24".to_string()]);
     }
 }

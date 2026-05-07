@@ -1,4 +1,4 @@
-//! Hardcoded blacklist of finalized transactions that must be evicted from
+//! Hardcoded banlist of finalized transactions that must be evicted from
 //! every node's state.
 //!
 //! Some early-network bugs allowed transactions to TimeVote-finalize despite
@@ -16,7 +16,7 @@
 //! - `phantom_output_vouts` — outputs that the bad TX synthesized.  These
 //!   get removed from the local UTXO set.
 //!
-//! The purge runs on every startup until the blacklist is removed in a
+//! The purge runs on every startup until the banlist is removed in a
 //! later release.  Once the network has converged this module can be deleted.
 
 use crate::types::{Hash256, OutPoint};
@@ -28,7 +28,7 @@ pub struct PhantomTxRecord {
     pub reason: &'static str,
 }
 
-/// Finalized-pool blacklist.  See module docs.
+/// Finalized-pool banlist.  See module docs.
 pub const PHANTOM_FINALIZED_TXS: &[PhantomTxRecord] = &[PhantomTxRecord {
     txid_hex: "c19c230fe4b8e60545e1e4423710108fbc3d5fe1a15f4984bd99fc3bd12477a5",
     real_inputs: &[
@@ -57,8 +57,8 @@ fn parse_txid(hex_str: &str) -> Option<Hash256> {
     Some(out)
 }
 
-/// Returns true if the given txid is in the phantom-finalized blacklist.
-pub fn is_blacklisted(txid: &Hash256) -> bool {
+/// Returns true if the given txid is in the phantom-finalized banlist.
+pub fn is_banned(txid: &Hash256) -> bool {
     PHANTOM_FINALIZED_TXS
         .iter()
         .any(|rec| parse_txid(rec.txid_hex).as_ref() == Some(txid))

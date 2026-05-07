@@ -1009,7 +1009,7 @@ TIME Coin assumes:
 **Mitigation**: Diverse peer connections, peer exchange protocol, seed nodes
 
 #### 6. DDoS Attack
-**Mitigation**: Rate limiting, IP blacklisting, connection limits
+**Mitigation**: Rate limiting, IP banning, connection limits
 
 #### 7. Replay Attack
 **Mitigation**: Sequence numbers, timestamps, nonce values
@@ -1068,7 +1068,7 @@ src/
 │   ├── client.rs             # P2P client
 │   ├── connection_manager.rs # Connection tracking
 │   ├── rate_limiter.rs       # Rate limiting
-│   ├── blacklist.rs          # IP blacklist
+│   ├── banlist.rs          # IP banlist
 │   ├── tls.rs                # TLS encryption
 │   └── signed_message.rs     # Message signing
 ├── rpc/

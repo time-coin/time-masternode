@@ -3628,7 +3628,7 @@ impl ConsensusEngine {
                 }
             }
 
-            self.tx_pool.drop_blacklisted(&txid);
+            self.tx_pool.drop_banned(&txid);
             evicted += 1;
             tracing::warn!(
                 "🧹 Evicted finalized TX {} from pool — at least one input UTXO is missing on-chain",
@@ -3638,17 +3638,17 @@ impl ConsensusEngine {
         evicted
     }
 
-    /// Apply the hardcoded phantom-finalized blacklist (`crate::purge_list`).
+    /// Apply the hardcoded phantom-finalized banlist (`crate::purge_list`).
     ///
-    /// For each blacklisted txid:
+    /// For each banned txid:
     ///   1. Restore real input UTXOs from `SpentFinalized`/`SpentPending`/`Locked`
     ///      back to `Unspent` (skip collateral-locked entries).
     ///   2. Remove phantom output UTXOs from the local UTXO set.
     ///   3. Drop the TX from the in-memory pending and finalized pools.
     ///
     /// Idempotent: missing UTXOs and missing pool entries are skipped silently.
-    /// Returns the number of blacklist records that touched local state.
-    pub async fn purge_blacklisted_transactions(&self) -> usize {
+    /// Returns the number of banlist records that touched local state.
+    pub async fn purge_banned_transactions(&self) -> usize {
         let mut touched = 0usize;
         for (txid, real_inputs, phantom_outputs, reason) in crate::purge_list::iter_records() {
             let mut did_work = false;
@@ -3689,7 +3689,7 @@ impl ConsensusEngine {
                 }
             }
 
-            if self.tx_pool.drop_blacklisted(&txid) {
+            if self.tx_pool.drop_banned(&txid) {
                 did_work = true;
             }
 

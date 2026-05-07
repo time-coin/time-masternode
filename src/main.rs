@@ -641,7 +641,10 @@ async fn main() {
                         let log1 = format!("{}/debug.log.1", config.storage.data_dir);
                         if let Ok(meta) = std::fs::metadata(&log1) {
                             if std::fs::remove_file(&log1).is_ok() {
-                                println!("  └─ Freed rotated log ({} MB)", meta.len() / (1024 * 1024));
+                                println!(
+                                    "  └─ Freed rotated log ({} MB)",
+                                    meta.len() / (1024 * 1024)
+                                );
                             }
                         }
                         let _ = std::fs::remove_dir_all(&db_dir);
@@ -774,9 +777,18 @@ async fn main() {
             #[repr(C)]
             #[allow(non_camel_case_types)]
             struct statvfs {
-                f_bsize: u64, f_frsize: u64, f_blocks: u64, f_bfree: u64,
-                f_bavail: u64, f_files: u64, f_ffree: u64, f_favail: u64,
-                f_fsid: u64, f_flag: u64, f_namemax: u64, _pad: [u64; 6],
+                f_bsize: u64,
+                f_frsize: u64,
+                f_blocks: u64,
+                f_bfree: u64,
+                f_bavail: u64,
+                f_files: u64,
+                f_ffree: u64,
+                f_favail: u64,
+                f_fsid: u64,
+                f_flag: u64,
+                f_namemax: u64,
+                _pad: [u64; 6],
             }
             extern "C" {
                 fn statvfs(path: *const i8, buf: *mut statvfs) -> i32;
@@ -881,10 +893,7 @@ async fn main() {
 
                 // Report available disk space before cleanup
                 if let Some(avail) = available_disk_bytes(data_dir) {
-                    eprintln!(
-                        "  └─ Available disk space: {} MB",
-                        avail / (1024 * 1024)
-                    );
+                    eprintln!("  └─ Available disk space: {} MB", avail / (1024 * 1024));
                 }
 
                 // Free recoverable space first, then wipe the broken database
@@ -1161,13 +1170,13 @@ async fn main() {
         );
     }
 
-    // Apply the hardcoded phantom-finalized blacklist (see src/purge_list.rs)
+    // Apply the hardcoded phantom-finalized banlist (see src/purge_list.rs)
     // and then sweep any other finalized TXs whose inputs are missing on-chain.
-    let blacklist_purged = consensus_engine.purge_blacklisted_transactions().await;
-    if blacklist_purged > 0 {
+    let banlist_purged = consensus_engine.purge_banned_transactions().await;
+    if banlist_purged > 0 {
         tracing::warn!(
-            "🛡️ Startup: applied phantom-TX blacklist to {} record(s)",
-            blacklist_purged
+            "🛡️ Startup: applied phantom-TX banlist to {} record(s)",
+            banlist_purged
         );
     }
     let stuck_evicted = consensus_engine.evict_finalized_with_missing_inputs().await;
@@ -1186,8 +1195,8 @@ async fn main() {
 
     // Initialize blockchain (clone sled handle so governance can share the same DB)
     let gov_storage = block_storage.clone();
-    // Keep a clone for blacklist persistence (wired after network server starts)
-    let blacklist_storage = block_storage.clone();
+    // Keep a clone for banlist persistence (wired after network server starts)
+    let banlist_storage = block_storage.clone();
     let mut blockchain = Blockchain::new(
         block_storage,
         consensus_engine.clone(),
@@ -5330,7 +5339,7 @@ async fn main() {
     );
     println!();
 
-    match NetworkServer::new_with_blacklist(
+    match NetworkServer::new_with_banlist(
         &p2p_addr,
         utxo_mgr.clone(),
         consensus_engine.clone(),
@@ -5341,8 +5350,8 @@ async fn main() {
         peer_connection_registry.clone(),
         peer_state.clone(),
         local_ip.clone(),
-        config.network.blacklisted_peers.clone(),
-        config.network.blacklisted_subnets.clone(),
+        config.network.banned_peers.clone(),
+        config.network.banned_subnets.clone(),
         combined_whitelist,
         network_type,
     )
@@ -5367,10 +5376,8 @@ async fn main() {
                 );
             }
 
-            // Enable blacklist persistence — bans now survive daemon restarts
-            server
-                .enable_blacklist_persistence(&blacklist_storage)
-                .await;
+            // Enable banlist persistence — bans now survive daemon restarts
+            server.enable_banlist_persistence(&banlist_storage).await;
 
             // Initialize TLS for encrypted P2P connections
             let tls_config = if config.security.enable_tls {
@@ -5422,13 +5429,13 @@ async fn main() {
                 )
                 .await;
 
-            // Share blacklist with peer connection registry for whitelist checks
+            // Share banlist with peer connection registry for whitelist checks
             peer_connection_registry
-                .set_blacklist(server.blacklist.clone())
+                .set_banlist(server.banlist.clone())
                 .await;
 
-            // Share blacklist with blockchain so sync_from_peers can skip banned peers
-            blockchain.set_blacklist(server.blacklist.clone()).await;
+            // Share banlist with blockchain so sync_from_peers can skip banned peers
+            blockchain.set_banlist(server.banlist.clone()).await;
 
             // CRITICAL: Wire up consensus broadcast callback for TimeVote requests
             // This enables the consensus engine to broadcast vote requests to the network
@@ -5475,7 +5482,7 @@ async fn main() {
                 .set_tx_event_sender(tx_event_sender.clone())
                 .await;
 
-            // Start RPC server with access to blacklist
+            // Start RPC server with access to banlist
             let rpc_consensus = consensus_engine.clone();
             let rpc_utxo = utxo_mgr.clone();
             let rpc_registry = registry.clone();
@@ -5483,7 +5490,7 @@ async fn main() {
             let rpc_addr_clone = rpc_addr.clone();
             let rpc_network = network_type;
             let rpc_shutdown_token = shutdown_token.clone();
-            let rpc_blacklist = server.blacklist.clone();
+            let rpc_banlist = server.banlist.clone();
             let rpc_tx_sender = tx_event_sender.clone();
             let rpc_reconnection_ai = ai_system.reconnection_ai.clone();
             let rpc_user = config.rpc.rpcuser.clone();
@@ -5506,7 +5513,7 @@ async fn main() {
                     rpc_network,
                     rpc_registry,
                     rpc_blockchain,
-                    rpc_blacklist,
+                    rpc_banlist,
                     Some(rpc_tx_sender),
                     Some(rpc_reconnection_ai),
                     rpc_user,
@@ -5696,8 +5703,8 @@ async fn main() {
                 peer_state.clone(),
                 connection_manager.clone(),
                 local_ip.clone(),
-                config.network.blacklisted_peers.clone(),
-                Some(server.blacklist.clone()),
+                config.network.banned_peers.clone(),
+                Some(server.banlist.clone()),
             );
             // Share AISystem's reconnection AI so connection learning data is unified
             network_client.set_reconnection_ai(ai_system.reconnection_ai.clone());
