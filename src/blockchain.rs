@@ -3746,6 +3746,23 @@ impl Blockchain {
                 continue;
             }
 
+            // Already-archived guard: if this TXID is already in the transaction index,
+            // it was committed to a prior block and must not be re-included.
+            // This catches cases where clear_finalized_txs missed evicting a TX after
+            // a peer-produced block was accepted (e.g. during fork resolution).
+            if let Some(ref tx_index) = self.tx_index {
+                if tx_index.get_location(&txid).is_some() {
+                    tracing::warn!(
+                        "⚠️  Block {}: Evicting TX {} — already archived in a prior block (duplicate inclusion guard)",
+                        next_height,
+                        hex::encode(txid)
+                    );
+                    evict_txids.push(txid);
+                    ds_invalid_count += 1;
+                    continue;
+                }
+            }
+
             // Ghost TX guard: 0-input/0-output TXs must either carry a
             // cryptographically valid special_data payload (masternode reg/dereg)
             // or be evicted before block inclusion. This is the last line of
@@ -6102,14 +6119,30 @@ impl Blockchain {
 
             // Create outputs (add new UTXOs)
             for (vout, output) in tx.outputs.iter().enumerate() {
+                let outpoint = OutPoint {
+                    txid,
+                    vout: vout as u32,
+                };
+
+                // Pre-check: if this outpoint is already tombstoned, the UTXO was
+                // created and spent in an earlier block. This is caused by historical
+                // duplicate TX inclusions (same TX in blocks N and M > N). Silently
+                // skip the re-add — the UTXO set is already correct.
+                if self.utxo_manager.is_tombstoned(&outpoint) {
+                    tracing::debug!(
+                        "⏩ Block {}: Skipping tombstoned output {}:{} (historical duplicate TX inclusion)",
+                        block.header.height,
+                        hex::encode(txid),
+                        vout
+                    );
+                    continue;
+                }
+
                 // Extract address from script_pubkey
                 let address = String::from_utf8_lossy(&output.script_pubkey).to_string();
 
                 let utxo = UTXO {
-                    outpoint: OutPoint {
-                        txid,
-                        vout: vout as u32,
-                    },
+                    outpoint,
                     value: output.value,
                     script_pubkey: output.script_pubkey.clone(),
                     address: address.clone(),
