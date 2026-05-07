@@ -621,7 +621,6 @@ async fn main() {
             println!("✓ Using Sled persistent storage");
             let db_dir = format!("{}/db", config.storage.data_dir);
             println!("  └─ Data directory: {}", db_dir);
-            // Create db directory if it doesn't exist
             if let Err(e) = std::fs::create_dir_all(&db_dir) {
                 println!("  ⚠ Failed to create db directory: {}", e);
             }
@@ -629,6 +628,25 @@ async fn main() {
                 Ok(s) => Arc::new(s),
                 Err(e) => {
                     println!("  ⚠ Sled failed: {}", e);
+                    // Attempt disk-space recovery before falling back to in-memory
+                    let is_recoverable = matches!(e, storage::StorageError::Database(ref de)
+                        if matches!(de, sled::Error::Corruption { .. })
+                            || matches!(de, sled::Error::Io(_))
+                            || de.to_string().contains("corrupted")
+                            || de.to_string().contains("No space left"));
+                    if is_recoverable {
+                        println!("  └─ Freeing disk space and wiping corrupted UTXO db...");
+                        // free_disk_space and remove_dir_all are defined later in this function;
+                        // inline the same logic here since nested fns aren't closures.
+                        let log1 = format!("{}/debug.log.1", config.storage.data_dir);
+                        if let Ok(meta) = std::fs::metadata(&log1) {
+                            if std::fs::remove_file(&log1).is_ok() {
+                                println!("  └─ Freed rotated log ({} MB)", meta.len() / (1024 * 1024));
+                            }
+                        }
+                        let _ = std::fs::remove_dir_all(&db_dir);
+                        let _ = std::fs::create_dir_all(&db_dir);
+                    }
                     println!("  └─ Falling back to in-memory storage");
                     Arc::new(InMemoryUtxoStorage::new())
                 }
@@ -748,22 +766,182 @@ async fn main() {
 
     let cache_size = calculate_cache_size();
 
+    /// Return available bytes on the filesystem containing `path`, or None if unavailable.
+    fn available_disk_bytes(_path: &str) -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::ffi::CString;
+            #[repr(C)]
+            #[allow(non_camel_case_types)]
+            struct statvfs {
+                f_bsize: u64, f_frsize: u64, f_blocks: u64, f_bfree: u64,
+                f_bavail: u64, f_files: u64, f_ffree: u64, f_favail: u64,
+                f_fsid: u64, f_flag: u64, f_namemax: u64, _pad: [u64; 6],
+            }
+            extern "C" {
+                fn statvfs(path: *const i8, buf: *mut statvfs) -> i32;
+            }
+            if let Ok(cpath) = CString::new(_path) {
+                unsafe {
+                    let mut st: statvfs = std::mem::zeroed();
+                    if statvfs(cpath.as_ptr(), &mut st) == 0 {
+                        return Some(st.f_frsize * st.f_bavail);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Free recoverable disk space under `data_dir`:
+    /// - Deletes the rotated log (debug.log.1) if present.
+    /// - Removes any leftover stale corrupted-db backup directories.
+    /// Returns approximate bytes freed.
+    fn free_disk_space(data_dir: &str) -> u64 {
+        let mut freed: u64 = 0;
+
+        // Remove rotated debug log (debug.log.1 is a safe discard)
+        let log1 = format!("{}/debug.log.1", data_dir);
+        if let Ok(meta) = std::fs::metadata(&log1) {
+            let sz = meta.len();
+            if std::fs::remove_file(&log1).is_ok() {
+                eprintln!("  └─ Freed rotated log ({} MB)", sz / (1024 * 1024));
+                freed += sz;
+            }
+        }
+
+        // Remove stale .corrupted.* directories left by previous recovery attempts
+        if let Ok(entries) = std::fs::read_dir(data_dir) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().contains(".corrupted.") {
+                    let sz: u64 = walkdir_size(&entry.path());
+                    if std::fs::remove_dir_all(entry.path()).is_ok() {
+                        eprintln!(
+                            "  └─ Removed stale backup '{}' ({} MB)",
+                            entry.file_name().to_string_lossy(),
+                            sz / (1024 * 1024)
+                        );
+                        freed += sz;
+                    }
+                }
+            }
+        }
+
+        freed
+    }
+
+    /// Approximate directory size by summing file lengths (best-effort).
+    fn walkdir_size(dir: &std::path::Path) -> u64 {
+        let mut total = 0u64;
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    total += walkdir_size(&path);
+                } else if let Ok(m) = std::fs::metadata(&path) {
+                    total += m.len();
+                }
+            }
+        }
+        total
+    }
+
+    /// Attempt to open a sled database. On corruption or I/O failure:
+    ///  1. Free recoverable disk space (rotated logs, stale backups).
+    ///  2. Delete the corrupted database directory — no backup copy is made
+    ///     because backing up on a near-full disk would worsen the problem.
+    ///  3. Retry once with a fresh, empty database (chain re-syncs from peers).
+    fn open_sled_with_recovery(
+        path: &str,
+        cache_size: u64,
+        data_dir: &str,
+    ) -> Result<sled::Db, sled::Error> {
+        let try_open = |p: &str| {
+            sled::Config::new()
+                .path(p)
+                .cache_capacity(cache_size)
+                .flush_every_ms(None)
+                .mode(sled::Mode::LowSpace)
+                .open()
+        };
+
+        match try_open(path) {
+            Ok(db) => Ok(db),
+            Err(e) => {
+                let is_recoverable = matches!(e, sled::Error::Corruption { .. })
+                    || matches!(&e, sled::Error::Io(_))
+                    || e.to_string().contains("corrupted")
+                    || e.to_string().contains("No space left");
+
+                if !is_recoverable {
+                    return Err(e);
+                }
+
+                eprintln!("⚠️  Sled failed at '{}': {}", path, e);
+
+                // Report available disk space before cleanup
+                if let Some(avail) = available_disk_bytes(data_dir) {
+                    eprintln!(
+                        "  └─ Available disk space: {} MB",
+                        avail / (1024 * 1024)
+                    );
+                }
+
+                // Free recoverable space first, then wipe the broken database
+                let freed = free_disk_space(data_dir);
+                if freed > 0 {
+                    eprintln!("  └─ Total freed: {} MB", freed / (1024 * 1024));
+                }
+
+                eprintln!("  └─ Removing corrupted database directory...");
+                if let Err(re) = std::fs::remove_dir_all(path) {
+                    eprintln!("  ⚠ Could not remove '{}': {}", path, re);
+                }
+
+                if let Some(avail) = available_disk_bytes(data_dir) {
+                    eprintln!(
+                        "  └─ Available disk space after cleanup: {} MB",
+                        avail / (1024 * 1024)
+                    );
+                    if avail < 200 * 1024 * 1024 {
+                        eprintln!("  ⚠ WARNING: Less than 200 MB free — node may fail again soon.");
+                        eprintln!("    Free disk space on the host before restarting.");
+                    }
+                }
+
+                eprintln!("  └─ Starting with a fresh database — chain will re-sync from peers");
+                try_open(path)
+            }
+        }
+    }
+
     // Initialize block storage
     let db_dir = format!("{}/db", config.storage.data_dir);
-    let block_storage_path = format!("{}/blocks", db_dir);
-    let block_storage = match sled::Config::new()
-        .path(&block_storage_path)
-        .cache_capacity(cache_size)
-        .flush_every_ms(None) // Disable auto-flush; we flush manually after each block write
-        .mode(sled::Mode::LowSpace) // More conservative writes to prevent corruption
-        .open()
-    {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("❌ Failed to initialize block storage: {}", e);
-            std::process::exit(1);
+
+    // Warn early if disk space is critically low
+    if let Some(avail) = available_disk_bytes(&config.storage.data_dir) {
+        let avail_mb = avail / (1024 * 1024);
+        if avail_mb < 500 {
+            eprintln!(
+                "⚠️  WARNING: Only {} MB of disk space available on the data directory filesystem.",
+                avail_mb
+            );
+            eprintln!("   Running low on disk space can corrupt the database.");
+            eprintln!("   Free disk space before problems occur.");
+        } else {
+            println!("  └─ Disk space available: {} MB", avail_mb);
         }
-    };
+    }
+
+    let block_storage_path = format!("{}/blocks", db_dir);
+    let block_storage =
+        match open_sled_with_recovery(&block_storage_path, cache_size, &config.storage.data_dir) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("❌ Failed to initialize block storage: {}", e);
+                std::process::exit(1);
+            }
+        };
 
     let mut utxo_mgr = UTXOStateManager::new_with_storage(storage);
 
