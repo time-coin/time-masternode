@@ -443,8 +443,12 @@ impl RpcHandler {
             NetworkType::Testnet => "testnet",
         };
 
-        // Get active peer count from registry (masternodes)
-        let active_masternodes = self.registry.count_active().await;
+        // Count actual live TCP connections from the peer connection registry.
+        let connections = if let Some(pr) = self.blockchain.get_peer_registry().await {
+            pr.connected_count()
+        } else {
+            0
+        };
 
         Ok(json!({
             "version": 110000, // 1.1.0
@@ -454,7 +458,7 @@ impl RpcHandler {
             "localrelay": true,
             "timeoffset": 0,
             "networkactive": true,
-            "connections": active_masternodes,
+            "connections": connections,
             "networks": [{
                 "name": network,
                 "limited": false,
@@ -7624,7 +7628,11 @@ impl RpcHandler {
     ///
     /// Returns the number of currently active masternode connections.
     async fn get_connection_count(&self) -> Result<Value, RpcError> {
-        let count = self.registry.count_active().await;
+        let count = if let Some(pr) = self.blockchain.get_peer_registry().await {
+            pr.connected_count()
+        } else {
+            0
+        };
         Ok(json!(count))
     }
 
