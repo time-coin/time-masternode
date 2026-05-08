@@ -8,9 +8,7 @@
 # Can also be run manually:
 #   sudo bash scripts/auto-update.sh [mainnet|testnet|both]
 #
-# Installation (run as root):
-#   sudo cp scripts/auto-update.sh /usr/local/bin/time-auto-update
-#   sudo chmod +x /usr/local/bin/time-auto-update
+# Installation (run as root from ~/time-masternode):
 #   sudo cp scripts/auto-update.service /etc/systemd/system/
 #   sudo cp scripts/auto-update.timer   /etc/systemd/system/
 #   sudo systemctl daemon-reload

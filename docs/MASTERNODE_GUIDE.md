@@ -1000,8 +1000,6 @@ To have your node check GitHub for new commits every 30 minutes and update
 itself automatically, install the auto-update systemd timer:
 
 ```bash
-sudo cp scripts/auto-update.sh /usr/local/bin/time-auto-update
-sudo chmod +x /usr/local/bin/time-auto-update
 sudo cp scripts/auto-update.service /etc/systemd/system/
 sudo cp scripts/auto-update.timer   /etc/systemd/system/
 sudo systemctl daemon-reload

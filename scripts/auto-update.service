@@ -7,7 +7,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/time-auto-update
+ExecStart=/bin/bash /root/time-masternode/scripts/auto-update.sh
 
 # Run as root so update.sh can call systemctl stop/start.
 User=root
