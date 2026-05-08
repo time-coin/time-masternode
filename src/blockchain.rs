@@ -2159,24 +2159,24 @@ impl Blockchain {
             );
         }
 
-        // If we're already synced, return early
-        if current >= target {
-            tracing::info!("✓ Blockchain synced (height: {})", current);
-            return Ok(());
-        }
-
-        // Now set syncing flag since we actually need to sync
+        // Always install the RAII guard first so that any caller that set
+        // is_syncing=true before calling us (e.g. rollback-to-genesis, fork
+        // detection) gets the flag cleared even on an early return.
         self.is_syncing.store(true, Ordering::Release);
-
-        // Ensure we reset the sync flag when done (RAII guard)
-        let is_syncing = self.is_syncing.clone();
+        let is_syncing_flag = self.is_syncing.clone();
         struct SyncGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
         impl Drop for SyncGuard {
             fn drop(&mut self) {
                 self.0.store(false, std::sync::atomic::Ordering::Release);
             }
         }
-        let _guard = SyncGuard(is_syncing);
+        let _guard = SyncGuard(is_syncing_flag);
+
+        // If we're already synced, return early — guard will clear the flag.
+        if current >= target {
+            tracing::info!("✓ Blockchain synced (height: {})", current);
+            return Ok(());
+        }
 
         // Debug logging for genesis timestamp issue
         let now = chrono::Utc::now().timestamp();
