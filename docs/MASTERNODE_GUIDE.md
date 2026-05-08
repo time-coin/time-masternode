@@ -994,6 +994,49 @@ scripts\update.bat mainnet
 Both scripts pull the latest code, rebuild, stop the node, copy new binaries,
 and restart.
 
+### Automatic Updates (Linux)
+
+To have your node check GitHub for new commits every 30 minutes and update
+itself automatically, install the auto-update systemd timer:
+
+```bash
+sudo cp scripts/auto-update.sh /usr/local/bin/time-auto-update
+sudo chmod +x /usr/local/bin/time-auto-update
+sudo cp scripts/auto-update.service /etc/systemd/system/
+sudo cp scripts/auto-update.timer   /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now auto-update.timer
+```
+
+The timer fires 5 minutes after boot and then every 30 minutes. It only
+calls `update.sh` when it detects a new commit on `origin/main` — if you
+are already on the latest version, nothing happens.
+
+**Monitor auto-update activity:**
+```bash
+# Live log stream
+journalctl -t time-auto-update -f
+
+# Timer schedule and last/next run times
+systemctl status auto-update.timer
+
+# Run a check immediately (without waiting for the timer)
+sudo bash scripts/auto-update.sh
+
+# Test what would happen without making any changes
+sudo bash scripts/auto-update.sh --dry-run
+```
+
+**Disable auto-updates:**
+```bash
+sudo systemctl disable --now auto-update.timer
+```
+
+> **Note:** Each auto-update triggers a daemon restart and a UTXO reindex
+> (same as a manual `update.sh` run). Expect a ~2–5 minute reward gap per
+> update. If you prefer to control exactly when updates are applied, keep
+> the timer disabled and run `update.sh` manually.
+
 ---
 
 ## Security

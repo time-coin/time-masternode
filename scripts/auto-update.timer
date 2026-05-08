@@ -1,0 +1,15 @@
+[Unit]
+Description=TIME Coin Masternode Auto-Update Timer
+Documentation=https://github.com/time-coin/time-masternode
+
+[Timer]
+# Check for updates every 30 minutes, starting 5 minutes after boot
+# so the node has time to fully initialize before any update attempt.
+OnBootSec=5min
+OnUnitActiveSec=30min
+
+# If the system was off when a trigger would have fired, run once on next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

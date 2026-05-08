@@ -1,0 +1,17 @@
+[Unit]
+Description=TIME Coin Masternode Auto-Update
+Documentation=https://github.com/time-coin/time-masternode
+# Run after the network is up so git fetch works.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/time-auto-update
+
+# Run as root so update.sh can call systemctl stop/start.
+User=root
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=time-auto-update
