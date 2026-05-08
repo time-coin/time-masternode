@@ -65,8 +65,8 @@ if [ ! -d "$REPO_DIR/.git" ]; then
 fi
 
 UPDATE_SCRIPT="$REPO_DIR/scripts/update.sh"
-if [ ! -x "$UPDATE_SCRIPT" ]; then
-    loge "update.sh not found or not executable at $UPDATE_SCRIPT"
+if [ ! -f "$UPDATE_SCRIPT" ]; then
+    loge "update.sh not found at $UPDATE_SCRIPT"
     exit 1
 fi
 
