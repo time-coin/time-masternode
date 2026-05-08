@@ -55,6 +55,9 @@
 #   --rpc-timeout N          Seconds to wait for time-cli RPC response (default: 5)
 #   --rpc-busy-max N         Consecutive RPC timeouts while daemon is logging before restart (default: 5)
 #   --daemon-active-secs N   Consider daemon alive if it logged within this many seconds (default: 60)
+#   --no-sync-check          Disable sync-stall detection
+#   --sync-stall-blocks N    Blocks behind peer tip before counting as stalled (default: 3)
+#   --sync-stall-polls N     Consecutive stall polls before restart (default: 20, ~60s at 3s poll)
 #   --dry-run                Log what would happen but do not restart
 #   -h, --help               Show this help
 
@@ -69,6 +72,9 @@ POST_RESTART_GRACE=20  # seconds to skip polling after each restart (daemon init
 RPC_TIMEOUT=5          # seconds to wait for time-cli before treating as failure
 RPC_BUSY_MAX=5         # consecutive timeouts while daemon is still logging → restart
 DAEMON_ACTIVE_SECS=60  # consider daemon alive if it logged within this many seconds
+SYNC_CHECK=1           # set to 0 to disable sync-stall detection
+SYNC_STALL_BLOCKS=3    # blocks behind peer tip before counting as stalled
+SYNC_STALL_POLLS=20    # consecutive stall polls before restart (~60s at default POLL_INTERVAL)
 DRY_RUN=0
 NETWORK="mainnet"
 
@@ -90,6 +96,9 @@ while [[ $# -gt 0 ]]; do
         --rpc-timeout)        RPC_TIMEOUT="$2"; shift 2 ;;
         --rpc-busy-max)       RPC_BUSY_MAX="$2"; shift 2 ;;
         --daemon-active-secs) DAEMON_ACTIVE_SECS="$2"; shift 2 ;;
+        --no-sync-check)      SYNC_CHECK=0; shift ;;
+        --sync-stall-blocks)  SYNC_STALL_BLOCKS="$2"; shift 2 ;;
+        --sync-stall-polls)   SYNC_STALL_POLLS="$2";  shift 2 ;;
         --dry-run)            DRY_RUN=1; shift ;;
         -h|--help)            usage ;;
         *) echo "Unknown option: $1"; usage ;;
@@ -129,7 +138,7 @@ fi
 CLI_CMD="$CLI"
 [ "$NETWORK" = "testnet" ] && CLI_CMD="$CLI --testnet"
 
-log "Starting ($NETWORK) | poll=${POLL_INTERVAL}s fail-threshold=${FAIL_THRESHOLD} cooldown=${RESTART_COOLDOWN}s grace=${STARTUP_GRACE}s post-restart-grace=${POST_RESTART_GRACE}s rpc-timeout=${RPC_TIMEOUT}s busy-max=${RPC_BUSY_MAX} daemon-active-secs=${DAEMON_ACTIVE_SECS} dry-run=${DRY_RUN}"
+log "Starting ($NETWORK) | poll=${POLL_INTERVAL}s fail-threshold=${FAIL_THRESHOLD} cooldown=${RESTART_COOLDOWN}s grace=${STARTUP_GRACE}s post-restart-grace=${POST_RESTART_GRACE}s rpc-timeout=${RPC_TIMEOUT}s busy-max=${RPC_BUSY_MAX} daemon-active-secs=${DAEMON_ACTIVE_SECS} sync-check=${SYNC_CHECK} sync-stall-blocks=${SYNC_STALL_BLOCKS} sync-stall-polls=${SYNC_STALL_POLLS} dry-run=${DRY_RUN}"
 log "Using CLI: $CLI_CMD"
 
 # ── State ──────────────────────────────────────────────────────────────────────
@@ -139,6 +148,8 @@ last_restart_ts=0       # unix timestamp of last restart we triggered
 total_restarts=0
 cooldown_logged=0       # suppress repeated "cooldown active" log spam
 watchdog_start_ts=$(date +%s)   # used for one-time startup grace
+last_sync_height=-1     # local block height from last getblockchaininfo poll
+sync_stall_streak=0     # consecutive polls where height didn't advance while behind peers
 
 # ── Check if timed has logged recently (daemon alive but possibly busy) ────────
 # Returns 0 (true) if timed has written a log entry within the last N seconds.
@@ -209,6 +220,62 @@ log_stall_diagnostics() {
         | while IFS= read -r line; do logj "  $line"; done
 
     logj "── END STALL DIAGNOSTICS ──"
+}
+
+# ── Sync-stall check ──────────────────────────────────────────────────────────
+# Calls getblockchaininfo and tracks whether local block height is advancing.
+# Returns 1 (stalled) when the node has been >= SYNC_STALL_BLOCKS behind its
+# peers for SYNC_STALL_POLLS consecutive polls without making progress.
+# Returns 0 (healthy or check disabled).
+check_sync_stall() {
+    [ "$SYNC_CHECK" -eq 0 ] && return 0
+
+    local info_json blocks_height headers_height
+    info_json=$(timeout "$RPC_TIMEOUT" $CLI_CMD getblockchaininfo 2>/dev/null) || info_json=""
+
+    if [ -z "$info_json" ]; then
+        # RPC unavailable — the masternodestatus path handles this; don't double-count.
+        return 0
+    fi
+
+    if command -v jq &>/dev/null; then
+        blocks_height=$(echo "$info_json"  | jq -r '.blocks  // 0' 2>/dev/null)
+        headers_height=$(echo "$info_json" | jq -r '.headers // 0' 2>/dev/null)
+    else
+        blocks_height=$(echo  "$info_json" | grep -oP '"blocks"\s*:\s*\K[0-9]+' | head -1)
+        headers_height=$(echo "$info_json" | grep -oP '"headers"\s*:\s*\K[0-9]+' | head -1)
+    fi
+    blocks_height="${blocks_height:-0}"
+    headers_height="${headers_height:-0}"
+
+    # headers=0 means no peers yet — don't flag as stalled during isolation.
+    if [ "$headers_height" -le 0 ]; then
+        sync_stall_streak=0
+        last_sync_height=$blocks_height
+        return 0
+    fi
+
+    local behind=$(( headers_height - blocks_height ))
+    if [ "$behind" -ge "$SYNC_STALL_BLOCKS" ]; then
+        if [ "$last_sync_height" -eq "$blocks_height" ] && [ "$last_sync_height" -ge 0 ]; then
+            sync_stall_streak=$(( sync_stall_streak + 1 ))
+            logw "⚠️  Sync stall: blocks=${blocks_height} headers=${headers_height} (${behind} behind, no progress, streak: ${sync_stall_streak}/${SYNC_STALL_POLLS})"
+        else
+            # Height advanced — reset streak.
+            if [ "$sync_stall_streak" -gt 0 ]; then
+                log "Sync progressing (blocks=${blocks_height} headers=${headers_height}) — clearing stall streak"
+            fi
+            sync_stall_streak=0
+        fi
+    else
+        if [ "$sync_stall_streak" -gt 0 ]; then
+            log "✅ Sync caught up (blocks=${blocks_height} headers=${headers_height}) — clearing stall streak"
+        fi
+        sync_stall_streak=0
+    fi
+
+    last_sync_height=$blocks_height
+    [ "$sync_stall_streak" -ge "$SYNC_STALL_POLLS" ]
 }
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
@@ -370,6 +437,32 @@ while true; do
             # Registered but is_active=false, or unrecognized status.
             logw "Masternode NOT active (status=${mn_status:-unknown} is_active=${is_active:-unknown}) — streak: $((fail_streak + 1))/$FAIL_THRESHOLD"
             fail_streak=$(( fail_streak + 1 ))
+        fi
+    fi
+
+    # 3b. Sync-stall check — runs every poll independently of masternode status.
+    if check_sync_stall; then
+        now=$(date +%s)
+        since_last=$(( now - last_restart_ts ))
+        if [ "$since_last" -ge "$RESTART_COOLDOWN" ]; then
+            total_restarts=$(( total_restarts + 1 ))
+            if [ "$DRY_RUN" -eq 1 ]; then
+                log "DRY-RUN: sync stalled for $((sync_stall_streak * POLL_INTERVAL))s — would restart (restart #${total_restarts})"
+            else
+                log "🔄 Sync stalled for $((sync_stall_streak * POLL_INTERVAL))s (${sync_stall_streak} polls with no progress) — restarting timed (restart #${total_restarts})"
+                if systemctl restart timed; then
+                    log "✅ systemctl restart timed succeeded"
+                else
+                    loge "systemctl restart timed FAILED (exit $?)"
+                fi
+            fi
+            last_restart_ts=$now
+            sync_stall_streak=0
+            fail_streak=0
+            cooldown_logged=0
+        else
+            remaining=$(( RESTART_COOLDOWN - since_last ))
+            logw "Sync stalled — restart cooldown active (${remaining}s remaining)"
         fi
     fi
 
