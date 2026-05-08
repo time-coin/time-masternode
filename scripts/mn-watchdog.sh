@@ -58,6 +58,8 @@
 #   --no-sync-check          Disable sync-stall detection
 #   --sync-stall-blocks N    Blocks behind peer tip before counting as stalled (default: 3)
 #   --sync-stall-polls N     Consecutive stall polls before restart (default: 20, ~60s at 3s poll)
+#   --no-peer-check          Disable zero-peer detection
+#   --zero-peer-polls N      Consecutive zero-peer polls before restart (default: 40, ~120s at 3s poll)
 #   --dry-run                Log what would happen but do not restart
 #   -h, --help               Show this help
 
@@ -75,6 +77,8 @@ DAEMON_ACTIVE_SECS=60  # consider daemon alive if it logged within this many sec
 SYNC_CHECK=1           # set to 0 to disable sync-stall detection
 SYNC_STALL_BLOCKS=3    # blocks behind peer tip before counting as stalled
 SYNC_STALL_POLLS=20    # consecutive stall polls before restart (~60s at default POLL_INTERVAL)
+PEER_CHECK=1           # set to 0 to disable zero-peer detection
+ZERO_PEER_POLLS=40     # consecutive zero-peer polls before restart (~120s at default POLL_INTERVAL)
 DRY_RUN=0
 NETWORK="mainnet"
 
@@ -99,6 +103,8 @@ while [[ $# -gt 0 ]]; do
         --no-sync-check)      SYNC_CHECK=0; shift ;;
         --sync-stall-blocks)  SYNC_STALL_BLOCKS="$2"; shift 2 ;;
         --sync-stall-polls)   SYNC_STALL_POLLS="$2";  shift 2 ;;
+        --no-peer-check)      PEER_CHECK=0; shift ;;
+        --zero-peer-polls)    ZERO_PEER_POLLS="$2"; shift 2 ;;
         --dry-run)            DRY_RUN=1; shift ;;
         -h|--help)            usage ;;
         *) echo "Unknown option: $1"; usage ;;
@@ -138,7 +144,7 @@ fi
 CLI_CMD="$CLI"
 [ "$NETWORK" = "testnet" ] && CLI_CMD="$CLI --testnet"
 
-log "Starting ($NETWORK) | poll=${POLL_INTERVAL}s fail-threshold=${FAIL_THRESHOLD} cooldown=${RESTART_COOLDOWN}s grace=${STARTUP_GRACE}s post-restart-grace=${POST_RESTART_GRACE}s rpc-timeout=${RPC_TIMEOUT}s busy-max=${RPC_BUSY_MAX} daemon-active-secs=${DAEMON_ACTIVE_SECS} sync-check=${SYNC_CHECK} sync-stall-blocks=${SYNC_STALL_BLOCKS} sync-stall-polls=${SYNC_STALL_POLLS} dry-run=${DRY_RUN}"
+log "Starting ($NETWORK) | poll=${POLL_INTERVAL}s fail-threshold=${FAIL_THRESHOLD} cooldown=${RESTART_COOLDOWN}s grace=${STARTUP_GRACE}s post-restart-grace=${POST_RESTART_GRACE}s rpc-timeout=${RPC_TIMEOUT}s busy-max=${RPC_BUSY_MAX} daemon-active-secs=${DAEMON_ACTIVE_SECS} sync-check=${SYNC_CHECK} sync-stall-blocks=${SYNC_STALL_BLOCKS} sync-stall-polls=${SYNC_STALL_POLLS} peer-check=${PEER_CHECK} zero-peer-polls=${ZERO_PEER_POLLS} dry-run=${DRY_RUN}"
 log "Using CLI: $CLI_CMD"
 
 # ── State ──────────────────────────────────────────────────────────────────────
@@ -150,6 +156,7 @@ cooldown_logged=0       # suppress repeated "cooldown active" log spam
 watchdog_start_ts=$(date +%s)   # used for one-time startup grace
 last_sync_height=-1     # local block height from last getblockchaininfo poll
 sync_stall_streak=0     # consecutive polls where height didn't advance while behind peers
+zero_peer_streak=0      # consecutive polls with 0 connected peers
 
 # ── Check if timed has logged recently (daemon alive but possibly busy) ────────
 # Returns 0 (true) if timed has written a log entry within the last N seconds.
@@ -276,6 +283,35 @@ check_sync_stall() {
 
     last_sync_height=$blocks_height
     [ "$sync_stall_streak" -ge "$SYNC_STALL_POLLS" ]
+}
+
+# ── Zero-peer check ───────────────────────────────────────────────────────────
+# Calls getconnectioncount; returns 1 when the node has had 0 peers for
+# ZERO_PEER_POLLS consecutive polls.  Returns 0 (healthy or check disabled).
+# A longer default threshold (120s) gives the outbound dialer time to
+# reconnect after a brief network hiccup without causing false restarts.
+check_zero_peers() {
+    [ "$PEER_CHECK" -eq 0 ] && return 0
+
+    local count
+    count=$(timeout "$RPC_TIMEOUT" $CLI_CMD getconnectioncount 2>/dev/null) || count=""
+
+    if [ -z "$count" ] || ! [[ "$count" =~ ^[0-9]+$ ]]; then
+        # RPC unavailable — masternodestatus path handles this.
+        return 0
+    fi
+
+    if [ "$count" -eq 0 ]; then
+        zero_peer_streak=$(( zero_peer_streak + 1 ))
+        logw "🔌 No peers connected (streak: ${zero_peer_streak}/${ZERO_PEER_POLLS})"
+    else
+        if [ "$zero_peer_streak" -gt 0 ]; then
+            log "Peers reconnected (count=${count}) — clearing zero-peer streak"
+        fi
+        zero_peer_streak=0
+    fi
+
+    [ "$zero_peer_streak" -ge "$ZERO_PEER_POLLS" ]
 }
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
@@ -463,6 +499,33 @@ while true; do
         else
             remaining=$(( RESTART_COOLDOWN - since_last ))
             logw "Sync stalled — restart cooldown active (${remaining}s remaining)"
+        fi
+    fi
+
+    # 3c. Zero-peer check — runs every poll independently of other checks.
+    if check_zero_peers; then
+        now=$(date +%s)
+        since_last=$(( now - last_restart_ts ))
+        if [ "$since_last" -ge "$RESTART_COOLDOWN" ]; then
+            total_restarts=$(( total_restarts + 1 ))
+            if [ "$DRY_RUN" -eq 1 ]; then
+                log "DRY-RUN: 0 peers for $((zero_peer_streak * POLL_INTERVAL))s — would restart (restart #${total_restarts})"
+            else
+                log "🔌 No peers for $((zero_peer_streak * POLL_INTERVAL))s (${zero_peer_streak} polls) — restarting timed (restart #${total_restarts})"
+                if systemctl restart timed; then
+                    log "✅ systemctl restart timed succeeded"
+                else
+                    loge "systemctl restart timed FAILED (exit $?)"
+                fi
+            fi
+            last_restart_ts=$now
+            zero_peer_streak=0
+            sync_stall_streak=0
+            fail_streak=0
+            cooldown_logged=0
+        else
+            remaining=$(( RESTART_COOLDOWN - since_last ))
+            logw "0 peers — restart cooldown active (${remaining}s remaining)"
         fi
     fi
 
