@@ -12,6 +12,9 @@ ExecStart=/usr/local/bin/time-auto-update
 # Run as root so update.sh can call systemctl stop/start.
 User=root
 
+# Ensure $HOME is set so the script can find ~/time-masternode.
+Environment=HOME=/root
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=time-auto-update
