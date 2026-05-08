@@ -51,7 +51,7 @@
 #   --fail-threshold N       Consecutive confirmed "not active" readings before restart (default: 3)
 #   --restart-cooldown N     Min seconds between restarts (default: 60)
 #   --startup-grace N        Seconds to wait after watchdog launches before monitoring (default: 3)
-#   --post-restart-grace N   Seconds to skip polling after each restart while daemon initializes (default: 20)
+#   --post-restart-grace N   Seconds to skip polling after each restart while daemon initializes (default: 30)
 #   --boot-grace N           Seconds to skip polling after timed starts for any reason (reboot, update, manual
 #                            restart) — covers reindex time on slower nodes (default: 300)
 #   --rpc-timeout N          Seconds to wait for time-cli RPC response (default: 5)
@@ -72,7 +72,7 @@ POLL_INTERVAL=3
 FAIL_THRESHOLD=3       # confirmed "not active" RPC responses before restart
 RESTART_COOLDOWN=60
 STARTUP_GRACE=3
-POST_RESTART_GRACE=20  # seconds to skip polling after each restart (daemon init time)
+POST_RESTART_GRACE=30  # seconds to skip polling after each restart (daemon init time)
 BOOT_GRACE=300         # seconds to skip polling after timed starts for any reason (reindex on slower nodes)
 RPC_TIMEOUT=5          # seconds to wait for time-cli before treating as failure
 RPC_BUSY_MAX=5         # consecutive timeouts while daemon is still logging → restart
