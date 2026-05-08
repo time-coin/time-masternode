@@ -52,6 +52,8 @@
 #   --restart-cooldown N     Min seconds between restarts (default: 60)
 #   --startup-grace N        Seconds to wait after watchdog launches before monitoring (default: 3)
 #   --post-restart-grace N   Seconds to skip polling after each restart while daemon initializes (default: 20)
+#   --boot-grace N           Seconds to skip polling after timed starts for any reason (reboot, update, manual
+#                            restart) — covers reindex time on slower nodes (default: 300)
 #   --rpc-timeout N          Seconds to wait for time-cli RPC response (default: 5)
 #   --rpc-busy-max N         Consecutive RPC timeouts while daemon is logging before restart (default: 5)
 #   --daemon-active-secs N   Consider daemon alive if it logged within this many seconds (default: 60)
@@ -71,6 +73,7 @@ FAIL_THRESHOLD=3       # confirmed "not active" RPC responses before restart
 RESTART_COOLDOWN=60
 STARTUP_GRACE=3
 POST_RESTART_GRACE=20  # seconds to skip polling after each restart (daemon init time)
+BOOT_GRACE=300         # seconds to skip polling after timed starts for any reason (reindex on slower nodes)
 RPC_TIMEOUT=5          # seconds to wait for time-cli before treating as failure
 RPC_BUSY_MAX=5         # consecutive timeouts while daemon is still logging → restart
 DAEMON_ACTIVE_SECS=60  # consider daemon alive if it logged within this many seconds
@@ -97,6 +100,7 @@ while [[ $# -gt 0 ]]; do
         --restart-cooldown)   RESTART_COOLDOWN="$2"; shift 2 ;;
         --startup-grace)      STARTUP_GRACE="$2"; shift 2 ;;
         --post-restart-grace) POST_RESTART_GRACE="$2"; shift 2 ;;
+        --boot-grace)         BOOT_GRACE="$2"; shift 2 ;;
         --rpc-timeout)        RPC_TIMEOUT="$2"; shift 2 ;;
         --rpc-busy-max)       RPC_BUSY_MAX="$2"; shift 2 ;;
         --daemon-active-secs) DAEMON_ACTIVE_SECS="$2"; shift 2 ;;
@@ -144,7 +148,7 @@ fi
 CLI_CMD="$CLI"
 [ "$NETWORK" = "testnet" ] && CLI_CMD="$CLI --testnet"
 
-log "Starting ($NETWORK) | poll=${POLL_INTERVAL}s fail-threshold=${FAIL_THRESHOLD} cooldown=${RESTART_COOLDOWN}s grace=${STARTUP_GRACE}s post-restart-grace=${POST_RESTART_GRACE}s rpc-timeout=${RPC_TIMEOUT}s busy-max=${RPC_BUSY_MAX} daemon-active-secs=${DAEMON_ACTIVE_SECS} sync-check=${SYNC_CHECK} sync-stall-blocks=${SYNC_STALL_BLOCKS} sync-stall-polls=${SYNC_STALL_POLLS} peer-check=${PEER_CHECK} zero-peer-polls=${ZERO_PEER_POLLS} dry-run=${DRY_RUN}"
+log "Starting ($NETWORK) | poll=${POLL_INTERVAL}s fail-threshold=${FAIL_THRESHOLD} cooldown=${RESTART_COOLDOWN}s grace=${STARTUP_GRACE}s post-restart-grace=${POST_RESTART_GRACE}s boot-grace=${BOOT_GRACE}s rpc-timeout=${RPC_TIMEOUT}s busy-max=${RPC_BUSY_MAX} daemon-active-secs=${DAEMON_ACTIVE_SECS} sync-check=${SYNC_CHECK} sync-stall-blocks=${SYNC_STALL_BLOCKS} sync-stall-polls=${SYNC_STALL_POLLS} peer-check=${PEER_CHECK} zero-peer-polls=${ZERO_PEER_POLLS} dry-run=${DRY_RUN}"
 log "Using CLI: $CLI_CMD"
 
 # ── State ──────────────────────────────────────────────────────────────────────
@@ -380,10 +384,21 @@ while true; do
         continue
     fi
 
-    # 2b. Post-restart grace: after each restart give the daemon time to initialize
-    #     before we start polling.  Emits a single log line on entry and skips RPC
-    #     calls until the grace window expires, avoiding silent rpc_busy_streak
-    #     burn-down and false "unresponsive" log noise.
+    # 2b. Post-restart / boot grace: give the daemon time to initialize after any
+    #     start — whether triggered by the watchdog, update.sh, or system boot.
+    #     BOOT_GRACE covers reindex time on slower nodes (default 300s / 5 min).
+    #     POST_RESTART_GRACE is the shorter fallback used only when timed started
+    #     before BOOT_GRACE was added (i.e. last_restart_ts is set and timed's
+    #     own start time is unavailable).
+    timed_started_ago=$(service_started_ago)
+    if [ "$timed_started_ago" -lt "$BOOT_GRACE" ]; then
+        remaining=$(( BOOT_GRACE - timed_started_ago ))
+        # Log only once per grace entry (first poll after start)
+        if [ "$remaining" -ge $(( BOOT_GRACE - POLL_INTERVAL - 1 )) ]; then
+            log "⏸️ Boot/update grace: timed started ${timed_started_ago}s ago — waiting up to ${BOOT_GRACE}s for daemon to fully initialize (reindex etc.)"
+        fi
+        continue
+    fi
     if [ "$last_restart_ts" -gt 0 ]; then
         since_restart=$(( $(date +%s) - last_restart_ts ))
         if [ "$since_restart" -lt "$POST_RESTART_GRACE" ]; then
