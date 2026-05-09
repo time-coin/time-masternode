@@ -1509,12 +1509,12 @@ A height gate is required because all existing nodes have already replayed the s
 
 ---
 
-### 15.17 ⚠️ OPEN — `tx_finalized` Rate-Limit Saturation Without Peer Escalation (AV40)
+### 15.17 ✅ FIXED — `tx_finalized` Rate-Limit Saturation Without Peer Escalation (AV40)
 
-**Status:** **OPEN** (observed April 16, 2026 — fix recommended)
+**Status:** **FIXED** (v1.4.37)
 **Severity:** Medium — log flooding, minor CPU overhead, attacker never banned
 
-**Attack:** An attacker (or coordinated group) floods `TransactionFinalized` messages at a rate exceeding the per-peer cap (20/10 s). The rate limiter in `rate_limiter.rs` correctly drops the excess messages, but because the handler body is never reached for rate-limited messages, `record_finality_injection()` is never called. The AttackDetector accumulates no signal, so the escalation tiers (≥5 → `RateLimitPeer`, ≥20 → `BlockPeer`) defined in AV38 are never triggered. The flooding peer stays connected and can sustain the attack indefinitely.
+**Attack:** An attacker (or coordinated group) floods `TransactionFinalized` messages at a rate exceeding the per-peer cap (20/10 s). The rate limiter in `rate_limiter.rs` correctly drops the excess messages, but because the handler body is never reached for rate-limited messages, `record_finality_injection()` is never called. The AttackDetector accumulates no signal, so the escalation tiers (≥5 → `RateLimitPeer`, ≥20 → `BlockPeer`) defined in AV38 are never triggered.
 
 **Observed attack (April 16, 2026 — LW-Michigan, 17:04:12–17:04:31):**
 - `43.119.35.195` — 30+ rate-limit hits at 17:04:12, 9 TXs slipped through at 17:04:31, then ~150 more rate-limit hits in the same second. Peer never disconnected.
@@ -1523,29 +1523,12 @@ A height gate is required because all existing nodes have already replayed the s
 - `50.28.104.50` — 10 rate-limit hits at 17:04:47–50. Peer never disconnected.
 - Four peers flooding simultaneously — coordinated campaign.
 
-**Root cause:** The `"tx_finalized"` rate limiter in `rate_limiter.rs` drops messages silently and returns an error to the caller. The `TransactionFinalized` handler discards the error without recording a violation. Unlike ping handling (which has a `ping_excess_streak` counter that escalates after 3 consecutive rate-limit hits into `record_violation()` + `record_ping_flood()`), `tx_finalized` has no equivalent streak escalation.
+**Root cause:** The `"tx_finalized"` rate limiter dropped messages silently without recording a violation. Unlike ping handling (which had a `ping_excess_streak` counter), `tx_finalized` had no equivalent streak escalation.
 
-**Impact:**
-- Hundreds of WARN lines per second obscure real events in the log
-- The rate-limit check itself runs on every incoming message, consuming CPU per flooded packet
-- Attackers are never penalized, so the attack has zero cost to sustain
-- Coordinated multi-peer flooding is not detected as an aggregate signal
-
-**Recommended Fix:**
-Add a `tx_finalized_excess_streak` counter (mirroring `ping_excess_streak`) in the message dispatch path. After N consecutive rate-limit exceedances (e.g., 5), call `record_finality_injection()` so that the existing AV38 two-tier escalation (`RateLimitPeer` / `BlockPeer`) kicks in normally.
-
-```rust
-// In the TransactionFinalized dispatch path, after rate_limiter.check() returns Err:
-tx_finalized_excess_streak += 1;
-if tx_finalized_excess_streak >= 5 {
-    attack_detector.record_finality_injection(&peer_ip);
-    tx_finalized_excess_streak = 0;
-}
-```
+**Fix:** Added `tx_finalized_excess_streak` counter in `server.rs` `TransactionFinalized` dispatch path. After 5 consecutive rate-limit exceedances, calls `record_finality_injection()` so the existing AV38 two-tier escalation (`RateLimitPeer` / `BlockPeer`) kicks in. On trigger, streak resets and flooder is kicked if violation threshold met.
 
 **Code References:**
-- `src/network/server.rs` — `TransactionFinalized` handler; `ping_excess_streak` escalation model
-- `src/network/rate_limiter.rs` — `"tx_finalized"` rate-limit entry
+- `src/network/server.rs` — `tx_finalized_excess_streak` counter (~line 1055, 1825–1858)
 - `src/ai/attack_detector.rs` — `record_finality_injection()` two-tier sliding-window detection
 
 ---

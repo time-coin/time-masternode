@@ -46,6 +46,7 @@ pub enum AttackType {
     FrameBomb, // Crafted TCP frame header claiming multi-GB payload to OOM/crash the node (AV51)
     CollateralHijack, // MasternodeRegistration claiming a UTXO not owned by the registrant (AV52)
     RewardRedirect, // Claimed collateral UTXO owner address mismatches announced reward address — block rewards siphoning attempt (AV54)
+    InvalidTxSpam, // Peer submits repeated invalid transactions (bad UTXO ref, bad signature, etc.) to waste validation CPU
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +161,9 @@ pub struct AttackDetector {
     /// Per-IP zero-value collateral registration timestamps for ZeroCollateralPollution (AV40).
     /// Key: IP address, Value: deque of zero-collateral registration Unix timestamps.
     zero_collateral_pollution_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
+    /// Per-IP invalid-transaction timestamps for InvalidTxSpam detection.
+    /// Key: IP address, Value: deque of Unix timestamps when an invalid TX was received.
+    invalid_tx_spam_times: Arc<RwLock<HashMap<String, VecDeque<u64>>>>,
     /// Fires when a new (non-duplicate) attack is detected so the enforcement
     /// loop can wake up immediately instead of waiting the full 30-second tick.
     ban_notify: Arc<tokio::sync::Notify>,
@@ -188,6 +192,7 @@ impl AttackDetector {
             reward_redirect_times: Arc::new(RwLock::new(HashMap::new())),
             reward_redirect_subnet: Arc::new(RwLock::new(HashMap::new())),
             zero_collateral_pollution_times: Arc::new(RwLock::new(HashMap::new())),
+            invalid_tx_spam_times: Arc::new(RwLock::new(HashMap::new())),
             ban_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
@@ -1574,6 +1579,80 @@ impl AttackDetector {
                     ),
                     "Staked-tier announcement with 0-value UTXO — never legitimate".to_string(),
                 ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::RateLimitPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        }
+    }
+
+    /// Record a repeated-invalid-transaction submission from `addr`.
+    ///
+    /// A single invalid TX is often a benign race condition (stale UTXO, double-spend retry).
+    /// After 5 invalid transactions in 60 s the banlist has already issued a violation; this
+    /// method gives the AI detector visibility so coordinated campaigns across multiple IPs
+    /// can be correlated and the peer can be escalated to `BlockPeer`.
+    ///
+    /// Thresholds:
+    ///   ≥5  in 60 s → `RateLimitPeer`   (suspicious; the banlist 3-strike guard lets some through)
+    ///   ≥10 in 60 s → `BlockPeer`        (sustained spam — ban the sender)
+    pub fn record_invalid_tx_spam(&self, addr: &str) {
+        let now = Self::now_secs();
+        const INVALID_TX_WINDOW_SECS: u64 = 60;
+        const RATE_LIMIT_THRESHOLD: usize = 5;
+        const BLOCK_THRESHOLD: usize = 10;
+
+        let count = {
+            let mut map = self.invalid_tx_spam_times.write();
+            let timestamps = map.entry(addr.to_string()).or_default();
+            while timestamps
+                .front()
+                .map(|t| now.saturating_sub(*t) > INVALID_TX_WINDOW_SECS)
+                .unwrap_or(false)
+            {
+                timestamps.pop_front();
+            }
+            timestamps.push_back(now);
+            timestamps.len()
+        };
+
+        if count >= BLOCK_THRESHOLD {
+            tracing::warn!(
+                "🚫 InvalidTxSpam from {} — {} invalid TXs in {}s — blocking",
+                addr, count, INVALID_TX_WINDOW_SECS
+            );
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::InvalidTxSpam,
+                confidence: 0.90,
+                severity: AttackSeverity::High,
+                indicators: vec![
+                    format!(
+                        "{} invalid transactions from {} within {}s",
+                        count, addr, INVALID_TX_WINDOW_SECS
+                    ),
+                    "Repeated invalid TXs (bad UTXO ref / bad signature) waste validation CPU".to_string(),
+                ],
+                first_detected: now,
+                last_seen: now,
+                source_ips: vec![addr.to_string()],
+                recommended_action: MitigationAction::BlockPeer(addr.to_string()),
+                mitigation_applied_at: None,
+            });
+        } else if count >= RATE_LIMIT_THRESHOLD {
+            tracing::debug!(
+                "⚠️  InvalidTxSpam from {} — {} invalid TXs in {}s — rate-limiting",
+                addr, count, INVALID_TX_WINDOW_SECS
+            );
+            self.maybe_add_attack(AttackPattern {
+                attack_type: AttackType::InvalidTxSpam,
+                confidence: 0.70,
+                severity: AttackSeverity::Medium,
+                indicators: vec![format!(
+                    "{} invalid transactions from {} within {}s",
+                    count, addr, INVALID_TX_WINDOW_SECS
+                )],
                 first_detected: now,
                 last_seen: now,
                 source_ips: vec![addr.to_string()],

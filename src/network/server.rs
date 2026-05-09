@@ -833,6 +833,9 @@ async fn handle_peer(
                                 .write()
                                 .await
                                 .record_violation(ip, &format!("Invalid TLS SNI: {}", sni_desc));
+                            if let Some(ref ai) = ai_system {
+                                ai.attack_detector.record_tls_failure(&ip_str);
+                            }
                             tracing::debug!(
                                 "🚫 Rejected {} — invalid SNI {:?} (not a TIME node)",
                                 ip,
@@ -1799,6 +1802,9 @@ async fn handle_peer(
                                                     let mut banlist_guard = banlist.write().await;
                                                     let should_ban = banlist_guard.record_violation(ip, "Repeated invalid transactions");
                                                     drop(banlist_guard);
+                                                    if let Some(ref ai) = ai_system {
+                                                        ai.attack_detector.record_invalid_tx_spam(&ip_str);
+                                                    }
                                                     if should_ban {
                                                         tracing::warn!("🚫 Disconnecting {} due to repeated invalid transactions ({})", peer.addr, invalid_tx_count);
                                                         peer_registry.kick_peer(&ip_str).await;
