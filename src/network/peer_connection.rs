@@ -1261,7 +1261,7 @@ impl PeerConnection {
                         // connection and let resync / convergence resolve it.
                         if self.is_whitelisted {
                             warn!(
-                                "⚠️ [{:?}] Genesis mismatch with WHITELISTED peer {} — keeping connection (operator-trusted; likely local divergence)",
+                                "🚫 [{:?}] Genesis mismatch with whitelisted peer {} — disconnecting and banning (wrong chain, operator-trust does not override).",
                                 self.direction, self.peer_ip
                             );
                         } else {
@@ -1269,23 +1269,21 @@ impl PeerConnection {
                                 "🚫 [{:?}] Disconnecting {} — genesis hash mismatch (wrong network/fork). Banning.",
                                 self.direction, self.peer_ip
                             );
-                            if let Some(ref banlist) = config.banlist {
-                                let bare = self
-                                    .peer_ip
-                                    .split(':')
-                                    .next()
-                                    .unwrap_or(&self.peer_ip);
-                                if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-                                    if !banlist.read().await.is_whitelisted(ip) {
-                                        banlist
-                                            .write()
-                                            .await
-                                            .add_permanent_ban(ip, "genesis hash mismatch");
-                                    }
-                                }
-                            }
-                            break;
                         }
+                        if let Some(ref banlist) = config.banlist {
+                            let bare = self
+                                .peer_ip
+                                .split(':')
+                                .next()
+                                .unwrap_or(&self.peer_ip);
+                            if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+                                banlist
+                                    .write()
+                                    .await
+                                    .add_genesis_ban(ip, "genesis hash mismatch");
+                            }
+                        }
+                        break;
                     }
                 }
 

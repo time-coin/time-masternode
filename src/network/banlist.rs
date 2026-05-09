@@ -16,6 +16,13 @@ pub struct IPBanlist {
     permanent_banlist: HashMap<IpAddr, String>,
     /// Temporarily banned IPs with expiry time
     temp_banlist: HashMap<IpAddr, (Instant, String)>,
+    /// Frame-bomb-specific temp bans — NOT exempt from whitelist, used to back off
+    /// operator-owned (whitelisted) nodes that are sending oversized frames.
+    /// Short durations only (2 min / 15 min); never permanent.
+    frame_bomb_bans: HashMap<IpAddr, (Instant, String)>,
+    /// Wrong-genesis permanent bans — NOT exempt from whitelist.
+    /// A peer on a different chain is fundamentally incompatible regardless of operator trust.
+    wrong_genesis_banlist: HashMap<IpAddr, String>,
     /// Violation tracking: IP -> (violation_count, last_violation_time)
     violations: HashMap<IpAddr, (u32, Instant)>,
     /// Whitelisted IPs (exempt from all bans and rate limits) - typically masternodes
@@ -27,6 +34,7 @@ pub struct IPBanlist {
     db_temp: Option<sled::Tree>,
     db_subnet: Option<sled::Tree>,
     db_violations: Option<sled::Tree>,
+    db_genesis: Option<sled::Tree>,
 }
 
 impl IPBanlist {
@@ -34,6 +42,8 @@ impl IPBanlist {
         Self {
             permanent_banlist: HashMap::new(),
             temp_banlist: HashMap::new(),
+            frame_bomb_bans: HashMap::new(),
+            wrong_genesis_banlist: HashMap::new(),
             violations: HashMap::new(),
             whitelist: HashMap::new(),
             subnet_banlist: Vec::new(),
@@ -41,6 +51,7 @@ impl IPBanlist {
             db_temp: None,
             db_subnet: None,
             db_violations: None,
+            db_genesis: None,
         }
     }
 
@@ -59,6 +70,7 @@ impl IPBanlist {
         self.db_temp = Some(open("ip_bans_temp"));
         self.db_subnet = Some(open("ip_bans_subnet"));
         self.db_violations = Some(open("ip_bans_violations"));
+        self.db_genesis = Some(open("ip_bans_genesis"));
 
         let now_unix = unix_now();
 
@@ -188,6 +200,27 @@ impl IPBanlist {
                 tracing::info!("🔒 Loaded {} violation counter(s) from sled", loaded);
             }
         }
+
+        // ── Load wrong-genesis bans (never exempt from whitelist) ────────
+        if let Some(tree) = &self.db_genesis {
+            for item in tree.iter().flatten() {
+                let (k, v) = item;
+                if let Ok(ip) = std::str::from_utf8(&k)
+                    .ok()
+                    .and_then(|s| s.parse::<IpAddr>().ok())
+                    .ok_or(())
+                {
+                    let reason = String::from_utf8_lossy(&v).into_owned();
+                    self.wrong_genesis_banlist.insert(ip, reason);
+                }
+            }
+            if !self.wrong_genesis_banlist.is_empty() {
+                tracing::info!(
+                    "🔒 Loaded {} wrong-genesis ban(s) from sled",
+                    self.wrong_genesis_banlist.len()
+                );
+            }
+        }
     }
 
     // ── Private sled helpers ─────────────────────────────────────────────
@@ -224,6 +257,12 @@ impl IPBanlist {
         }
     }
 
+    fn persist_genesis(&self, ip: IpAddr, reason: &str) {
+        if let Some(tree) = &self.db_genesis {
+            let _ = tree.insert(ip.to_string().as_bytes(), reason.as_bytes());
+        }
+    }
+
     fn remove_subnet(&self, cidr: &str) {
         if let Some(tree) = &self.db_subnet {
             let _ = tree.remove(cidr.as_bytes());
@@ -251,6 +290,7 @@ impl IPBanlist {
         // Remove any existing bans or violations for whitelisted IPs
         self.permanent_banlist.remove(&ip);
         self.temp_banlist.remove(&ip);
+        self.frame_bomb_bans.remove(&ip);
         self.violations.remove(&ip);
         self.remove_permanent(ip);
         self.remove_temp(ip);
@@ -360,9 +400,26 @@ impl IPBanlist {
     }
 
     /// Check if an IP is currently banned.
-    /// Whitelisted IPs are exempt from all bans (permanent, temporary, and subnet).
+    /// Whitelisted IPs are exempt from all normal bans (permanent, temporary, and subnet),
+    /// but NOT from frame-bomb bans — those apply even to trusted nodes to force backoff.
     pub fn is_banned(&mut self, ip: IpAddr) -> Option<String> {
-        // Whitelisted IPs are exempt from all bans — check first.
+        // Frame-bomb bans bypass whitelist exemption — check before the whitelist early-return.
+        if let Some((expiry, reason)) = self.frame_bomb_bans.get(&ip) {
+            if Instant::now() < *expiry {
+                let remaining = expiry.duration_since(Instant::now()).as_secs();
+                return Some(format!("Frame-bomb temp ban for {}s: {}", remaining, reason));
+            } else {
+                self.frame_bomb_bans.remove(&ip);
+            }
+        }
+
+        // Wrong-genesis bans bypass whitelist exemption — a peer on a different chain
+        // is fundamentally incompatible regardless of operator trust.
+        if let Some(reason) = self.wrong_genesis_banlist.get(&ip) {
+            return Some(format!("Permanently banned: wrong genesis: {}", reason));
+        }
+
+        // Whitelisted IPs are exempt from all other bans — check first.
         if self.is_whitelisted(ip) {
             return None;
         }
@@ -546,18 +603,10 @@ impl IPBanlist {
     /// frame bombs are never legitimate traffic. Bans are temporary and never escalate to
     /// permanent, so an operator-owned node can recover after an upgrade.
     ///
-    /// 1st offence → 5-minute ban. 2nd+ offence → 1-hour ban, cycling.
+    /// Non-whitelisted peers: 1st offence → 5-min ban, 2nd+ → 1-hour ban.
+    /// Whitelisted peers:     1st offence → 2-min ban, 2nd+ → 15-min ban
+    ///   (shorter durations — trusted nodes auto-recover faster after an upgrade/restart).
     pub fn record_frame_bomb_violation(&mut self, ip: IpAddr, reason: &str) -> bool {
-        // Whitelisted IPs are never banned — they are the operator's own nodes.
-        if self.is_whitelisted(ip) {
-            tracing::warn!(
-                "⚠️  Oversized frame from whitelisted peer {} — closing connection (stream unrecoverable, peer needs upgrade): {}",
-                ip,
-                reason
-            );
-            return false;
-        }
-
         let now = Instant::now();
         let (count, last_time) = self.violations.entry(ip).or_insert((0, now));
 
@@ -570,20 +619,39 @@ impl IPBanlist {
         let count_snap = *count;
         self.persist_violation(ip, count_snap);
 
-        if count_snap == 1 {
-            self.add_temp_ban(ip, Duration::from_secs(300), reason);
+        if self.is_whitelisted(ip) {
+            // Trusted (operator-owned) node: shorter temp ban stored in frame_bomb_bans,
+            // which bypasses the whitelist exemption in is_banned().
+            let duration = if count_snap == 1 {
+                Duration::from_secs(120) // 2 min first offence
+            } else {
+                Duration::from_secs(900) // 15 min repeat
+            };
+            let expiry = now + duration;
+            self.frame_bomb_bans
+                .insert(ip, (expiry, reason.to_string()));
             tracing::warn!(
-                "🚫 Frame bomb from {} — temp ban 5 min (offence #{})",
+                "🚫 Frame bomb from whitelisted peer {} — temp ban {}s (offence #{}) — will recover automatically",
                 ip,
+                duration.as_secs(),
                 count_snap
             );
         } else {
-            self.add_temp_ban(ip, Duration::from_secs(3600), reason);
-            tracing::warn!(
-                "🚫 Frame bomb from {} — temp ban 1 hour (offence #{})",
-                ip,
-                count_snap
-            );
+            if count_snap == 1 {
+                self.add_temp_ban(ip, Duration::from_secs(300), reason);
+                tracing::warn!(
+                    "🚫 Frame bomb from {} — temp ban 5 min (offence #{})",
+                    ip,
+                    count_snap
+                );
+            } else {
+                self.add_temp_ban(ip, Duration::from_secs(3600), reason);
+                tracing::warn!(
+                    "🚫 Frame bomb from {} — temp ban 1 hour (offence #{})",
+                    ip,
+                    count_snap
+                );
+            }
         }
         true
     }
@@ -605,10 +673,20 @@ impl IPBanlist {
         self.remove_temp(ip);
     }
 
+    /// Add a wrong-genesis permanent ban. Not exempt from whitelist — a peer on a
+    /// different chain is incompatible regardless of operator trust.
+    pub fn add_genesis_ban(&mut self, ip: IpAddr, reason: &str) {
+        self.wrong_genesis_banlist.insert(ip, reason.to_string());
+        self.persist_genesis(ip, reason);
+    }
+
     /// Clean up expired temporary bans and old violations (call periodically)
     pub fn cleanup(&mut self) {
         let now = Instant::now();
         let now_unix = unix_now();
+
+        // Remove expired frame-bomb bans (in-memory only — not persisted)
+        self.frame_bomb_bans.retain(|_, (expiry, _)| now < *expiry);
 
         // Remove expired temp bans (and prune from sled)
         let expired_ips: Vec<IpAddr> = self
