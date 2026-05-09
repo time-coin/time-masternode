@@ -98,5 +98,12 @@ for NET in mainnet testnet; do
     echo "    Reindex sentinel created — daemon will reindex on startup"
 
     echo "==> Starting $NET ($SVC)..."
-    systemctl start "$SVC" && journalctl -u "$SVC" -f | ccze -A
+    systemctl start "$SVC"
+    # Only follow the journal when running interactively.
+    # When called from auto-update.timer, stdout is not a TTY, so we skip
+    # this — journalctl -f blocks forever and prevents the oneshot service
+    # from ever completing (which stops all future timer runs).
+    if [ -t 1 ]; then
+        journalctl -u "$SVC" -f | ccze -A
+    fi
 done
