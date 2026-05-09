@@ -790,9 +790,18 @@ async fn handle_peer(
     let _connection_start = std::time::Instant::now();
 
     // Wrap with TLS if configured
-    // For TLS: spawn a dedicated I/O bridge task that owns the whole stream,
-    // avoiding `tokio::io::split()` which causes frame corruption on TLS streams.
-    // For non-TLS: `TcpStream::into_split()` is safe (true full-duplex).
+    // For TLS: split into separate reader and writer tasks using `tokio::io::split()`.
+    // The original single-task `tokio::select!(read_message, write_rx.recv())` bridge
+    // was NOT cancellation-safe: `read_message` calls `read_exact` internally, which
+    // is documented as not cancellation-safe.  When a write became ready mid-frame the
+    // select! branch would cancel `read_message` after consuming some bytes from the
+    // stream, leaving the stream at an inconsistent offset.  The next `read_message`
+    // call then read mid-payload bytes as a frame-length prefix — producing the
+    // deterministic 100 MB–3 GB "FrameBomb" sizes seen in production logs.
+    // `tokio::io::split()` is safe here because rustls uses TLS 1.3 exclusively
+    // (no renegotiation), so neither half ever needs cross-direction TLS I/O after
+    // the handshake completes.
+    // For non-TLS: `TcpStream::into_split()` is already correct (true full-duplex).
     let (msg_read_tx, mut msg_read_rx) =
         tokio::sync::mpsc::channel::<Result<Option<NetworkMessage>, String>>(512);
     let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -837,12 +846,12 @@ async fn handle_peer(
                 // would otherwise spam the log with connections that immediately fail TLS.
                 tracing::info!("🔌 New peer connection from: {}", peer.addr);
                 tracing::debug!("🔒 TLS established for inbound {}", peer.addr);
-                let peer_addr = peer.addr.clone();
                 let gate_is_whitelisted = is_whitelisted;
-                // Spawn a single I/O bridge task that owns the TLS stream
+                let (mut tls_read, mut tls_write) = tokio::io::split(tls_stream);
+                // Spawn dedicated reader task — reads without competing with writes,
+                // eliminating the cancellation-safety hazard of the old select! bridge.
+                let peer_addr_r = peer.addr.clone();
                 tokio::spawn(async move {
-                    use tokio::io::AsyncWriteExt;
-                    let mut stream = tls_stream;
                     // Token-bucket flood gate: event-driven, no 1-second timer polling.
                     // Refills at GATE_RATE tokens/s; burst up to GATE_BURST.
                     // Soft-drops messages while tokens are exhausted; after
@@ -858,51 +867,49 @@ async fn handle_peer(
                     let mut gate_last = std::time::Instant::now();
                     let mut gate_drop_streak: u32 = 0;
                     loop {
-                        tokio::select! {
-                            result = crate::network::wire::read_message(&mut stream) => {
-                                let is_eof = matches!(&result, Ok(None));
-                                let is_err = result.is_err();
-                                // Token-bucket refill: time-since-last-message, not a timer.
-                                let gate_now = std::time::Instant::now();
-                                let elapsed = gate_now.duration_since(gate_last).as_secs_f64();
-                                gate_last = gate_now;
-                                gate_tokens = (gate_tokens + elapsed * gate_rate).min(gate_burst);
-                                if gate_tokens >= 1.0 {
-                                    gate_tokens -= 1.0;
-                                    gate_drop_streak = 0;
-                                } else {
-                                    gate_drop_streak += 1;
-                                    if !gate_is_whitelisted && gate_drop_streak > GATE_HARD_DROPS {
-                                        let _ = msg_read_tx.send(Err("Message flood detected: pre-channel gate triggered".to_string())).await;
-                                        break;
-                                    }
-                                    continue; // soft drop
-                                }
-                                if msg_read_tx.send(result).await.is_err() {
-                                    break; // receiver dropped
-                                }
-                                if is_eof || is_err {
-                                    break;
-                                }
+                        let result = crate::network::wire::read_message(&mut tls_read).await;
+                        let is_eof = matches!(&result, Ok(None));
+                        let is_err = result.is_err();
+                        // Token-bucket refill: time-since-last-message, not a timer.
+                        let gate_now = std::time::Instant::now();
+                        let elapsed = gate_now.duration_since(gate_last).as_secs_f64();
+                        gate_last = gate_now;
+                        gate_tokens = (gate_tokens + elapsed * gate_rate).min(gate_burst);
+                        if gate_tokens >= 1.0 {
+                            gate_tokens -= 1.0;
+                            gate_drop_streak = 0;
+                        } else {
+                            gate_drop_streak += 1;
+                            if !gate_is_whitelisted && gate_drop_streak > GATE_HARD_DROPS {
+                                let _ = msg_read_tx.send(Err("Message flood detected: pre-channel gate triggered".to_string())).await;
+                                break;
                             }
-                            bytes = write_rx.recv() => {
-                                match bytes {
-                                    Some(data) => {
-                                        if let Err(e) = stream.write_all(&data).await {
-                                            tracing::debug!("🔒 TLS write error for {}: {}", peer_addr, e);
-                                            break;
-                                        }
-                                        if let Err(e) = stream.flush().await {
-                                            tracing::debug!("🔒 TLS flush error for {}: {}", peer_addr, e);
-                                            break;
-                                        }
-                                    }
-                                    None => break, // writer channel closed
-                                }
-                            }
+                            continue; // soft drop
+                        }
+                        if msg_read_tx.send(result).await.is_err() {
+                            break; // receiver dropped
+                        }
+                        if is_eof || is_err {
+                            break;
                         }
                     }
-                    tracing::debug!("🔒 TLS I/O bridge exiting for {}", peer_addr);
+                    tracing::debug!("🔒 TLS reader task exiting for {}", peer_addr_r);
+                });
+                // Spawn dedicated writer task.
+                let peer_addr_w = peer.addr.clone();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    while let Some(data) = write_rx.recv().await {
+                        if let Err(e) = tls_write.write_all(&data).await {
+                            tracing::debug!("🔒 TLS write error for {}: {}", peer_addr_w, e);
+                            break;
+                        }
+                        if let Err(e) = tls_write.flush().await {
+                            tracing::debug!("🔒 TLS flush error for {}: {}", peer_addr_w, e);
+                            break;
+                        }
+                    }
+                    tracing::debug!("🔒 TLS writer task exiting for {}", peer_addr_w);
                 });
             }
             Err(e) => {
@@ -1120,12 +1127,11 @@ async fn handle_peer(
                                 ai.attack_detector.record_frame_bomb(&ip_str);
                             }
                             if is_whitelisted {
-                                // Whitelisted = operator's own node running old code.
-                                // record_frame_bomb_violation() is a no-op for whitelisted IPs
-                                // (logs only, no ban), but we still must close the TCP connection:
-                                // after reading a multi-GB length header the stream state is lost
-                                // and there is no way to find the next valid frame boundary.
-                                // The node will reconnect immediately (no ban applied).
+                                // Trusted (operator-owned) node: record_frame_bomb_violation()
+                                // applies a short temp ban via frame_bomb_bans (2 min / 15 min),
+                                // which bypasses the normal whitelist exemption in is_banned().
+                                // The stream is lost after a multi-GB length header; closing and
+                                // temp-banning forces a clean reconnect once the ban expires.
                                 banlist.write().await.record_frame_bomb_violation(ip, &e);
                             } else {
                                 banlist.write().await.record_violation(
