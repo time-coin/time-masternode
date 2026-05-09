@@ -54,6 +54,26 @@ The TIME Coin network layer implements a production-ready P2P system with:
 
 ---
 
+## Recent Changes (v1.5.5 - May 8, 2026)
+
+### TLS Bridge Cancellation-Safety Fix (FrameBomb Root Cause — `e78e843`)
+
+The `tokio::select!(read_message, write_rx.recv())` single-task TLS bridge introduced in commit `986435a` (May 5) was not cancellation-safe. `read_message` uses `read_exact` internally, which is explicitly documented as not cancellation-safe. When `select!` chose the write branch while `read_message` was mid-frame, already-consumed bytes were permanently lost, leaving the stream at a wrong offset. The next `read_message` interpreted mid-payload bytes as a 4-byte BE frame-length prefix — producing deterministic 100 MB–3 GB "FrameBomb" sizes across every TLS connection on the network. All v1.5.5 nodes were bombing each other symmetrically.
+
+**Fix:** Both TLS bridges (`server.rs` inbound, `peer_connection.rs` outbound) now use `tokio::io::split()` with separate dedicated reader and writer tasks — identical to the non-TLS path that had zero FrameBombs. `tokio::io::split()` is safe because rustls uses TLS 1.3 exclusively (no renegotiation, no cross-direction I/O post-handshake). The `select!` bridge is removed entirely.
+
+**History:** The `split()` approach was the original design (documented in v1.2.4 below). It was incorrectly reverted in `986435a` based on a TLS 1.2 renegotiation concern that does not apply to rustls. Today's commit restores the correct design with an updated explanation in the code comments.
+
+### `is_syncing` Flag Stuck After Rollback (`45f8a77`)
+
+`SyncGuard` (RAII wrapper that clears `is_syncing` on drop) was created *after* the early-exit check in `sync_from_peers`. Callers that set `is_syncing=true` before calling `sync_from_peers` — specifically rollback-to-genesis and fork-detection paths — would hit the early exit without the guard ever being created, leaving `is_syncing` permanently true. Affected nodes reported `initialblockdownload=true` indefinitely and were filtered out of wallet connection tabs. Fix: `SyncGuard` is now created before the early-exit check.
+
+### FrameBomb Whitelist Bypass Fix (`banlist.rs`)
+
+`IPBanlist.is_banned()` previously returned `None` (not banned) for whitelisted IPs before checking any ban maps, making FrameBomb bans completely ineffective for whitelisted peers. Fix: added `frame_bomb_bans: HashMap` checked **before** the whitelist early-return. Whitelisted peers receive shorter bans (2-min/15-min vs 5-min/1-hour) but are no longer exempt.
+
+---
+
 ## Recent Changes (v1.2.4 - March 2026)
 
 ### TLS I/O Race Condition Fix
