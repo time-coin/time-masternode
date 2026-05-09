@@ -18,3 +18,8 @@ Environment=HOME=/root
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=time-auto-update
+
+# Kill the service if it runs longer than 20 minutes — a release-fast build
+# takes ~5 minutes; anything beyond 20 minutes indicates a hang (e.g. a
+# journalctl -f that was left open without a TTY check).
+TimeoutStartSec=1200
