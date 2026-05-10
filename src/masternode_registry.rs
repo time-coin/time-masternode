@@ -1429,20 +1429,22 @@ impl MasternodeRegistry {
                             }
                         }
                     } else {
-                        // Case A: old UTXO still exists — genuine churn/spoof attempt.
-                        static CHURN_WARN: std::sync::OnceLock<
-                            dashmap::DashMap<String, std::time::Instant>,
-                        > = std::sync::OnceLock::new();
-                        let warn_map = CHURN_WARN.get_or_init(dashmap::DashMap::new);
-                        let needs_log = warn_map
-                            .get(&masternode.address)
-                            .map(|t| t.elapsed().as_secs() >= 60)
-                            .unwrap_or(true);
-                        if needs_log {
-                            warn_map.insert(masternode.address.clone(), std::time::Instant::now());
-                            tracing::warn!(
-                                "🛡️ [Collateral-Churn] Blocked outpoint replacement for on-chain \
-                                 node {} (on-chain: {}, rejected: {})",
+                        // Case A: old UTXO still exists.
+                        //
+                        // Exception: legitimate tier upgrade. If the new UTXO is owned by the
+                        // same wallet address as the announcing node (proven by Level 3 reward
+                        // address check in message_handler), the operator simply added a higher-
+                        // value collateral without spending the old one first. Allow this and
+                        // treat it as a collateral migration rather than a churn/spoof attempt.
+                        let is_ownership_verified = prefetched_utxo_addr
+                            .as_deref()
+                            .map(|addr| addr == masternode.wallet_address)
+                            .unwrap_or(false);
+
+                        if is_ownership_verified {
+                            tracing::info!(
+                                "🔄 [Collateral-Upgrade] Allowing outpoint replacement for {} \
+                                 — old UTXO still exists but new UTXO ownership verified (old: {}, new: {})",
                                 masternode.address,
                                 old_outpoint
                                     .as_ref()
@@ -1453,8 +1455,36 @@ impl MasternodeRegistry {
                                     .map(|o| o.to_string())
                                     .unwrap_or_default(),
                             );
+                            // Fall through to the update path below.
+                        } else {
+                            // Genuine churn/spoof attempt — no ownership proof for new UTXO.
+                            static CHURN_WARN: std::sync::OnceLock<
+                                dashmap::DashMap<String, std::time::Instant>,
+                            > = std::sync::OnceLock::new();
+                            let warn_map = CHURN_WARN.get_or_init(dashmap::DashMap::new);
+                            let needs_log = warn_map
+                                .get(&masternode.address)
+                                .map(|t| t.elapsed().as_secs() >= 60)
+                                .unwrap_or(true);
+                            if needs_log {
+                                warn_map
+                                    .insert(masternode.address.clone(), std::time::Instant::now());
+                                tracing::warn!(
+                                    "🛡️ [Collateral-Churn] Blocked outpoint replacement for on-chain \
+                                     node {} (on-chain: {}, rejected: {})",
+                                    masternode.address,
+                                    old_outpoint
+                                        .as_ref()
+                                        .map(|o| o.to_string())
+                                        .unwrap_or_default(),
+                                    new_outpoint
+                                        .as_ref()
+                                        .map(|o| o.to_string())
+                                        .unwrap_or_default(),
+                                );
+                            }
+                            return Err(RegistryError::CollateralAlreadyLocked);
                         }
-                        return Err(RegistryError::CollateralAlreadyLocked);
                     }
                 }
 
