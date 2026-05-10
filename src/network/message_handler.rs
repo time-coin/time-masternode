@@ -2567,15 +2567,19 @@ impl MessageHandler {
         };
         if block_height > max_valid_height {
             warn!(
-                "🚫 [{}] Peer {} announced block {} before launch (max valid height: {}) — disconnecting",
+                "⏭️ [{}] Peer {} announced block {} before launch (max valid height: {}) — \
+                 marking incompatible, keeping connection",
                 self.direction, self.peer_ip, block_height, max_valid_height
             );
             context
                 .peer_registry
-                .mark_genesis_incompatible(
+                .mark_incompatible(
                     &self.peer_ip,
-                    "pre-launch",
-                    &format!("height_{}_before_genesis", block_height),
+                    &format!(
+                        "Announced pre-launch block {} (max valid height: {})",
+                        block_height, max_valid_height
+                    ),
+                    false,
                 )
                 .await;
             self.suspend_peer_from_consensus(
@@ -2583,22 +2587,7 @@ impl MessageHandler {
                 &format!("Pre-launch block announcement {}", block_height),
             )
             .await;
-            if let Some(banlist) = &context.banlist {
-                let bare_ip = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
-                if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
-                    banlist.write().await.record_violation(
-                        ip,
-                        &format!(
-                            "Announced block {} before genesis launch (max valid height: {})",
-                            block_height, max_valid_height
-                        ),
-                    );
-                }
-            }
-            return Err(format!(
-                "DISCONNECT: peer {} announced pre-launch block {} (max valid height: {})",
-                self.peer_ip, block_height, max_valid_height
-            ));
+            return Ok(None);
         }
 
         let our_height = context.blockchain.get_height();
@@ -2771,90 +2760,62 @@ impl MessageHandler {
                     || e.contains("reward manipulation")
                     || e.contains("unknown masternodes")
                 {
-                    // Whitelisted peers are operator-trusted. A reward discrepancy
-                    // with a whitelisted peer almost certainly means OUR registry is
-                    // stale (we're running old code or missed some registrations) —
-                    // not that the peer is malicious. Never permanently ban a
-                    // whitelisted peer for reward disagreement; disconnect and let
-                    // the node resync instead.
                     let is_whitelisted = context.peer_registry.is_whitelisted(&self.peer_ip).await;
                     if is_whitelisted {
                         warn!(
                             "⚠️ [{}] Reward mismatch on block {} from WHITELISTED peer {} — \
                              likely local registry divergence (our code may be outdated). \
-                             Disconnecting without banning. Error: {}",
+                             Marking incompatible and keeping connection. Error: {}",
                             self.direction, block_height, self.peer_ip, e
                         );
-                        return Err(format!(
-                            "Reward mismatch with whitelisted peer {} on block {} (registry divergence — update your node)",
-                            self.peer_ip, block_height
-                        ));
+                    } else {
+                        warn!(
+                            "⚠️ [{}] Invalid reward distribution in block {} from {} — \
+                             marking incompatible, keeping connection: {}",
+                            self.direction, block_height, self.peer_ip, e
+                        );
                     }
-                    // The peer sent a block with an invalid reward distribution.
-                    // Use a 6-hour temporary ban rather than permanent — the root cause
-                    // can be a software bug (e.g. empty bitmap edge case) rather than
-                    // intentional manipulation.  Repeat offenders will remain banned
-                    // for the duration while legitimate nodes with fixed software can
-                    // reconnect after upgrading.
-                    warn!(
-                        "⚠️ [{}] Invalid reward distribution in block {} from {} — temp-banning 6h: {}",
-                        self.direction, block_height, self.peer_ip, e
-                    );
-                    if let Some(banlist) = &context.banlist {
-                        if let Ok(ip) = self.peer_ip.parse::<std::net::IpAddr>() {
-                            banlist.write().await.add_temp_ban(
-                                ip,
-                                std::time::Duration::from_secs(6 * 3600),
-                                &format!("Invalid reward block {}: {}", block_height, e),
-                            );
-                        }
-                    }
-                    // Mark peer incompatible for the current session so sync_from_peers
-                    // stops selecting them, but allow reconnect after the ban expires.
+                    // Mark peer incompatible so sync_from_peers stops selecting them,
+                    // but keep the connection so they can heal (e.g. after upgrading code).
                     context
                         .peer_registry
                         .mark_incompatible(
                             &self.peer_ip,
-                            &format!("Reward-hijacking block {}: {}", block_height, e),
-                            false, // not permanent
+                            &format!("Reward mismatch block {}: {}", block_height, e),
+                            false, // not permanent — peer can reconnect after upgrading
                         )
                         .await;
                     self.suspend_peer_from_consensus(
                         context,
-                        &format!("Reward-hijacking block {}: {}", block_height, e),
+                        &format!("Reward mismatch block {}: {}", block_height, e),
                     )
                     .await;
-                    return Err(format!(
-                        "Peer {} temp-banned 6h: sent invalid reward block {}",
-                        self.peer_ip, block_height
-                    ));
+                    return Ok(None);
                 } else if e.contains("exceeds maximum expected height")
                     || e.contains("produced too early by")
                     || e.contains("predates network genesis")
                 {
-                    // Block predates the genesis launch window — peer is still on the
-                    // old pre-launch chain.  Apply a 1-hour temporary ban so we stop
-                    // wasting reconnect cycles while the peer updates, but allow them
-                    // back once they've self-healed.  No permanent ban, no
-                    // genesis-incompatible marking.
+                    // Block predates the genesis launch window — peer is on old/pre-launch code.
+                    // Keep the connection so they can heal after upgrading, but mark incompatible
+                    // so we don't include them in quorum or sync selection.
                     warn!(
-                        "🚫 [{}] Pre-launch block {} from {} — 1-hour temp ban ({})",
+                        "⏭️ [{}] Pre-launch block {} from {} — marking incompatible, keeping connection ({})",
                         self.direction, block_height, self.peer_ip, e
                     );
-                    if let Some(banlist) = &context.banlist {
-                        let bare_ip = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
-                        if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
-                            banlist.write().await.add_temp_ban(
-                                ip,
-                                std::time::Duration::from_secs(3600),
-                                &format!("Sent pre-launch block {}: {}", block_height, e),
-                            );
-                        }
-                    }
-                    return Err(format!(
-                        "DISCONNECT: peer {} sent pre-launch block {}: {}",
-                        self.peer_ip, block_height, e
-                    ));
+                    context
+                        .peer_registry
+                        .mark_incompatible(
+                            &self.peer_ip,
+                            &format!("Sent pre-launch block {}: {}", block_height, e),
+                            false,
+                        )
+                        .await;
+                    self.suspend_peer_from_consensus(
+                        context,
+                        &format!("Pre-launch block {}: {}", block_height, e),
+                    )
+                    .await;
+                    return Ok(None);
                 } else {
                     warn!(
                         "❌ [{}] Failed to add block {}: {}",
@@ -3108,10 +3069,11 @@ impl MessageHandler {
                             ),
                         )
                         .await;
-                        return Err(format!(
-                            "DISCONNECT: peer {} is committed to a different genesis at height {}",
-                            self.peer_ip, peer_committed_height
-                        ));
+                        // Keep the connection — they're excluded from quorum via
+                        // mark_genesis_incompatible, but may still be useful for
+                        // peer discovery. A genesis mismatch at this level is likely
+                        // a fork or old code rather than a different chain entirely.
+                        return Ok(None);
                     } else {
                         debug!(
                             "⏭️ [{}] Kept our genesis (already lower hash) — ignoring peer {}",
@@ -3143,10 +3105,9 @@ impl MessageHandler {
                             &format!("Genesis timestamp mismatch: {}", e),
                         )
                         .await;
-                        return Err(format!(
-                            "DISCONNECT: peer {} has genesis timestamp mismatch: {}",
-                            self.peer_ip, e
-                        ));
+                        // Keep the connection — genesis timestamp mismatch usually means
+                        // they're on old code. Excluded from quorum via mark_genesis_incompatible.
+                        return Ok(None);
                     } else {
                         warn!(
                             "⚠️ [{}] Candidate genesis from {} rejected: {}",
@@ -6601,7 +6562,7 @@ impl MessageHandler {
                         ZOMBIE_TIMEOUT.as_secs_f32(),
                     );
                     warn!(
-                        "🧟 [{}] Kicking zombie peer {} — {}",
+                        "🧟 [{}] Peer {} is zombie ({}) — marking incompatible, keeping connection so it can heal",
                         self.direction, self.peer_ip, reason,
                     );
                     zombie_peer_tracker().remove(&self.peer_ip);
@@ -6610,7 +6571,9 @@ impl MessageHandler {
                         .mark_incompatible(&self.peer_ip, &reason, false)
                         .await;
                     self.suspend_peer_from_consensus(context, &reason).await;
-                    return Err(format!("DISCONNECT: zombie peer ({})", self.peer_ip));
+                    // Don't disconnect — peer may catch up after upgrading or finding better peers.
+                    // Excluded from quorum/sync via mark_incompatible.
+                    return Ok(None);
                 }
             } else {
                 // Peer made progress — clear any zombie timer
@@ -6881,14 +6844,6 @@ impl MessageHandler {
                         || e.contains("reward manipulation")
                         || e.contains("unknown masternodes") =>
                 {
-                    // Block 1 specifically: node may have bootstrapped before enough peers
-                    // connected, giving itself a single-payout block 1. This is a reset
-                    // problem, not a deliberate attack — use a soft (non-IP) incompatibility
-                    // mark so the peer can reconnect after resetting, and does not drain
-                    // our quorum pool for block 1 production.
-                    //
-                    // Blocks > 1: reward manipulation or ghost masternodes in bitmap are a
-                    // clear protocol violation. Apply a permanent IP ban.
                     let block_height = block.header.height;
                     if block_height <= 1 {
                         warn!(
@@ -6903,7 +6858,7 @@ impl MessageHandler {
                                     "Bad block {} reward (bootstrap race): {}",
                                     block_height, e
                                 ),
-                                false, // NOT permanent — peer can reconnect after resetting
+                                false,
                             )
                             .await;
                         self.suspend_peer_from_consensus(
@@ -6912,38 +6867,30 @@ impl MessageHandler {
                         )
                         .await;
                     } else {
-                        // SECURITY: Peer sent a reward-hijacking block on an established chain.
-                        error!(
-                            "🚨 [{}] REWARD-HIJACKING BLOCK {} from {} — PERMANENTLY BANNING: {}",
+                        // Peer sent a block with invalid reward distribution — likely old code
+                        // or on a fork. Mark incompatible so we don't use them for quorum/sync,
+                        // but keep the connection so they can heal after upgrading.
+                        warn!(
+                            "⚠️ [{}] Block {} from {} has invalid reward distribution — \
+                             marking incompatible, keeping connection: {}",
                             self.direction, block_height, self.peer_ip, e
-                        );
-                        self.permanent_ban_ip(
-                            context,
-                            &format!("Reward-hijacking block {}: {}", block_height, e),
-                        )
-                        .await;
-                        error!(
-                            "🚫 [AI] Permanently banned {} — sent invalid reward-distribution block",
-                            self.peer_ip
                         );
                         context
                             .peer_registry
                             .mark_incompatible(
                                 &self.peer_ip,
-                                &format!("Reward-hijacking block {}: {}", block_height, e),
-                                true, // permanent
+                                &format!("Bad block {} reward: {}", block_height, e),
+                                false, // not permanent — peer may fix after upgrade
                             )
                             .await;
                         self.suspend_peer_from_consensus(
                             context,
-                            &format!("Reward-hijacking block {}: {}", block_height, e),
+                            &format!("Bad block {} reward: {}", block_height, e),
                         )
                         .await;
                     }
-                    return Err(format!(
-                        "Peer {} incompatible: sent bad reward-distribution block {}",
-                        self.peer_ip, block_height
-                    ));
+                    // Don't disconnect — peer is excluded from quorum/sync via mark_incompatible.
+                    return Ok(None);
                 }
                 Err(e) if e.contains("corrupted") || e.contains("serialization failed") => {
                     // SECURITY: Corrupted block is a SEVERE violation - potential attack
@@ -6986,29 +6933,27 @@ impl MessageHandler {
                         || e.contains("produced too early by")
                         || e.contains("predates network genesis") =>
                 {
-                    // Block predates the genesis launch window — 1-hour temp ban then
-                    // allow reconnect once the peer self-heals.  No permanent ban.
+                    // Block predates the genesis launch window — peer is on old/pre-launch code.
+                    // Mark incompatible and stop processing this batch, but keep the connection
+                    // so they can heal after upgrading.
                     warn!(
-                        "🚫 [{}] Pre-launch block {} from {} rejected — 1-hour temp ban: {}",
+                        "⏭️ [{}] Pre-launch block {} from {} — marking incompatible, keeping connection: {}",
                         self.direction, block.header.height, self.peer_ip, e
                     );
-                    if let Some(banlist) = &context.banlist {
-                        let bare_ip = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
-                        if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
-                            banlist.write().await.add_temp_ban(
-                                ip,
-                                std::time::Duration::from_secs(3600),
-                                &format!(
-                                    "Sent pre-launch block batch (height {}): {}",
-                                    block.header.height, e
-                                ),
-                            );
-                        }
-                    }
-                    return Err(format!(
-                        "DISCONNECT: peer {} sent pre-launch block batch (height {}): {}",
-                        self.peer_ip, block.header.height, e
-                    ));
+                    context
+                        .peer_registry
+                        .mark_incompatible(
+                            &self.peer_ip,
+                            &format!("Pre-launch block batch (height {}): {}", block.header.height, e),
+                            false,
+                        )
+                        .await;
+                    self.suspend_peer_from_consensus(
+                        context,
+                        &format!("Pre-launch block batch (height {}): {}", block.header.height, e),
+                    )
+                    .await;
+                    break; // Stop processing this batch; connection stays open
                 }
                 Err(e) => {
                     warn!(
