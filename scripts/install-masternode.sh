@@ -730,6 +730,18 @@ enable_service() {
     print_success "Service enabled (will start on boot)"
 }
 
+install_auto_update() {
+    print_step "Installing auto-update timer..."
+
+    cp "$SCRIPT_DIR/auto-update.service" /etc/systemd/system/auto-update.service
+    cp "$SCRIPT_DIR/auto-update.timer"   /etc/systemd/system/auto-update.timer
+
+    systemctl daemon-reload
+    systemctl enable --now auto-update.timer
+
+    print_success "Auto-update timer installed and enabled (runs every 30 minutes)"
+}
+
 start_service() {
     print_step "Starting service..."
     
@@ -880,7 +892,8 @@ print_summary() {
     echo "  • MN Conf:  $CONFIG_DIR/masternode.conf"
     echo "  • Data:     $DATA_DIR"
     echo "  • Logs:     $LOG_DIR"
-    echo "  • Service:  ${SERVICE_NAME}.service"
+    echo "  • Service:  ${SERVICE_NAME}.service
+  • Auto-update: auto-update.timer (every 30 min)"
     echo ""
     echo -e "${BLUE}Useful Commands:${NC}"
     echo "  • Check status:    systemctl status ${SERVICE_NAME}"
@@ -888,6 +901,7 @@ print_summary() {
     echo "  • Stop service:    systemctl stop ${SERVICE_NAME}"
     echo "  • Start service:   systemctl start ${SERVICE_NAME}"
     echo "  • Restart service: systemctl restart ${SERVICE_NAME}"
+    echo "  • Auto-update log: journalctl -t time-auto-update -f"
     echo "  • Edit config:     nano $CONFIG_DIR/time.conf"
     echo "  • Edit MN config:  nano $CONFIG_DIR/masternode.conf"
     echo ""
@@ -958,6 +972,7 @@ main() {
     # Setup systemd service
     create_systemd_service
     enable_service
+    install_auto_update
     
     # Firewall (optional)
     create_firewall_rules
