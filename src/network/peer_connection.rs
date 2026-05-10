@@ -1087,6 +1087,58 @@ impl PeerConnection {
                 "📤 [Outbound] Sent GetPeers + GetMasternodes to {} for peer discovery",
                 self.peer_ip
             );
+
+            // Send our masternode announcement so the remote peer learns our tier immediately.
+            // Without this, peers only discover our tier when THEY dial us (inbound to us),
+            // meaning outbound-only connections never propagate our Gold/Silver/Bronze status.
+            if let Some(ref mn_registry) = config.masternode_registry {
+                if let Some(our_address) = mn_registry.get_local_address().await {
+                    let local_masternodes = mn_registry.get_all().await;
+                    if let Some(our_mn) =
+                        local_masternodes.iter().find(|mn| mn.masternode.address == our_address)
+                    {
+                        let cert = mn_registry.get_local_certificate().await;
+                        let proof = our_mn
+                            .masternode
+                            .collateral_outpoint
+                            .as_ref()
+                            .and_then(|op| mn_registry.get_v4_proof(op))
+                            .unwrap_or_default();
+                        let announcement = if !proof.is_empty() {
+                            NetworkMessage::MasternodeAnnouncementV4 {
+                                address: our_mn.masternode.address.clone(),
+                                reward_address: our_mn.reward_address.clone(),
+                                tier: our_mn.masternode.tier,
+                                public_key: our_mn.masternode.public_key,
+                                collateral_outpoint: our_mn.masternode.collateral_outpoint.clone(),
+                                certificate: cert.to_vec(),
+                                started_at: mn_registry.get_started_at(),
+                                collateral_proof: proof.clone(),
+                            }
+                        } else {
+                            NetworkMessage::MasternodeAnnouncementV3 {
+                                address: our_mn.masternode.address.clone(),
+                                reward_address: our_mn.reward_address.clone(),
+                                tier: our_mn.masternode.tier,
+                                public_key: our_mn.masternode.public_key,
+                                collateral_outpoint: our_mn.masternode.collateral_outpoint.clone(),
+                                certificate: cert.to_vec(),
+                                started_at: mn_registry.get_started_at(),
+                            }
+                        };
+                        let version = if proof.is_empty() {
+                            "V3"
+                        } else {
+                            "V4 (with collateral proof)"
+                        };
+                        let _ = Self::send_message(&self.writer_tx, &announcement);
+                        info!(
+                            "📢 [Outbound] Sent masternode announcement ({}) to {}",
+                            version, self.peer_ip
+                        );
+                    }
+                }
+            }
         }
 
         // Extract broadcast_rx before the loop to avoid borrow checker issues
