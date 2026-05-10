@@ -1,8 +1,30 @@
 # Network Architecture - TIME Coin Protocol v6.2
 
 **Document Version:** 1.5
-**Last Updated:** April 28, 2026
+**Last Updated:** May 12, 2026
 **Status:** Production-Ready
+
+---
+
+## Recent Changes (May 2026)
+
+### Signed MasternodeUnlock — Gossip-Based Collateral Release (commit 8e13246)
+
+A new `MasternodeUnlock` message type enables gossip-based masternode
+deregistration without spending the collateral UTXO. When a collateral line is
+removed from `masternode.conf` and the daemon restarts, it broadcasts a signed
+revoke 15 seconds after startup. Receiving nodes verify the Ed25519 signature
+(proof string: `"TIME_COLLATERAL_REVOKE:<address>:<txid>:<vout>:<timestamp>"`),
+unregister the masternode, and relay the message. Unsigned revokes are accepted
+only over a direct connection from the masternode's registered IP for backward
+compatibility.
+
+### Outbound Masternode Announcement Fix (commit d9a4369)
+
+`peer_connection.rs` now sends `MasternodeAnnouncementV4` (or V3) after
+completing the outbound handshake, matching the existing inbound behaviour in
+`server.rs`. Previously, nodes that dialled out to a peer never announced
+themselves as masternodes, causing registry gaps for that peer.
 
 ---
 
@@ -403,6 +425,30 @@ pub fn rotate_if_expired()
 - **Sync**: Block/UTXO requests
 - **Peer**: Discovery, heartbeat, handshake
 - **Data**: Transaction, block broadcasting
+- **Masternode lifecycle**: Registration, unlock/deregistration
+
+**`MasternodeUnlock` (signed collateral revoke):**
+
+```rust
+MasternodeUnlock {
+    address:             String,   // bech32m masternode wallet address
+    collateral_outpoint: OutPoint, // { txid: Hash256, vout: u32 }
+    timestamp:           u64,      // Unix time of signing (replay protection ±300 s)
+    signature:           Vec<u8>,  // Ed25519 over canonical proof string; #[serde(default)]
+}
+```
+
+Purpose: allows an operator to deregister a masternode and release the collateral
+lock on all peers by broadcasting a signed message — no on-chain transaction
+needed. Analogous to Dash's `ProUpRevTx`.
+
+- **Signed revokes** (non-empty `signature`): verified against the stored
+  `public_key` for `address` using proof string
+  `"TIME_COLLATERAL_REVOKE:<address>:<txid_hex>:<vout>:<timestamp>"`. Valid
+  messages are relayed to all connected peers.
+- **Unsigned revokes** (`signature` empty): accepted only from a direct TCP
+  connection whose source IP matches the masternode's registered IP; never
+  relayed (backward compatibility with pre-8e13246 nodes).
 
 **PeerExchange (Updated):**
 

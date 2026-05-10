@@ -30,6 +30,7 @@
 20. [Clock Synchronization Requirements (NORMATIVE)](#20-clock-synchronization-requirements-normative)
 21. [Light Client and SPV Support (OPTIONAL)](#21-light-client-and-spv-support-optional)
 22. [Error Recovery and Edge Cases (NORMATIVE)](#22-error-recovery-and-edge-cases-normative)
+    - 22.7 [Masternode Deregistration via Signed MasternodeUnlock](#227-masternode-deregistration-via-signed-masternodeunlock-normative)
 23. [Address Format and Wallet Integration (NORMATIVE)](#23-address-format-and-wallet-integration-normative)
 24. [Mempool Management and Fee Estimation (NORMATIVE)](#24-mempool-management-and-fee-estimation-normative)
 25. [Economic Model (NORMATIVE)](#25-economic-model-normative)
@@ -1557,7 +1558,79 @@ COLLATERAL_CLEANUP (called after each block):
 
 ---
 
-## 23. Address Format and Wallet Integration (NORMATIVE)
+### 22.7 Masternode Deregistration via Signed MasternodeUnlock (NORMATIVE)
+
+Operators MAY deregister a masternode without spending the collateral UTXO by
+broadcasting a signed `MasternodeUnlock` gossip message. This is the preferred
+deregistration mechanism.
+
+#### 22.7.1 Message Format
+
+```
+MasternodeUnlock {
+    address:             String,   // bech32m masternode wallet address
+    collateral_outpoint: OutPoint, // { txid: Hash256, vout: u32 }
+    timestamp:           u64,      // Unix time of signing
+    signature:           Vec<u8>,  // Ed25519; #[serde(default)] for backward compat
+}
+```
+
+#### 22.7.2 Signature Scheme
+
+The `signature` MUST be an Ed25519 signature (using `masternodeprivkey`) over the
+UTF-8 encoding of the following canonical proof string:
+
+```
+TIME_COLLATERAL_REVOKE:<address>:<txid_hex>:<vout>:<timestamp>
+```
+
+where `<txid_hex>` is the lowercase hex-encoded 32-byte txid, `<vout>` is the
+decimal string of the output index, and `<timestamp>` is the decimal Unix
+timestamp.
+
+#### 22.7.3 Verification Rules
+
+A receiving node MUST process a `MasternodeUnlock` as follows:
+
+1. Look up the registered masternode by `address`. If not found, silently discard.
+2. Check `timestamp` is within ±300 seconds of the node's current time (replay
+   protection). If out of range, discard.
+3. **Signed revoke:** If `signature` is non-empty, verify the Ed25519 signature
+   against the stored `public_key` for `address` using the proof string from
+   §22.7.2. If verification fails, record a violation against the relaying peer
+   and discard.
+4. **Unsigned revoke:** If `signature` is empty, accept only if the message
+   arrives on a direct (non-relayed) TCP connection whose source IP matches the
+   masternode's registered IP address. Unsigned revokes MUST NOT be relayed.
+5. On successful verification: unregister the masternode, queue the collateral
+   UTXO for unlock (transition from `Locked` to `Unspent`), and relay the signed
+   message to all connected peers.
+
+#### 22.7.4 Operator Workflow
+
+```
+Operator action:
+  1. Comment out (or remove) collateral line in masternode.conf
+  2. Restart timed
+
+Daemon behaviour on startup:
+  a. Detect stale outpoint (present in sled, absent from masternode.conf)
+  b. Record OutPoint → masternode_address mapping
+  c. Release local collateral lock
+  d. After 15 s (once peers connect): sign and broadcast MasternodeUnlock
+  e. Receiving peers verify and release their collateral locks
+
+Result:
+  - All nodes release the lock within ~15 s of restart
+  - Collateral UTXO is freely spendable from the originating wallet
+  - No on-chain transaction required
+```
+
+#### 22.7.5 Fallback: Automatic Deregistration via UTXO Spending
+
+If the operator spends the collateral UTXO without broadcasting a
+`MasternodeUnlock`, the grace-period mechanism (§22.6) will deregister the
+masternode after 3 consecutive collateral-miss checks (≈ 30 minutes).
 
 ### 23.1 Address Encoding
 ```

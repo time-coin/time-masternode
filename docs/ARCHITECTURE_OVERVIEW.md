@@ -1,7 +1,73 @@
 # TimeCoin Architecture Overview
 
-**Last Updated:** 2026-04-28
+**Last Updated:** 2026-05-12
 **Version:** 1.5.0 (Connection unification, conflict-only voting, Avalanche gossip, UTXO state sync)
+
+---
+
+## Recent Bug Fixes and Features (May 2026)
+
+### Signed MasternodeUnlock — Gossip-Based Collateral Release (commit 8e13246)
+
+Deregistering a masternode no longer requires spending the collateral UTXO
+on-chain. Inspired by Dash's `ProUpRevTx`, the daemon now broadcasts a signed
+`MasternodeUnlock` gossip message when a collateral line is removed from
+`masternode.conf` and the daemon restarts.
+
+**How it works:**
+
+1. On startup, if a stale outpoint is detected (config changed), the daemon
+   records the old `OutPoint → masternode_address` mapping before releasing the
+   local lock.
+2. 15 seconds after startup (once peers have connected), it broadcasts:
+   ```
+   MasternodeUnlock {
+     address:             String,       // masternode wallet address
+     collateral_outpoint: OutPoint,
+     timestamp:           u64,
+     signature:           Vec<u8>,      // #[serde(default)] for backward compat
+   }
+   ```
+3. The `signature` is an Ed25519 signature over the canonical proof string
+   `"TIME_COLLATERAL_REVOKE:<address>:<txid_hex>:<vout>:<timestamp>"` using
+   `masternodeprivkey`.
+4. Receiving nodes verify the signature against the stored `public_key` for
+   `address`. Valid revokes → unregister + queue UTXO unlock + relay. Unsigned
+   revokes are accepted only from a direct (non-relayed) TCP connection whose
+   source IP matches the masternode's registered IP.
+
+**Operator workflow:** Comment out the collateral line in `masternode.conf`,
+restart `timed`. Within ~15 seconds of peer connections establishing, all nodes
+release the lock and the collateral UTXO is freely spendable again.
+
+### Outbound Masternode Announcement Fix (commit d9a4369)
+
+Previously, when a node dialed OUT to a peer, it never sent a masternode
+announcement — only inbound connections triggered one. Peers that the local node
+dialled first therefore did not know the connecting node was a masternode, causing
+registry gaps and missed reward eligibility signals.
+
+**Fix in `src/network/peer_connection.rs`:** Outbound connections now send a
+`MasternodeAnnouncementV4` (or V3 for older peers) immediately after completing
+the handshake, mirroring the existing behaviour in `server.rs` for inbound
+connections.
+
+### Collateral-Churn Guard: Tier Upgrades Allowed (commit 31ac714)
+
+The Collateral-Churn guard (Case A) in `src/masternode_registry.rs` previously
+blocked **all** outpoint replacements when the old UTXO still existed on-chain,
+preventing legitimate tier upgrades (e.g. Silver → Gold). The guard now allows
+the replacement when `prefetched_utxo_addr == masternode.wallet_address`,
+confirming that the new UTXO is owned by the same operator. Unauthenticated
+replacements by third parties remain blocked. The log message changes from
+`[Collateral-Churn] Blocked...` to `[Collateral-Upgrade] Allowed...` for
+legitimate upgrades.
+
+### Startup Log: Wallet Address Display Fix (commit d9a4369)
+
+`src/main.rs` (lines ~1049 and ~1076) previously logged `mn.address` (the node's
+IP address) where the masternode's TIME wallet address should appear at startup.
+Fixed to display `mn.wallet_address` (the TIME address receiving rewards).
 
 ---
 

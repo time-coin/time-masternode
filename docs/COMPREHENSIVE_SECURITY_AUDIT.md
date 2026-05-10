@@ -1924,6 +1924,88 @@ Connection from 64.91.224.76:36048 ended: Frame too large: 4083387062 bytes (max
 
 ---
 
+### 15.31 ✅ SECURITY IMPROVEMENTS — May 2026 Bug Fixes and MasternodeUnlock Feature
+
+Three bugs fixed and one new security feature introduced in commits `d9a4369`,
+`31ac714`, and `8e13246`.
+
+#### Fix 1 — Outbound Masternode Announcement Gap (commit d9a4369)
+
+**Root Cause:** `peer_connection.rs` only sent `MasternodeAnnouncementV4` on
+inbound connections (initiated by the remote peer). Connections the local node
+dialled out **never** sent an announcement. The remote peer therefore had no
+record of the connecting node as a masternode — causing registry gaps, missed
+liveness signals, and reward-eligibility mismatches for outbound peers.
+
+**Security Impact:** A node whose only connections are outbound would be invisible
+as a masternode to all its peers, preventing it from participating in TimeVote
+consensus and receiving rewards. An attacker with many nodes could exploit this to
+cause well-connected operators to miss reward windows without taking any
+connection down.
+
+**Fix:** Outbound connections now send `MasternodeAnnouncementV4` (falling back to
+V3 for older peers) immediately after the handshake completes, mirroring
+`server.rs`.
+
+#### Fix 2 — Collateral-Churn Guard Blocking Legitimate Tier Upgrades (commit 31ac714)
+
+**Root Cause:** The Collateral-Churn guard (Case A) in `masternode_registry.rs`
+blocked ALL outpoint replacements when the old UTXO still existed on-chain. This
+correctly prevented an attacker from claiming a live collateral UTXO, but also
+prevented the legitimate operator from upgrading their tier (e.g., Silver → Gold)
+with a larger collateral UTXO they owned.
+
+**Security Impact (of the bug):** Operators wishing to upgrade their tier had no
+path other than a full deregistration cycle. If the old UTXO was still unspent
+during the new registration, the upgrade would be blocked and the operator would
+be temporarily unregistered, losing rewards.
+
+**Fix:** The guard now checks `prefetched_utxo_addr == masternode.wallet_address`.
+If the new UTXO is owned by the same operator, the replacement is allowed and
+logged as `[Collateral-Upgrade] Allowed...`. Unauthenticated replacements by
+third parties are still blocked with `[Collateral-Churn] Blocked...`.
+
+#### Fix 3 — Startup Log Showed IP Instead of Wallet Address (commit d9a4369)
+
+**Root Cause:** `src/main.rs` lines ~1049 and ~1076 logged `mn.address` (the
+node's IP address) where `mn.wallet_address` (the TIME reward address) should
+appear. Operators reading the startup log could not verify that rewards would be
+routed to the correct wallet, potentially missing misconfiguration silently.
+
+**Fix:** Both log lines now display `mn.wallet_address`.
+
+#### New Feature — Signed MasternodeUnlock / Gossip-Based Collateral Release (commit 8e13246)
+
+**Security motivation:** Previously, if an operator shut down their masternode
+without spending the collateral UTXO, peers would hold the collateral lock
+indefinitely until the 1-hour registry auto-expiry or the 3-block UTXO-miss
+cleanup. An adversary could exploit this by repeatedly re-registering on behalf
+of the outpoint (via AV52-style hijacking), keeping the lock alive. There was no
+authenticated revoke mechanism the operator could trigger remotely.
+
+**Feature:** `MasternodeUnlock { address, collateral_outpoint, timestamp,
+signature }` is now broadcast via gossip on startup when a collateral outpoint is
+removed from `masternode.conf`. The Ed25519 signature over
+`"TIME_COLLATERAL_REVOKE:<address>:<txid>:<vout>:<timestamp>"` proves ownership
+without requiring on-chain spend.
+
+**Security properties:**
+- Signed revokes are relayed and applied on all peers within ~15 seconds.
+- Replay protection: `timestamp` must be within ±300 s of the receiver's clock.
+- Unsigned revokes (backward compat) are accepted only over a direct TCP
+  connection from the masternode's registered IP — never relayed, preventing
+  spoofing from third parties.
+- Eliminates the class of indefinite-collateral-lock attacks where an operator
+  cannot free their UTXO without spending it.
+
+**Code References:**
+- `src/network/message.rs` — `MasternodeUnlock` struct definition
+- `src/network/peer_connection.rs` — outbound announcement fix
+- `src/masternode_registry.rs` — Collateral-Churn Case A tier-upgrade allow
+- `src/main.rs` — MasternodeUnlock broadcast timer; wallet address log fix
+
+---
+
 ### 14.12 ✅ FIXED — Watchdog False-Restart on RPC Timeout
 **Status:** **FIXED in watchdog v1.1** (April 8, 2026)
 
@@ -2375,9 +2457,12 @@ With unique TXIDs on every injection, the bloom-filter dedup never fires, and th
 
 ---
 
-**Document Version:** 1.6
-**Last Updated:** April 19, 2026
-**Changes from v1.5:**
+**Document Version:** 1.7
+**Last Updated:** May 12, 2026
+**Changes from v1.6:**
+- Added Section 15.31: May 2026 security improvements — outbound announcement fix (d9a4369), Collateral-Churn tier-upgrade fix (31ac714), startup wallet-address log fix (d9a4369), and signed MasternodeUnlock gossip-based collateral release (8e13246)
+
+**Changes from v1.5 (archived below):**
 - Updated executive summary: 29 vectors fully mitigated (+5: AV42–AV46)
 - Extended AV41 (Section 15.18): Phase 2 — forged-signature ghost TXs bypassed format-only validation; added `verify_signature()` to `SpecialTransactionData`, block assembly ghost guard, and startup purge. Ghost TX purpose documented: fork induction via block hash divergence.
 - Added AV42 (Section 15.19): Finality lock whitelist bypass via post-delivery disconnect — `whitelisted_peer_escape` condition added to finality lock override logic

@@ -156,6 +156,32 @@ EVICTION_STORM_COOLDOWN:  60    # V4 eviction storm rate-limit window
 
 ---
 
+## Masternode Operations
+
+```yaml
+Register masternode:
+  1. Generate key:   time-cli masternode genkey
+  2. Add to time.conf:    masternodeprivkey=<key>
+  3. Add to masternode.conf:  mn1 <txid> <vout>
+  4. Restart timed   # daemon auto-registers on startup
+
+Deregister masternode / release collateral:
+  1. Comment out collateral line in masternode.conf:  # mn1 <txid> <vout>
+  2. Restart timed
+  # Daemon broadcasts signed MasternodeUnlock gossip message
+  # All peers release the collateral lock within ~15 seconds
+  # No on-chain transaction required
+
+Upgrade tier (e.g. Silver → Gold):
+  1. Update masternode.conf with the new collateral txid/vout
+  2. Restart timed
+  # Daemon broadcasts MasternodeUnlock for old outpoint
+  # Registers new collateral; tier auto-detected from amount
+  # Collateral-Churn guard allows upgrade when new UTXO is owned by same wallet_address
+```
+
+---
+
 ## On-Chain Governance
 
 ```yaml

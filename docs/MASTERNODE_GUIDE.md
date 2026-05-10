@@ -526,7 +526,7 @@ time-cli listlockedcollaterals
 
 ### Normal case — you have the same node and wallet
 
-Edit `masternode.conf` and comment out the collateral line:
+Edit `masternode.conf` and comment out (or remove) the collateral line:
 
 ```
 # MN1 abc123...txid 0
@@ -538,10 +538,17 @@ Then restart the daemon:
 sudo systemctl restart timed
 ```
 
-The daemon detects that the collateral is gone from the conf and automatically
-submits a **CollateralUnlock** transaction to the blockchain. Once that transaction
-is confirmed (next block), your collateral UTXO is freed from the masternode
-registry and can be spent normally.
+The daemon detects the removed collateral line and automatically broadcasts a
+signed **`MasternodeUnlock`** gossip message to all connected peers. Within
+~15 seconds of peer connections establishing, every node on the network releases
+the collateral lock and unregisters the masternode — **no on-chain transaction
+is required**.
+
+This mechanism is analogous to Dash's `ProUpRevTx`: the unlock is authenticated
+by an Ed25519 signature over the collateral outpoint using `masternodeprivkey`,
+so peers accept it without requiring the collateral UTXO to be spent first. The
+collateral UTXO becomes fully spendable on all nodes as soon as the signed
+message propagates.
 
 **⚠️ Warning:** Deregistering stops your masternode and ends reward eligibility.
 
@@ -555,25 +562,32 @@ To upgrade or downgrade your tier:
 2. Restart the daemon
 
 The daemon will automatically:
-- Submit a **CollateralUnlock** for the old collateral
-- Submit a **MasternodeReg** for the new collateral
+- Broadcast a signed **`MasternodeUnlock`** gossip message for the old collateral
+  outpoint so all peers release the lock immediately
+- Register with the new collateral; tier is auto-detected from the collateral
+  amount (Bronze = 1,000 TIME, Silver = 10,000 TIME, Gold = 100,000 TIME)
 
-Tier is auto-detected from the new collateral amount (Bronze = 1 000 TIME,
-Silver = 10 000 TIME, Gold = 100 000 TIME).
+**Tier upgrades (e.g. Silver → Gold)** are directly supported by the
+Collateral-Churn guard: the guard verifies that the new UTXO is owned by the
+same `wallet_address` and, when confirmed, allows the outpoint replacement
+without requiring a full deregistration cycle first. Unauthenticated outpoint
+replacements by third parties remain blocked.
 
 ---
 
 ### Wallet backup is required for collateral recovery
 
-The **CollateralUnlock** transaction is signed by the **wallet private key** that
-owns the collateral UTXO. The key requirement is the **wallet file**, not the
-specific machine. If you reinstall the daemon on a new server:
+The signed `MasternodeUnlock` message is created using the `masternodeprivkey`
+stored in `time.conf`. If you reinstall the daemon on a new server, you must
+restore both config files so the daemon can sign the unlock message with the
+correct key.
 
-1. **Restore your wallet backup** to `~/.timecoin/wallet.dat` before starting
-2. The daemon will detect the existing on-chain anchor and submit the appropriate
-   CollateralUnlock or MasternodeReg transactions automatically on startup
+1. **Restore `time.conf`** (contains `masternodeprivkey`) before starting
+2. **Restore `masternode.conf`** (contains the collateral outpoint)
+3. Comment out the collateral line, then restart — the daemon will broadcast the
+   signed `MasternodeUnlock` automatically
 
-**Always back up your wallet file:**
+**Always back up your wallet file** (needed to spend the collateral UTXO itself):
 
 ```bash
 cp ~/.timecoin/wallet.dat ~/wallet-backup-$(date +%Y%m%d).dat
@@ -599,13 +613,21 @@ the masternode server is required to spend them.
 | Time after node goes offline | What happens |
 |------------------------------|-------------|
 | 5 minutes | Gossip reports expire — node becomes inactive |
-| 1 hour | Registry auto-removes the node, releases the application-level lock, removes the on-chain anchor |
+| 1 hour | Registry auto-removes the node, releases the application-level lock |
 
 After 1 hour the masternode is fully cleaned up from the network's registry.
 The collateral UTXO is returned to spendable status in any daemon that was
 tracking it.
 
-**Spending the collateral immediately (no waiting):**
+**Preferred approach — broadcast MasternodeUnlock (immediate):**
+
+If you still have access to the server (or your config files), the cleanest
+recovery is to comment out the collateral line in `masternode.conf` and restart
+the daemon. The signed `MasternodeUnlock` message propagates to all peers within
+15 seconds and they release the lock immediately — no waiting for the 1-hour
+auto-expiry.
+
+**Spending the collateral without the server (no waiting needed):**
 
 Since the coins are controlled by the originating wallet, you can spend them
 at any time from that wallet. If the daemon on the sending wallet shows the
@@ -615,14 +637,13 @@ UTXO as locked, use:
 time-cli unlockorphanedutxos
 ```
 
-Then send normally. The masternode on the network will be auto-deregistered
-within 3 blocks once the UTXO disappears from the chain.
+Then send normally. Peers that have not yet received a `MasternodeUnlock` will
+auto-deregister within 3 blocks once the UTXO disappears from the chain.
 
 **If you want to re-use the same server IP with new collateral:**
-Wait for the 1-hour auto-remove to clear the old anchor, or restart the
-daemon with the new collateral in `masternode.conf` — the startup sync will
-submit a `CollateralUnlock` for the old outpoint and `MasternodeReg` for
-the new one.
+Restart the daemon with the new collateral in `masternode.conf`. The daemon
+will broadcast a `MasternodeUnlock` for the old outpoint and register the new
+collateral automatically on startup.
 
 ---
 
@@ -1077,16 +1098,16 @@ Masternode management is **local only**:
 **A:** Generate a key with `time-cli masternode genkey`, add it to `time.conf`, configure collateral in `masternode.conf`, then start/restart the daemon.
 
 ### Q: How do I deregister a masternode?
-**A:** Set `masternode=0` in `time.conf` and restart the daemon.
+**A:** Comment out (or remove) the collateral line in `masternode.conf` and restart the daemon. The daemon broadcasts a signed `MasternodeUnlock` gossip message; all peers release the collateral lock within ~15 seconds. No on-chain transaction is needed.
 
 ### Q: What happens if I spend locked collateral?
-**A:** The transaction will be rejected — locked collateral UTXOs cannot be spent while the masternode is registered. Deregister first by setting `masternode=0` and restarting.
+**A:** Peers tracking your collateral will detect the spent UTXO and auto-deregister your masternode within 3 blocks. The preferred deregistration path is to comment out the collateral line and restart, which broadcasts a signed `MasternodeUnlock` and releases the lock on all peers immediately.
 
 ### Q: How long to wait for rewards?
 **A:** Depends on total masternodes. With 50 MNs, expect rewards every ~50 minutes.
 
 ### Q: Can I change tier after registration?
-**A:** Yes. Deregister (`masternode=0`, restart), create new collateral UTXO, update `masternode.conf`, restart. Tier auto-detects.
+**A:** Yes. Update `masternode.conf` with the new collateral txid/vout and restart. The daemon broadcasts a `MasternodeUnlock` for the old outpoint and registers with the new collateral. Tier upgrades (e.g. Silver → Gold) are supported directly — the Collateral-Churn guard allows the swap when the new UTXO is owned by the same wallet address.
 
 ### Q: What if my node goes offline?
 **A:** After 5 missed heartbeats (5 minutes), marked inactive. No rewards while inactive.
@@ -1141,4 +1162,4 @@ mn1 <collateral_txid> <collateral_vout>
 - ✅ Generate key with `time-cli masternode genkey`
 - ✅ Locked collateral prevents accidental spending
 - ✅ Automatic validation and cleanup
-- ✅ Local-only security (no remote deregistration)
+- ✅ Signed `MasternodeUnlock` gossip releases collateral on all peers (no on-chain tx needed)
