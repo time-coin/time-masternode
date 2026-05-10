@@ -879,6 +879,15 @@ impl Default for IPBanlist {
     }
 }
 
+/// Returns seconds since UNIX_EPOCH (u64). Used to store `Instant`-based expiries
+/// as absolute wall-clock timestamps so they survive daemon restarts.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -916,13 +925,4 @@ mod tests {
         let subnets = banlist.list_banned_subnets();
         assert_eq!(subnets, vec!["203.0.113.0/24".to_string()]);
     }
-}
-
-/// Returns seconds since UNIX_EPOCH (u64). Used to store `Instant`-based expiries
-/// as absolute wall-clock timestamps so they survive daemon restarts.
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }

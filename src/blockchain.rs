@@ -203,6 +203,12 @@ pub struct Blockchain {
     /// Block processing mutex to prevent concurrent block additions from multiple peers.
     /// Without this, overlapping sync batches cause UTXO double-processing and state corruption.
     block_processing_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Guards against concurrent `sync_from_peers()` calls.
+    /// Using a dedicated mutex instead of checking `is_syncing` prevents a stuck-flag bug:
+    /// rollback functions set `is_syncing = true` before calling `sync_from_peers()`, which
+    /// previously caused the function to bail immediately (thinking a sync was in progress)
+    /// without ever installing the RAII guard that clears the flag.
+    sync_in_progress_lock: Arc<tokio::sync::Mutex<()>>,
     /// Consensus peers (majority chain) - reject blocks from non-consensus peers during fork resolution
     consensus_peers: Arc<RwLock<Vec<String>>>,
     /// Two-tier block cache for efficient memory usage (10-50x faster reads)
@@ -393,6 +399,7 @@ impl Blockchain {
             fork_state: Arc::new(RwLock::new(ForkResolutionState::None)),
             fork_resolution_lock: Arc::new(tokio::sync::Mutex::new(())),
             block_processing_lock: Arc::new(tokio::sync::Mutex::new(())),
+            sync_in_progress_lock: Arc::new(tokio::sync::Mutex::new(())),
             consensus_peers: Arc::new(RwLock::new(Vec::new())),
             block_cache,
             consensus_health,
@@ -1656,12 +1663,9 @@ impl Blockchain {
 
         // Enter syncing mode immediately so the SYNC GATE in message_handler blocks all
         // consensus messages (TimeVotePrepare, TimeVotePrecommit, masternode
-        // registrations, etc.) until the re-sync from peers completes.  Without this
-        // there is a window between the rollback and the next sync_from_peers() call
-        // where votes arrive for blocks we don't have, the masternode registry is in an
-        // inconsistent state, and signature verification fails with spurious WARN spam.
-        // sync_from_peers() manages is_syncing via its own RAII guard and will clear
-        // this flag when the catch-up is finished.
+        // registrations, etc.) during the window between this rollback and the
+        // subsequent sync_from_peers() call.  sync_from_peers() will re-assert this
+        // flag via its own RAII guard and clear it when catch-up finishes.
         self.is_syncing.store(true, Ordering::Release);
 
         tracing::info!(
@@ -1957,11 +1961,33 @@ impl Blockchain {
     /// * `target_height` - Optional target height to sync to. If None, uses time-based calculation.
     ///   Used during fork resolution to sync to peer consensus height.
     pub async fn sync_from_peers(&self, target_height: Option<u64>) -> Result<(), String> {
-        // Check if already syncing - prevent concurrent syncs
-        if self.is_syncing.load(Ordering::Acquire) {
-            tracing::debug!("⏭️  Sync already in progress, skipping duplicate request");
-            return Ok(());
+        // Prevent concurrent syncs using a dedicated mutex.  We intentionally do NOT
+        // check `is_syncing` here: rollback functions set that flag *before* calling
+        // us so the SYNC GATE in message_handler blocks consensus traffic during the
+        // rollback→sync transition.  Using `is_syncing` as the concurrency guard
+        // caused the flag to get permanently stuck: the function would see the
+        // rollback-set flag, bail out immediately, and the RAII guard that clears the
+        // flag was never installed.
+        let _sync_lock = match self.sync_in_progress_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                tracing::debug!("⏭️  Sync already in progress, skipping duplicate request");
+                return Ok(());
+            }
+        };
+
+        // Own the is_syncing flag for the lifetime of this call.  Any caller that
+        // pre-set the flag (e.g. rollback_to_genesis, rollback_chain) will have it
+        // cleared when we return — whether via an early-exit or full sync completion.
+        self.is_syncing.store(true, Ordering::Release);
+        let is_syncing_flag = self.is_syncing.clone();
+        struct SyncGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for SyncGuard {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Release);
+            }
         }
+        let _flag_guard = SyncGuard(is_syncing_flag);
 
         let mut current = self.current_height.load(Ordering::Acquire);
 
@@ -2159,20 +2185,7 @@ impl Blockchain {
             );
         }
 
-        // Always install the RAII guard first so that any caller that set
-        // is_syncing=true before calling us (e.g. rollback-to-genesis, fork
-        // detection) gets the flag cleared even on an early return.
-        self.is_syncing.store(true, Ordering::Release);
-        let is_syncing_flag = self.is_syncing.clone();
-        struct SyncGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
-        impl Drop for SyncGuard {
-            fn drop(&mut self) {
-                self.0.store(false, std::sync::atomic::Ordering::Release);
-            }
-        }
-        let _guard = SyncGuard(is_syncing_flag);
-
-        // If we're already synced, return early — guard will clear the flag.
+        // If we're already synced, return early — _flag_guard will clear is_syncing.
         if current >= target {
             tracing::info!("✓ Blockchain synced (height: {})", current);
             return Ok(());
@@ -7835,9 +7848,10 @@ impl Blockchain {
             target_height
         );
 
-        // Enter syncing mode so the SYNC GATE in message_handler blocks all consensus
-        // messages (TimeVotePrepare, TimeVotePrecommit, etc.) until catch-up is done.
-        // sync_from_peers() manages this flag via its own RAII guard.
+        // Enter syncing mode so the SYNC GATE in message_handler blocks consensus
+        // messages during the window between this rollback and the subsequent
+        // sync_from_peers() call.  sync_from_peers() will re-assert this flag via its
+        // own RAII guard and clear it when catch-up finishes.
         self.is_syncing.store(true, Ordering::Release);
 
         Ok(target_height)
@@ -11666,6 +11680,7 @@ impl Clone for Blockchain {
             fork_state: self.fork_state.clone(),
             fork_resolution_lock: self.fork_resolution_lock.clone(),
             block_processing_lock: self.block_processing_lock.clone(),
+            sync_in_progress_lock: self.sync_in_progress_lock.clone(),
             consensus_peers: self.consensus_peers.clone(),
             block_cache: self.block_cache.clone(),
             consensus_health: self.consensus_health.clone(),
