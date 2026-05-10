@@ -580,6 +580,12 @@ impl MasternodeRegistry {
             .store(height, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Queue a collateral outpoint for unlock. The unlock is applied on the next
+    /// `drain_pending_unlocks` tick (typically within 30 seconds).
+    pub fn queue_collateral_unlock(&self, outpoint: OutPoint) {
+        self.pending_collateral_unlocks.lock().push(outpoint);
+    }
+
     /// Drain pending collateral unlock and lock requests. Call this periodically with
     /// access to the UTXOStateManager to actually unlock/lock the collateral UTXOs.
     pub fn drain_pending_unlocks(

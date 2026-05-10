@@ -5,6 +5,28 @@ All notable changes to TimeCoin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.5] - 2026-05-09
+
+### Fixed
+
+- **`initialblockdownload` flag stuck `true` after rollback**: Nodes that
+  completed a rollback (fork resolution or revert-to-genesis) and then
+  successfully re-synced to the chain tip could permanently report
+  `initialblockdownload: true` in `getblockchaininfo`, causing wallets to
+  exclude them from the synced-peer list despite being at 100% progress.
+
+  Root cause: rollback functions set `is_syncing = true` to activate the sync
+  gate in `message_handler` during the rollback window, then called
+  `sync_from_peers()`. The function's concurrent-sync guard checked that same
+  flag and returned immediately — without ever installing the RAII guard that
+  clears it on exit. The flag stayed set forever.
+
+  Fix: replaced the `is_syncing.load()` concurrency check in `sync_from_peers()`
+  with `try_lock()` on a new dedicated `sync_in_progress_lock` mutex (same
+  pattern as `block_processing_lock` / `fork_resolution_lock`). The `is_syncing`
+  RAII guard is now installed at the very top of the function, covering all
+  early-return paths.
+
 ## [1.4.34] - 2026-04-04
 
 ### Security — Masternode Registration & Collateral

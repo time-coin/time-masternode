@@ -959,11 +959,13 @@ impl MessageHandler {
                 address,
                 collateral_outpoint,
                 timestamp,
+                signature,
             } => {
                 self.handle_masternode_unlock(
                     address.clone(),
                     collateral_outpoint.clone(),
                     *timestamp,
+                    signature.clone(),
                     context,
                 )
                 .await
@@ -5147,18 +5149,158 @@ impl MessageHandler {
         Ok(None)
     }
 
-    /// Handle MasternodeUnlock announcement (deprecated — masternode management is now config-based)
+    /// Handle MasternodeUnlock — signed collateral release gossip (analogous to Dash's ProUpRevTx).
+    ///
+    /// The message is accepted if either:
+    ///   (a) `signature` is non-empty and verifies the revoke proof against the public key
+    ///       stored in the registry for `address`, OR
+    ///   (b) `signature` is empty AND the TCP source IP matches the masternode IP in `address`
+    ///       (direct, non-relayed message from the node itself — legacy/first-boot compat).
+    ///
+    /// On acceptance:
+    ///   1. The masternode is unregistered from the registry.
+    ///   2. The collateral outpoint is queued for UTXO unlock.
+    ///   3. The message is relayed to all other peers.
     async fn handle_masternode_unlock(
         &self,
         address: String,
-        _collateral_outpoint: crate::types::OutPoint,
-        _timestamp: u64,
-        _context: &MessageContext,
+        collateral_outpoint: crate::types::OutPoint,
+        timestamp: u64,
+        signature: Vec<u8>,
+        context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
-        warn!(
-            "⚠️ [{}] Ignoring MasternodeUnlock from {} for {} (deprecated — use time.conf)",
-            self.direction, self.peer_ip, address
-        );
+        // Reject stale timestamps (>10 min old or >5 min in future).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if timestamp + 600 < now || timestamp > now + 300 {
+            warn!(
+                "⚠️ [{}] Rejecting MasternodeUnlock for {} — stale timestamp (ts={}, now={})",
+                self.direction, address, timestamp, now
+            );
+            return Ok(None);
+        }
+
+        // Determine the source IP for the direct-peer check.
+        let peer_ip_only = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
+        let node_ip_only = address.split(':').next().unwrap_or(&address);
+
+        let is_direct_from_node = peer_ip_only == node_ip_only;
+
+        // Look up the existing registration for signature verification and to obtain the outpoint.
+        let existing = context.masternode_registry.get(&address).await;
+
+        let accepted = if !signature.is_empty() {
+            // Verify the revoke proof signature:
+            //   message = "TIME_COLLATERAL_REVOKE:<address>:<txid_hex>:<vout>:<timestamp>"
+            // signed by the node's masternodeprivkey (stored as public_key in the registry).
+            if let Some(ref info) = existing {
+                let txid_hex = hex::encode(collateral_outpoint.txid);
+                let proof_msg = format!(
+                    "TIME_COLLATERAL_REVOKE:{}:{}:{}:{}",
+                    address, txid_hex, collateral_outpoint.vout, timestamp
+                );
+                use ed25519_dalek::Verifier;
+                let pub_key = &info.masternode.public_key;
+                match ed25519_dalek::Signature::from_slice(&signature) {
+                    Ok(sig) => {
+                        if pub_key.verify(proof_msg.as_bytes(), &sig).is_ok() {
+                            info!(
+                                "🔓 [{}] MasternodeUnlock accepted for {} — valid signed revoke",
+                                self.direction, address
+                            );
+                            true
+                        } else {
+                            warn!(
+                                "⚠️ [{}] MasternodeUnlock rejected for {} — invalid signature from {}",
+                                self.direction, address, self.peer_ip
+                            );
+                            return Ok(None);
+                        }
+                    }
+                    Err(_) => {
+                        warn!(
+                            "⚠️ [{}] MasternodeUnlock rejected for {} — malformed signature from {}",
+                            self.direction, address, self.peer_ip
+                        );
+                        return Ok(None);
+                    }
+                }
+            } else {
+                // Not in registry; can't verify.  Ignore to avoid relaying unverifiable revokes.
+                debug!(
+                    "⏭️ [{}] MasternodeUnlock for unknown node {} from {} — not in registry, ignoring",
+                    self.direction, address, self.peer_ip
+                );
+                return Ok(None);
+            }
+        } else if is_direct_from_node {
+            // Unsigned but from the node itself — accept as a legacy/first-boot revoke.
+            info!(
+                "🔓 [{}] MasternodeUnlock accepted for {} — unsigned, direct from node {}",
+                self.direction, address, self.peer_ip
+            );
+            true
+        } else {
+            // Unsigned from a relay — cannot verify ownership.  Reject.
+            warn!(
+                "⚠️ [{}] MasternodeUnlock rejected for {} — unsigned relay from {} (not the node itself)",
+                self.direction, address, self.peer_ip
+            );
+            return Ok(None);
+        };
+
+        if !accepted {
+            return Ok(None);
+        }
+
+        // Unregister from registry (removes in-memory entry + sled anchor).
+        match context.masternode_registry.unregister(&address).await {
+            Ok(Some(removed)) => {
+                // Queue the collateral UTXO for unlock so it becomes spendable again.
+                if let Some(ref op) = removed.masternode.collateral_outpoint {
+                    context.masternode_registry.queue_collateral_unlock(op.clone());
+                    info!(
+                        "🔓 Queued collateral {}:{} for unlock after MasternodeUnlock for {}",
+                        hex::encode(op.txid),
+                        op.vout,
+                        address
+                    );
+                }
+                // Also unlock the outpoint named in the message itself (may differ if the
+                // registry had a different outpoint due to earlier upgrade).
+                context
+                    .masternode_registry
+                    .queue_collateral_unlock(collateral_outpoint.clone());
+            }
+            Ok(None) | Err(crate::masternode_registry::RegistryError::NotFound) => {
+                // Not in registry; still queue the outpoint from the message.
+                context
+                    .masternode_registry
+                    .queue_collateral_unlock(collateral_outpoint.clone());
+                debug!(
+                    "⏭️ [{}] MasternodeUnlock for {} — node not in registry, queued outpoint unlock anyway",
+                    self.direction, address
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "⚠️ [{}] MasternodeUnlock: failed to unregister {}: {}",
+                    self.direction, address, e
+                );
+            }
+        }
+
+        // Relay to other peers.
+        let relay_msg = NetworkMessage::MasternodeUnlock {
+            address,
+            collateral_outpoint,
+            timestamp,
+            signature,
+        };
+        context.peer_registry.broadcast(relay_msg).await;
+
         Ok(None)
     }
 

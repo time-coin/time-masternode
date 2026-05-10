@@ -991,13 +991,18 @@ async fn main() {
     //
     // stale_local_outpoints is kept alive so rebuild_collateral_locks (below) can
     // exclude these outpoints — otherwise the old registry entry re-locks them.
-    let stale_local_outpoints: std::collections::HashSet<crate::types::OutPoint> = {
+    // stale_local_outpoints maps each released outpoint to its old masternode address
+    // (IP:port) so that a signed MasternodeUnlock can be broadcast to peers, releasing
+    // the collateral lock on remote nodes without requiring the owner to spend the UTXO.
+    // Analogous to Dash's ProUpRevTx: a signed gossip message proves ownership and revokes.
+    let stale_local_outpoints: std::collections::HashMap<crate::types::OutPoint, String> = {
         let current_local_outpoint = masternode_info
             .as_ref()
             .filter(|mn| mn.tier != types::MasternodeTier::Free)
             .and_then(|mn| mn.collateral_outpoint.clone());
 
-        let mut stale = std::collections::HashSet::new();
+        let mut stale: std::collections::HashMap<crate::types::OutPoint, String> =
+            std::collections::HashMap::new();
 
         // Primary path: compare saved outpoint vs current config.
         if let Some(prev) = utxo_mgr.load_local_collateral_outpoint() {
@@ -1006,8 +1011,13 @@ async fn main() {
                 None => true,              // collateral removed
             };
             if should_release {
+                // Capture the address before releasing (release removes it from locked_collaterals).
+                let mn_addr = utxo_mgr
+                    .get_locked_collateral(&prev)
+                    .map(|lc| lc.masternode_address.clone())
+                    .unwrap_or_default();
                 utxo_mgr.release_stale_local_collateral(&prev);
-                stale.insert(prev);
+                stale.insert(prev, mn_addr);
             }
         }
 
@@ -1023,8 +1033,9 @@ async fn main() {
                 .map(|cur| cur == &lc.outpoint)
                 .unwrap_or(false);
             if !matches_current {
+                let addr = lc.masternode_address.clone();
                 utxo_mgr.release_stale_local_collateral(&lc.outpoint);
-                stale.insert(lc.outpoint);
+                stale.insert(lc.outpoint, addr);
             }
         }
 
@@ -1046,7 +1057,7 @@ async fn main() {
                         types::MasternodeTier::from_collateral_value(utxo.value)
                     {
                         println!("✓ Running as {:?} masternode", detected_tier);
-                        println!("  └─ Wallet: {}", mn.address);
+                        println!("  └─ Wallet: {}", mn.wallet_address);
                         println!(
                             "  └─ Collateral: {} TIME (auto-detected from UTXO)",
                             utxo.value / 100_000_000
@@ -1073,7 +1084,7 @@ async fn main() {
                     );
                     eprintln!("   Tip: Set tier=bronze (or silver/gold) in time.conf to skip auto-detection.");
                     println!("✓ Running as Free masternode (provisional — will upgrade on-chain)");
-                    println!("  └─ Wallet: {}", mn.address);
+                    println!("  └─ Wallet: {}", mn.wallet_address);
                     println!("  └─ Collateral: 0 TIME");
                 }
             }
@@ -1766,7 +1777,7 @@ async fn main() {
                             .masternode
                             .collateral_outpoint
                             .as_ref()
-                            .map(|op| stale_local_outpoints.contains(op))
+                            .map(|op| stale_local_outpoints.contains_key(op))
                             .unwrap_or(false)
                     })
                     .filter_map(|info| {
@@ -2052,7 +2063,74 @@ async fn main() {
         });
         shutdown_manager.register_task(announcement_handle);
 
-        // ── On-chain collateral auto-sync ────────────────────────────────────────
+        // ── Stale collateral revoke broadcast ────────────────────────────────────
+        // When masternode.conf is changed (collateral removed or swapped), broadcast
+        // a signed MasternodeUnlock gossip message for each stale outpoint so that
+        // remote peers release their collateral locks without requiring the owner to
+        // spend the UTXO.  Analogous to Dash's ProUpRevTx for gossip-based networks.
+        if !stale_local_outpoints.is_empty() {
+            let stale_for_revoke = stale_local_outpoints.clone();
+            let revoke_registry = peer_connection_registry.clone();
+            let revoke_signing_key = masternode_signing_key.clone();
+            let revoke_shutdown = shutdown_token.clone();
+
+            let revoke_handle = tokio::spawn(async move {
+                // Wait briefly for peers to connect before broadcasting revokes.
+                tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                for (outpoint, mn_address) in &stale_for_revoke {
+                    if mn_address.is_empty() {
+                        tracing::warn!(
+                            "🔓 Skipping MasternodeUnlock broadcast for {}:{} — no address recorded",
+                            hex::encode(outpoint.txid),
+                            outpoint.vout
+                        );
+                        continue;
+                    }
+
+                    let msg = if let Some(ref signing_key) = revoke_signing_key {
+                        // Sign the revoke proof so peers can verify ownership without spending.
+                        let txid_hex = hex::encode(outpoint.txid);
+                        let proof_msg = format!(
+                            "TIME_COLLATERAL_REVOKE:{}:{}:{}:{}",
+                            mn_address, txid_hex, outpoint.vout, now
+                        );
+                        use ed25519_dalek::Signer;
+                        let sig = signing_key.sign(proof_msg.as_bytes());
+                        crate::network::message::NetworkMessage::MasternodeUnlock {
+                            address: mn_address.clone(),
+                            collateral_outpoint: outpoint.clone(),
+                            timestamp: now,
+                            signature: sig.to_bytes().to_vec(),
+                        }
+                    } else {
+                        // No signing key — unsigned revoke (accepted only by direct peers).
+                        crate::network::message::NetworkMessage::MasternodeUnlock {
+                            address: mn_address.clone(),
+                            collateral_outpoint: outpoint.clone(),
+                            timestamp: now,
+                            signature: vec![],
+                        }
+                    };
+
+                    revoke_registry.broadcast(msg).await;
+                    tracing::info!(
+                        "🔓 Broadcast MasternodeUnlock for {}:{} (address: {})",
+                        hex::encode(outpoint.txid),
+                        outpoint.vout,
+                        mn_address
+                    );
+                }
+
+                let _ = revoke_shutdown;
+            });
+            shutdown_manager.register_task(revoke_handle);
+        }
         // After sync completes, compare masternode.conf collateral with the on-chain
         // anchor for this IP.  Submit MasternodeReg / CollateralUnlock transactions
         // as needed so the chain always reflects the current conf state.
@@ -2317,7 +2395,7 @@ async fn main() {
                     .masternode
                     .collateral_outpoint
                     .as_ref()
-                    .map(|op| stale_local_outpoints.contains(op))
+                    .map(|op| stale_local_outpoints.contains_key(op))
                     .unwrap_or(false)
             })
             .filter_map(|info| {
@@ -2345,6 +2423,58 @@ async fn main() {
                 "🧹 [STARTUP] Purged {} stale collateral lock(s) after registry rebuild",
                 startup_purged
             );
+        }
+
+        // Non-masternode path: broadcast signed revokes for any stale outpoints so peers
+        // release their locks even though this node is now running as observer.
+        if !stale_local_outpoints.is_empty() {
+            let stale_for_revoke = stale_local_outpoints.clone();
+            let revoke_registry = peer_connection_registry.clone();
+            let revoke_signing_key = masternode_signing_key.clone();
+
+            tokio::spawn(async move {
+                tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                for (outpoint, mn_address) in &stale_for_revoke {
+                    if mn_address.is_empty() {
+                        continue;
+                    }
+                    let msg = if let Some(ref signing_key) = revoke_signing_key {
+                        use ed25519_dalek::Signer;
+                        let txid_hex = hex::encode(outpoint.txid);
+                        let proof_msg = format!(
+                            "TIME_COLLATERAL_REVOKE:{}:{}:{}:{}",
+                            mn_address, txid_hex, outpoint.vout, now
+                        );
+                        let sig = signing_key.sign(proof_msg.as_bytes());
+                        crate::network::message::NetworkMessage::MasternodeUnlock {
+                            address: mn_address.clone(),
+                            collateral_outpoint: outpoint.clone(),
+                            timestamp: now,
+                            signature: sig.to_bytes().to_vec(),
+                        }
+                    } else {
+                        crate::network::message::NetworkMessage::MasternodeUnlock {
+                            address: mn_address.clone(),
+                            collateral_outpoint: outpoint.clone(),
+                            timestamp: now,
+                            signature: vec![],
+                        }
+                    };
+                    revoke_registry.broadcast(msg).await;
+                    tracing::info!(
+                        "🔓 Broadcast MasternodeUnlock for {}:{} (address: {}, observer mode)",
+                        hex::encode(outpoint.txid),
+                        outpoint.vout,
+                        mn_address
+                    );
+                }
+            });
         }
     }
 

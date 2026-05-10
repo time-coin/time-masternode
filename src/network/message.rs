@@ -68,11 +68,23 @@ pub enum NetworkMessage {
         tier: MasternodeTier,
         public_key: VerifyingKey,
     },
-    /// Announce masternode deregistration and collateral unlock
+    /// Announce masternode deregistration and collateral unlock.
+    ///
+    /// Analogous to Dash's `ProUpRevTx`: a signed gossip message that tells peers to
+    /// release the collateral lock for `address` without requiring the owner to spend
+    /// the UTXO.  The `signature` field is an Ed25519 signature over:
+    ///   `"TIME_COLLATERAL_REVOKE:<address>:<txid_hex>:<vout>:<timestamp>"`
+    /// using the same masternodeprivkey that signed the V4 `collateral_proof`.
+    /// Legacy messages with an empty signature are accepted only from a direct
+    /// (non-relayed) connection whose source IP matches `address`.
     MasternodeUnlock {
         address: String,
         collateral_outpoint: OutPoint,
         timestamp: u64,
+        /// Ed25519 signature over the revoke proof message (64 bytes), or empty for
+        /// legacy unsigned messages (accepted only from the node itself).
+        #[serde(default)]
+        signature: Vec<u8>,
     },
     GetMasternodes,
     MasternodesResponse(Vec<MasternodeAnnouncementData>),
