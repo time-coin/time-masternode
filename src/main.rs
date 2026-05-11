@@ -3421,7 +3421,7 @@ async fn main() {
 
         // Leader rotation timeout tracking
         // If a leader doesn't produce within LEADER_TIMEOUT_SECS, rotate to next leader
-        const LEADER_TIMEOUT_SECS: u64 = 10; // Match validator's 10s relaxation interval
+        const LEADER_TIMEOUT_SECS: u64 = 30; // Wait 30s before rotating to backup proposer
         let mut waiting_for_height: Option<u64> = None;
         let mut leader_attempt: u64 = 0; // Increments when leader times out
         let mut height_first_seen = std::time::Instant::now();
@@ -4334,8 +4334,8 @@ async fn main() {
             // Apply threshold relaxation for timeout: multiply effective weight by 2^attempt
             // attempt=0: normal threshold, attempt=1: 2x more likely, attempt=2: 4x, etc.
             // SECURITY: Free tier nodes only get emergency boost after extended deadlock.
-            // Validator uses `elapsed / 10` intervals; with capped weight 9 and a ~2338-weight
-            // network, Free tier needs multiplier ≥32 (attempt≥5, 50s) to pass validation.
+            // Validator uses `elapsed / 30` intervals; with capped weight 9 and a ~2338-weight
+            // network, Free tier needs multiplier ≥32 (attempt≥5, 150s) to pass validation.
             // Gate at attempt≥5 so the producer only self-selects when the validator will accept.
             let effective_sampling_weight = if leader_attempt > 0 {
                 let allow_boost = if matches!(our_mn.tier, crate::types::MasternodeTier::Free) {

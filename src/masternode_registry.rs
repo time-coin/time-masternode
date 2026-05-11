@@ -3005,66 +3005,85 @@ impl MasternodeRegistry {
         masternode_address: &str,
         utxo_manager: &crate::utxo_manager::UTXOStateManager,
     ) -> bool {
-        // Get masternode info
-        let masternodes = self.masternodes.read().await;
-        if let Some(info) = masternodes.get(masternode_address) {
-            // Check if has locked collateral
-            if let Some(collateral_outpoint) = &info.masternode.collateral_outpoint {
-                // Verify UTXO exists first
-                if utxo_manager.get_utxo(collateral_outpoint).await.is_err() {
-                    tracing::warn!(
-                        "⚠️ Masternode {} collateral {}:{} UTXO no longer exists",
-                        masternode_address,
-                        hex::encode(collateral_outpoint.txid),
-                        collateral_outpoint.vout
-                    );
-                    return false;
-                }
-
-                // Verify UTXO is locked as collateral
-                if !utxo_manager.is_collateral_locked(collateral_outpoint) {
-                    // UTXO exists but isn't locked — this can happen during block
-                    // processing when a recollateralization TX creates the new UTXO
-                    // but it hasn't been formally locked yet. Auto-lock it.
-                    let lock_height = self
-                        .current_height
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                    match utxo_manager.lock_collateral(
-                        collateral_outpoint.clone(),
-                        masternode_address.to_string(),
-                        lock_height,
-                        info.masternode.tier.collateral(),
-                    ) {
-                        Ok(()) => {
-                            tracing::info!(
-                                "🔒 Auto-locked collateral {}:{} for masternode {}",
-                                hex::encode(collateral_outpoint.txid),
-                                collateral_outpoint.vout,
-                                masternode_address
-                            );
-                            return true;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "⚠️ Masternode {} collateral {}:{} exists but could not be locked: {:?}",
-                                masternode_address,
-                                hex::encode(collateral_outpoint.txid),
-                                collateral_outpoint.vout,
-                                e
-                            );
-                            return false;
-                        }
-                    }
-                }
-
-                return true;
+        // Validity is determined solely from the canonical UTXO set — the same set
+        // all nodes derive from the blockchain.  The in-memory locked_collaterals map
+        // is NOT used for validity: it varies per-node due to restart/gossip timing
+        // and would cause network-wide disagreement about who has valid collateral.
+        let (outpoint, tier_collateral) = {
+            let masternodes = self.masternodes.read().await;
+            let info = match masternodes.get(masternode_address) {
+                Some(i) => i,
+                None => return false,
+            };
+            match &info.masternode.collateral_outpoint {
+                Some(op) => (op.clone(), info.masternode.tier.collateral()),
+                None => return true, // Legacy masternode without locked collateral
             }
+        };
 
-            // Legacy masternode without locked collateral - always valid
-            true
-        } else {
-            false
+        // Primary check: UTXO must exist in the UTXO set (i.e. unspent on-chain).
+        let utxo = match utxo_manager.get_utxo(&outpoint).await {
+            Ok(u) => u,
+            Err(_) => {
+                tracing::warn!(
+                    "⚠️ Masternode {} collateral {}:{} UTXO no longer exists",
+                    masternode_address,
+                    hex::encode(outpoint.txid),
+                    outpoint.vout
+                );
+                return false;
+            }
+        };
+
+        // Amount check: UTXO value must cover the declared tier's collateral requirement.
+        if tier_collateral > 0 && utxo.value < tier_collateral {
+            tracing::warn!(
+                "⚠️ Masternode {} collateral {}:{} value {} < required {} for tier",
+                masternode_address,
+                hex::encode(outpoint.txid),
+                outpoint.vout,
+                utxo.value,
+                tier_collateral
+            );
+            return false;
         }
+
+        // Best-effort: ensure the spending guard is in place so this UTXO cannot be
+        // used in a regular transaction.  Failure here does NOT invalidate the node —
+        // the UTXO exists on-chain and that is sufficient for collateral validity.
+        if !utxo_manager.is_collateral_locked(&outpoint) {
+            let lock_height = self
+                .current_height
+                .load(std::sync::atomic::Ordering::Relaxed);
+            match utxo_manager.lock_collateral(
+                outpoint.clone(),
+                masternode_address.to_string(),
+                lock_height,
+                tier_collateral,
+            ) {
+                Ok(()) => {
+                    tracing::debug!(
+                        "🔒 Re-established collateral lock {}:{} for masternode {}",
+                        hex::encode(outpoint.txid),
+                        outpoint.vout,
+                        masternode_address
+                    );
+                }
+                Err(e) => {
+                    // Lock attempt failed — UTXO may be in a transitional state.
+                    // Log at debug level only; validity is not affected.
+                    tracing::debug!(
+                        "Could not re-lock collateral {}:{} for {}: {:?} (node still valid)",
+                        hex::encode(outpoint.txid),
+                        outpoint.vout,
+                        masternode_address,
+                        e
+                    );
+                }
+            }
+        }
+
+        true
     }
 
     /// Automatically deregister masternodes whose collateral has been spent.

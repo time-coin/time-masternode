@@ -7760,7 +7760,7 @@ impl MessageHandler {
                         let slot_time = genesis_ts + (block.header.height as i64 * 600);
                         let now = chrono::Utc::now().timestamp();
                         let elapsed = (now - slot_time).max(0) as u64;
-                        let timeout_attempts = elapsed / 10;
+                        let timeout_attempts = elapsed / 30;
 
                         if timeout_attempts > 0 {
                             let multiplier = 1u64 << timeout_attempts.min(20);
