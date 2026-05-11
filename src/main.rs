@@ -1967,6 +1967,9 @@ async fn main() {
         let registry_for_announcement = registry.clone();
         let announcement_blockchain = blockchain.clone();
         let signing_key_for_announcement = masternode_signing_key.clone();
+        // Wallet key is the fallback proof key when the collateral UTXO sits at the wallet
+        // address rather than the masternodeprivkey address (which is the typical case).
+        let wallet_signing_key_for_announcement = wallet.signing_key().clone();
 
         let announcement_handle = tokio::spawn(async move {
             // Wait for initial sync to complete before announcing
@@ -2001,23 +2004,68 @@ async fn main() {
                 } else {
                     mn.collateral_outpoint.clone()
                 };
-                if let (Some(ref signing_key), Some(ref outpoint)) =
-                    (&signing_key_for_announcement, &effective_outpoint)
-                {
+                if let Some(ref outpoint) = effective_outpoint {
+                    use ed25519_dalek::Signer;
                     let txid_hex = hex::encode(outpoint.txid);
                     let proof_msg = format!("TIME_COLLATERAL_CLAIM:{}:{}", txid_hex, outpoint.vout);
-                    use ed25519_dalek::Signer;
-                    let sig = signing_key.sign(proof_msg.as_bytes());
-                    return NetworkMessage::MasternodeAnnouncementV4 {
-                        address: mn.address.clone(),
-                        reward_address: mn.wallet_address.clone(),
-                        tier: mn.tier,
-                        public_key: mn.public_key,
-                        collateral_outpoint: effective_outpoint,
-                        certificate: vec![0u8; 64],
-                        started_at: daemon_started_at,
-                        collateral_proof: sig.to_bytes().to_vec(),
+
+                    // Build the collateral proof.  Priority:
+                    //  1. masternodeprivkey, if its address matches the UTXO's reward address.
+                    //  2. Wallet key, if its address matches the reward address.
+                    //     Encoded as [wallet_pubkey_bytes (32)] + [signature (64)] = 96 bytes
+                    //     so the verifier can distinguish it from the 64-byte masternodeprivkey proof.
+                    //  3. No proof — fall back to V3.
+                    let network = if mn.wallet_address.starts_with("TIME0") {
+                        crate::network_type::NetworkType::Testnet
+                    } else {
+                        crate::network_type::NetworkType::Mainnet
                     };
+                    let collateral_proof: Option<Vec<u8>> =
+                        if let Some(ref sk) = signing_key_for_announcement {
+                            let mn_addr = crate::address::Address::from_public_key(
+                                sk.verifying_key().as_bytes(),
+                                network,
+                            )
+                            .as_string();
+                            if mn_addr == mn.wallet_address {
+                                // masternodeprivkey owns the UTXO — 64-byte proof
+                                Some(sk.sign(proof_msg.as_bytes()).to_bytes().to_vec())
+                            } else {
+                                // masternodeprivkey is an identity key that doesn't own the UTXO.
+                                // Try the wallet key instead; encode as 96-byte proof so verifiers
+                                // know to extract the embedded public key.
+                                let wk = &wallet_signing_key_for_announcement;
+                                let wallet_addr = crate::address::Address::from_public_key(
+                                    wk.verifying_key().as_bytes(),
+                                    network,
+                                )
+                                .as_string();
+                                if wallet_addr == mn.wallet_address {
+                                    let sig = wk.sign(proof_msg.as_bytes());
+                                    let mut proof = Vec::with_capacity(96);
+                                    proof.extend_from_slice(wk.verifying_key().as_bytes());
+                                    proof.extend_from_slice(&sig.to_bytes());
+                                    Some(proof)
+                                } else {
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
+
+                    if let Some(proof) = collateral_proof {
+                        return NetworkMessage::MasternodeAnnouncementV4 {
+                            address: mn.address.clone(),
+                            reward_address: mn.wallet_address.clone(),
+                            tier: mn.tier,
+                            public_key: mn.public_key,
+                            collateral_outpoint: Some(outpoint.clone()),
+                            certificate: vec![0u8; 64],
+                            started_at: daemon_started_at,
+                            collateral_proof: proof,
+                        };
+                    }
                 }
                 NetworkMessage::MasternodeAnnouncementV3 {
                     address: mn.address.clone(),
@@ -2031,16 +2079,33 @@ async fn main() {
             };
 
             let announcement = build_announcement(&mn_for_announcement);
+            let proof_desc = match &announcement {
+                NetworkMessage::MasternodeAnnouncementV4 {
+                    collateral_proof, ..
+                } if collateral_proof.len() == 96 => "V4 with wallet collateral proof",
+                NetworkMessage::MasternodeAnnouncementV4 { .. } => {
+                    "V4 with masternodeprivkey collateral proof"
+                }
+                _ => "V3",
+            };
+            // Persist the V4 proof in the registry so per-connection announcements
+            // (sent by peer_connection.rs via get_v4_proof) also use it.
+            if let NetworkMessage::MasternodeAnnouncementV4 {
+                ref collateral_outpoint,
+                ref collateral_proof,
+                ..
+            } = announcement
+            {
+                if let Some(ref op) = collateral_outpoint {
+                    if !collateral_proof.is_empty() {
+                        registry_for_announcement.store_v4_proof(op, collateral_proof);
+                    }
+                }
+            }
             peer_registry_for_announcement.broadcast(announcement).await;
             tracing::info!(
                 "📢 Broadcast masternode announcement ({}) to network",
-                if signing_key_for_announcement.is_some()
-                    && mn_for_announcement.collateral_outpoint.is_some()
-                {
-                    "V4 with collateral proof"
-                } else {
-                    "V3"
-                }
+                proof_desc
             );
 
             // Continue broadcasting every 60 seconds; refresh tier from registry

@@ -137,15 +137,28 @@ impl Address {
 ///      `"TIME_COLLATERAL_CLAIM:<txid_hex>:<vout>"`.
 ///
 /// Returns true iff all three checks pass.
+/// Verify a V4 collateral ownership proof.
+///
+/// Two wire formats are supported:
+///
+/// - **64-byte proof** (masternodeprivkey owns UTXO): the 64-byte bytes are an Ed25519
+///   signature over `"TIME_COLLATERAL_CLAIM:{txid_hex}:{vout}"` by `public_key`.
+///   Valid when `public_key` derives to `utxo_address`.
+///
+/// - **96-byte proof** (wallet key owns UTXO): first 32 bytes are an Ed25519 public key
+///   (`wallet_pubkey`), remaining 64 bytes are a signature over the same message by
+///   `wallet_pubkey`.  Valid when `wallet_pubkey` derives to `utxo_address`.
+///   This is the common case where collateral sits at the wallet address rather than at
+///   an address derived from the masternodeprivkey.
 pub fn verify_collateral_claim_proof(
     public_key: &ed25519_dalek::VerifyingKey,
-    signature: &[u8],
+    proof: &[u8],
     reward_address: &str,
     utxo_address: &str,
     outpoint_txid: &[u8; 32],
     outpoint_vout: u32,
 ) -> bool {
-    if signature.is_empty() || utxo_address.is_empty() {
+    if proof.is_empty() || utxo_address.is_empty() {
         return false;
     }
     if reward_address != utxo_address {
@@ -158,19 +171,40 @@ pub fn verify_collateral_claim_proof(
     } else {
         return false;
     };
-    let derived = Address::from_public_key(public_key.as_bytes(), network).as_string();
-    if derived != utxo_address {
-        return false;
-    }
-    use ed25519_dalek::Verifier;
     let proof_msg = format!(
         "TIME_COLLATERAL_CLAIM:{}:{}",
         hex::encode(outpoint_txid),
         outpoint_vout
     );
-    ed25519_dalek::Signature::from_slice(signature)
-        .map(|sig| public_key.verify(proof_msg.as_bytes(), &sig).is_ok())
-        .unwrap_or(false)
+    use ed25519_dalek::Verifier;
+    match proof.len() {
+        64 => {
+            // 64-byte format: proof signed by the announcement's identity key (masternodeprivkey).
+            let derived = Address::from_public_key(public_key.as_bytes(), network).as_string();
+            if derived != utxo_address {
+                return false;
+            }
+            ed25519_dalek::Signature::from_slice(proof)
+                .map(|sig| public_key.verify(proof_msg.as_bytes(), &sig).is_ok())
+                .unwrap_or(false)
+        }
+        96 => {
+            // 96-byte format: [wallet_pubkey (32)] + [wallet_signature (64)].
+            // The wallet key owns the UTXO; the masternodeprivkey is only the node identity.
+            let pk_bytes: [u8; 32] = proof[..32].try_into().unwrap_or([0u8; 32]);
+            let Ok(wallet_pk) = ed25519_dalek::VerifyingKey::from_bytes(&pk_bytes) else {
+                return false;
+            };
+            let derived = Address::from_public_key(wallet_pk.as_bytes(), network).as_string();
+            if derived != utxo_address {
+                return false;
+            }
+            ed25519_dalek::Signature::from_slice(&proof[32..])
+                .map(|sig| wallet_pk.verify(proof_msg.as_bytes(), &sig).is_ok())
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
 }
 
 impl fmt::Display for Address {
