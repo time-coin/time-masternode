@@ -996,9 +996,12 @@ async fn main() {
     // the collateral lock on remote nodes without requiring the owner to spend the UTXO.
     // Analogous to Dash's ProUpRevTx: a signed gossip message proves ownership and revokes.
     let stale_local_outpoints: std::collections::HashMap<crate::types::OutPoint, String> = {
+        // Use collateral_outpoint presence, not tier, to detect a paid masternode.
+        // When tier="auto", the tier is temporarily Free (placeholder resolved later at line ~1050),
+        // so filtering by tier != Free would wrongly set current_local_outpoint to None and
+        // cause the persisted collateral lock to be released as "stale" on every restart.
         let current_local_outpoint = masternode_info
             .as_ref()
-            .filter(|mn| mn.tier != types::MasternodeTier::Free)
             .and_then(|mn| mn.collateral_outpoint.clone());
 
         let mut stale: std::collections::HashMap<crate::types::OutPoint, String> =
