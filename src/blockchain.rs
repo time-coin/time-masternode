@@ -1670,7 +1670,7 @@ impl Blockchain {
 
         tracing::info!(
             "🔁 Reverted to genesis: removed {} block(s) and their undo logs. \
-             Height reset to 0. Syncing mode enabled — waiting for peers to rebuild chain.",
+             Height reset to 0. Waiting for peers to rebuild chain.",
             cleared
         );
     }
@@ -1976,9 +1976,9 @@ impl Blockchain {
             }
         };
 
-        // Own the is_syncing flag for the lifetime of this call.  Any caller that
-        // pre-set the flag (e.g. rollback_to_genesis, rollback_chain) will have it
-        // cleared when we return — whether via an early-exit or full sync completion.
+        // Own the is_syncing flag for the lifetime of this call.  revert_to_after_genesis()
+        // pre-sets it to block consensus during startup; this re-asserts and clears it
+        // on return — whether via an early-exit or full sync completion.
         self.is_syncing.store(true, Ordering::Release);
         let is_syncing_flag = self.is_syncing.clone();
         struct SyncGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
@@ -7841,18 +7841,11 @@ impl Blockchain {
         self.current_height.store(target_height, Ordering::Release);
 
         tracing::info!(
-            "✅ Rollback complete: removed {} blocks, rolled back {} UTXOs, now at height {}. \
-             Syncing mode enabled — waiting for peers to re-fill the chain.",
+            "✅ Rollback complete: removed {} blocks, rolled back {} UTXOs, now at height {}.",
             blocks_to_remove,
             utxo_rollback_count,
             target_height
         );
-
-        // Enter syncing mode so the SYNC GATE in message_handler blocks consensus
-        // messages during the window between this rollback and the subsequent
-        // sync_from_peers() call.  sync_from_peers() will re-assert this flag via its
-        // own RAII guard and clear it when catch-up finishes.
-        self.is_syncing.store(true, Ordering::Release);
 
         Ok(target_height)
     }
