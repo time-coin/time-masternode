@@ -1395,15 +1395,30 @@ impl RpcHandler {
         let mut pending: u64 = 0;
 
         for u in &utxos {
-            // Only count a collateral lock as "locked" if one of our own nodes placed it.
-            // Foreign masternodes can gossip any outpoint as their collateral; if one
-            // of those is in our UTXO set we must not hide it from our spendable balance.
-            if let Some(lock) = self.utxo_manager.get_locked_collateral(&u.outpoint) {
-                if our_mn_addresses.contains(&lock.masternode_address) {
-                    locked_collateral += u.value;
-                    continue;
-                }
+            // Use the on-chain collateral anchor (sled-persisted, consistent across all
+            // synced nodes) as the primary lock signal.  Fall back to the in-memory lock
+            // map so that nodes which placed the lock see it even before gossip propagates.
+            //
+            // Count a UTXO as "our" locked collateral only when the anchored masternode's
+            // wallet address matches the address being queried — this prevents a foreign
+            // node's collateral (which happens to be in our UTXO set) from inflating our
+            // locked balance.
+            let anchor_ip = self.registry.get_collateral_anchor(&u.outpoint);
+            let is_our_collateral = if let Some(ref ip) = anchor_ip {
+                // Check if the anchored masternode belongs to this wallet
+                our_mn_addresses.contains(ip.split(':').next().unwrap_or(ip))
+                    || our_mn_addresses.contains(ip.as_str())
+            } else if let Some(lock) = self.utxo_manager.get_locked_collateral(&u.outpoint) {
+                our_mn_addresses.contains(&lock.masternode_address)
+            } else {
+                false
+            };
+
+            if is_our_collateral {
+                locked_collateral += u.value;
+                continue;
             }
+
             match self.utxo_manager.get_state(&u.outpoint) {
                 Some(crate::types::UTXOState::Unspent) => spendable += u.value,
                 Some(crate::types::UTXOState::Locked { .. }) => pending += u.value,
@@ -1459,7 +1474,10 @@ impl RpcHandler {
             let mut pending: u64 = 0;
 
             for u in &utxos {
-                if self.utxo_manager.is_collateral_locked(&u.outpoint) {
+                // Anchor-based lock is authoritative across all nodes
+                let is_locked = self.utxo_manager.is_collateral_locked(&u.outpoint)
+                    || self.registry.get_collateral_anchor(&u.outpoint).is_some();
+                if is_locked {
                     locked += u.value;
                     continue;
                 }
@@ -1537,7 +1555,13 @@ impl RpcHandler {
                 }
 
                 let state = self.utxo_manager.get_state(&u.outpoint);
-                let is_locked = self.utxo_manager.is_collateral_locked(&u.outpoint);
+                // Use the on-chain collateral anchor (sled-persisted, gossipped to all
+                // nodes) as the authoritative lock indicator, falling back to the
+                // in-memory lock map.  This ensures every synced node agrees on
+                // which UTXOs are collateral-locked regardless of which node placed
+                // the original in-memory lock.
+                let is_locked = self.utxo_manager.is_collateral_locked(&u.outpoint)
+                    || self.registry.get_collateral_anchor(&u.outpoint).is_some();
 
                 // Skip spent/archived UTXOs
                 match &state {
@@ -1634,7 +1658,10 @@ impl RpcHandler {
 
                 // Get UTXO state
                 let state = self.utxo_manager.get_state(&u.outpoint);
-                let is_locked = self.utxo_manager.is_collateral_locked(&u.outpoint);
+                // Anchor-based lock (sled-persisted, consistent across all synced nodes)
+                // takes priority over the in-memory lock map.
+                let is_locked = self.utxo_manager.is_collateral_locked(&u.outpoint)
+                    || self.registry.get_collateral_anchor(&u.outpoint).is_some();
 
                 // Skip spent/archived UTXOs — listunspent only returns unspent outputs
                 match &state {
@@ -3687,7 +3714,10 @@ impl RpcHandler {
                     if excluded.contains(&u.outpoint) {
                         return false;
                     }
-                    if self.utxo_manager.is_collateral_locked(&u.outpoint) {
+                    // Treat anchor-locked UTXOs as collateral regardless of in-memory state
+                    if self.utxo_manager.is_collateral_locked(&u.outpoint)
+                        || self.registry.get_collateral_anchor(&u.outpoint).is_some()
+                    {
                         return false;
                     }
                     matches!(
@@ -4119,8 +4149,10 @@ impl RpcHandler {
 
         // Filter out collateral locked and non-Unspent UTXOs
         utxos.retain(|u| {
-            // Must not be collateral locked
-            if self.utxo_manager.is_collateral_locked(&u.outpoint) {
+            // Must not be collateral locked (check anchor first — authoritative across nodes)
+            if self.utxo_manager.is_collateral_locked(&u.outpoint)
+                || self.registry.get_collateral_anchor(&u.outpoint).is_some()
+            {
                 return false;
             }
             // Must be in Unspent state
