@@ -2065,6 +2065,23 @@ impl MessageHandler {
             voter_id
         );
 
+        // Drop relayed copies of our own vote — we already counted it at generation time.
+        // Without this guard, peers relay our vote back and the registry lookup fails
+        // (we can't look ourselves up by IP when our registration is in transition),
+        // flooding the log with "unknown/unregistered voter" warnings.
+        if context
+            .node_masternode_address
+            .as_deref()
+            .is_some_and(|local| local == voter_id)
+        {
+            debug!(
+                "📬 [{}] Dropping relayed self-vote for block {} (already counted at generation)",
+                self.direction,
+                hex::encode(block_hash)
+            );
+            return Ok(None);
+        }
+
         // Get consensus engine or return error
         let consensus = context
             .consensus
@@ -2180,6 +2197,20 @@ impl MessageHandler {
             hex::encode(block_hash),
             voter_id
         );
+
+        // Drop relayed copies of our own vote — same reasoning as the PREPARE handler.
+        if context
+            .node_masternode_address
+            .as_deref()
+            .is_some_and(|local| local == voter_id)
+        {
+            debug!(
+                "📬 [{}] Dropping relayed self-precommit for block {} (already counted at generation)",
+                self.direction,
+                hex::encode(block_hash)
+            );
+            return Ok(None);
+        }
 
         // Get consensus engine or return error
         let consensus = context

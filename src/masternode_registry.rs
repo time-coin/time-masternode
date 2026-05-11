@@ -3076,8 +3076,13 @@ impl MasternodeRegistry {
         utxo_manager: &crate::utxo_manager::UTXOStateManager,
     ) -> usize {
         const MISS_THRESHOLD: u32 = 3; // consecutive misses required before deregistration
+        // A node seen within this window is likely mid-UTXO-transition (old collateral
+        // unlocked, new one not yet announced to us). Skip miss counting so it isn't
+        // deregistered while still actively connected and voting.
+        const ACTIVE_GRACE_SECS: u64 = 600; // 10 minutes
 
         let mut to_deregister = Vec::new();
+        let now = Self::now();
 
         // Never auto-deregister the local masternode — operator must disable explicitly
         let local_addr = self.local_masternode_address.read().await.clone();
@@ -3100,6 +3105,13 @@ impl MasternodeRegistry {
                     // Collateral is fine — reset any pending miss count
                     self.collateral_miss_counts.remove(address);
                 } else {
+                    // If the node was active very recently, it may be mid-collateral-transition
+                    // (old UTXO spent, new announcement not yet received). Reset miss count
+                    // and wait — it will re-register on the next connection or announcement.
+                    if now.saturating_sub(info.last_seen_at) < ACTIVE_GRACE_SECS {
+                        self.collateral_miss_counts.remove(address);
+                        continue;
+                    }
                     // Collateral missing — increment miss counter
                     let mut entry = self
                         .collateral_miss_counts
