@@ -3202,6 +3202,29 @@ async fn main() {
         Vec::new()
     };
 
+    // Drain pending collateral unlocks every 30 seconds so that tier upgrades
+    // (e.g., Silver → Gold) release the old collateral lock promptly rather than
+    // waiting up to 600 seconds for the next block.
+    {
+        let drain_registry = registry.clone();
+        let drain_utxo_mgr = utxo_mgr.clone();
+        let drain_shutdown = shutdown_token.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+            loop {
+                tokio::select! {
+                    _ = drain_shutdown.cancelled() => break,
+                    _ = interval.tick() => {
+                        let unlocked = drain_registry.drain_pending_unlocks(&drain_utxo_mgr);
+                        if unlocked > 0 {
+                            tracing::info!("🔓 Drained {} pending collateral unlock(s)", unlocked);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // Start block production timer (every 10 minutes)
     let block_registry = registry.clone();
     let block_utxo_mgr = utxo_mgr.clone(); // For draining pending collateral unlocks

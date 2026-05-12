@@ -1442,10 +1442,15 @@ impl MasternodeRegistry {
                         // address check in message_handler), the operator simply added a higher-
                         // value collateral without spending the old one first. Allow this and
                         // treat it as a collateral migration rather than a churn/spoof attempt.
+                        // If the new UTXO's address is available in our set, verify ownership.
+                        // If the UTXO isn't in our set yet (unconfirmed or sync lag), trust
+                        // direct connections (message_handler already allowed them through when
+                        // the UTXO was missing; relayed announcements with missing UTXOs are
+                        // dropped by message_handler before reaching here).
                         let is_ownership_verified = prefetched_utxo_addr
                             .as_deref()
                             .map(|addr| addr == masternode.wallet_address)
-                            .unwrap_or(false);
+                            .unwrap_or(is_direct);
 
                         if is_ownership_verified {
                             tracing::info!(
@@ -1504,6 +1509,10 @@ impl MasternodeRegistry {
                                 "🔓 Collateral changed for {} — queuing old outpoint for unlock",
                                 masternode.address
                             );
+                            // Remove the sled anchor immediately so the UTXO appears
+                            // spendable in balance queries without waiting for
+                            // drain_pending_unlocks (which only fires on new blocks).
+                            self.delete_collateral_anchor(&old_op);
                             self.pending_collateral_unlocks.lock().push(old_op);
                         }
                         // Queue the new collateral for immediate locking
@@ -3095,9 +3104,9 @@ impl MasternodeRegistry {
         utxo_manager: &crate::utxo_manager::UTXOStateManager,
     ) -> usize {
         const MISS_THRESHOLD: u32 = 3; // consecutive misses required before deregistration
-        // A node seen within this window is likely mid-UTXO-transition (old collateral
-        // unlocked, new one not yet announced to us). Skip miss counting so it isn't
-        // deregistered while still actively connected and voting.
+                                       // A node seen within this window is likely mid-UTXO-transition (old collateral
+                                       // unlocked, new one not yet announced to us). Skip miss counting so it isn't
+                                       // deregistered while still actively connected and voting.
         const ACTIVE_GRACE_SECS: u64 = 600; // 10 minutes
 
         let mut to_deregister = Vec::new();
