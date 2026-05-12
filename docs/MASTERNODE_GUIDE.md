@@ -562,16 +562,27 @@ To upgrade or downgrade your tier:
 2. Restart the daemon
 
 The daemon will automatically:
-- Broadcast a signed **`MasternodeUnlock`** gossip message for the old collateral
-  outpoint so all peers release the lock immediately
-- Register with the new collateral; tier is auto-detected from the collateral
-  amount (Bronze = 1,000 TIME, Silver = 10,000 TIME, Gold = 100,000 TIME)
+- Re-announce with the new collateral outpoint; tier is auto-detected from the
+  collateral amount (Bronze = 1,000 TIME, Silver = 10,000 TIME, Gold = 100,000 TIME)
+- Queue the old collateral outpoint for release — the lock is removed and the
+  sled anchor cleared within 30 seconds on both this node and all connected peers
+  that receive the new announcement
 
 **Tier upgrades (e.g. Silver → Gold)** are directly supported by the
 Collateral-Churn guard: the guard verifies that the new UTXO is owned by the
 same `wallet_address` and, when confirmed, allows the outpoint replacement
-without requiring a full deregistration cycle first. Unauthenticated outpoint
-replacements by third parties remain blocked.
+without requiring a full deregistration cycle first.
+
+**If the old collateral appears stuck after an upgrade** (shows as locked in
+the wallet despite the new tier being active), use:
+
+```bash
+time-cli releasecollateral <old_txid> <old_vout>
+```
+
+This clears both the in-memory collateral lock and the persistent sled anchor
+for the specific outpoint in a single command. Remote nodes self-correct when
+they receive the next gossip announcement from your node (within 30 seconds).
 
 ---
 

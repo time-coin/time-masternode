@@ -407,7 +407,10 @@ impl IPBanlist {
         if let Some((expiry, reason)) = self.frame_bomb_bans.get(&ip) {
             if Instant::now() < *expiry {
                 let remaining = expiry.duration_since(Instant::now()).as_secs();
-                return Some(format!("Frame-bomb temp ban for {}s: {}", remaining, reason));
+                return Some(format!(
+                    "Frame-bomb temp ban for {}s: {}",
+                    remaining, reason
+                ));
             } else {
                 self.frame_bomb_bans.remove(&ip);
             }

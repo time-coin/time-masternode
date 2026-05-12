@@ -223,6 +223,48 @@ time-cli listlockedcollaterals
 ```
 Lists all currently locked collaterals with masternode details.
 
+#### Release a Single Collateral Lock
+```bash
+time-cli releasecollateral <txid> <vout>
+```
+Releases the collateral lock for a specific UTXO and clears its persistent sled
+anchor in one step. Use this when an old collateral is stuck after a tier upgrade
+(e.g. Silver → Gold) without disturbing other active collateral locks.
+
+```bash
+# Example: free stuck Silver after upgrading to Gold
+time-cli releasecollateral 38a43f69bd3f38f9f74981a8ba5ba120fe5aa7e9919b2396b7d383557757ea97 0
+```
+
+Remote nodes self-correct within 30 seconds when they receive the next gossip
+announcement from the upgraded node.
+
+#### Clear a Stale Collateral Anchor
+```bash
+time-cli clearcollateralanchor <txid>:<vout>
+```
+Deletes the `collateral_anchor` sled entry for an outpoint and auto-unbans any
+IP banned for a hijack attempt on that outpoint. Use when the persistent anchor
+points to the wrong node (e.g. reversed by gossip delivery order) so the
+legitimate owner's next announcement can re-anchor cleanly.
+
+```bash
+time-cli clearcollateralanchor ce8b5f168aca656f6e9cca2a475f2db4b6033742c6d437f22217bb6ddb557de0:0
+```
+
+Note: `releasecollateral` also clears the anchor. Use `clearcollateralanchor`
+when you only need to fix the anchor without releasing the lock (e.g. correcting
+reversed anchors between two legitimate nodes).
+
+#### Release ALL Collateral Locks
+```bash
+time-cli releaseallcollaterals
+```
+Releases every collateral lock on this node without touching transaction UTXO
+locks. Active masternodes re-lock their collateral within 30 seconds via their
+next gossip announcement. Use as a last resort when multiple collaterals are
+stuck or a squatter has locked UTXOs belonging to legitimate nodes.
+
 ---
 
 ### Consensus Information

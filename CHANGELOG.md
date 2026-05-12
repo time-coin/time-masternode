@@ -5,6 +5,44 @@ All notable changes to TimeCoin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.6] - 2026-05-10
+
+### Fixed
+
+- **Outbound connections never announced masternode tier**: The V3/V4 masternode
+  announcement was only sent in `server.rs` on inbound handshake completion. Nodes
+  that dialled *out* to a peer never announced themselves, so peers saw them as
+  unknown Free-tier nodes regardless of their actual collateral. Fixed by mirroring
+  the announcement block into `peer_connection.rs` `run_message_loop_unified` for
+  outbound connections. (Bug affected Gold-tier LW-London; commits `d9a4369`)
+
+- **Collateral-Churn guard blocking legitimate tier upgrades**: When a masternode
+  upgraded from Silver to Gold by updating `masternode.conf` without spending the old
+  Silver UTXO, the Collateral-Churn Case A guard on remote nodes always blocked the
+  new Gold announcement — because the old UTXO still existed on-chain. Fixed: Case A
+  now checks `prefetched_utxo_addr == masternode.wallet_address` (ownership of the
+  *new* UTXO verified) before blocking. Legitimate same-owner upgrades are allowed;
+  hijack attempts (different wallet address) still produce `CollateralRewardRedirect`.
+  (Commit `31ac714`)
+
+- **Startup log displayed IP instead of wallet address**: Two `main.rs` log lines used
+  `mn.address` (node IP) where `mn.wallet_address` was intended, making it impossible
+  to verify the reward address at a glance on startup. Cosmetic only; no functional
+  effect. (Commit `d9a4369`)
+
+### Added
+
+- **Signed `MasternodeUnlock` — Dash `ProUpRevTx`-style collateral deregistration**:
+  Commenting out a masternode's entry in `masternode.conf` and restarting now
+  broadcasts a cryptographically signed revoke message to the network. Remote peers
+  verify the Ed25519 signature against the stored `public_key` for that node, then
+  unregister it and release the collateral lock — without requiring the operator to
+  spend the collateral UTXO. Unsigned revokes are still accepted from a direct TCP
+  peer whose source IP matches the node IP (operator-local trust for observer nodes
+  without a `masternodeprivkey`). Signature scheme:
+  `Ed25519("TIME_COLLATERAL_REVOKE:<address>:<txid>:<vout>:<timestamp>")`.
+  (Commit `8e13246`)
+
 ## [1.5.5] - 2026-05-09
 
 ### Fixed

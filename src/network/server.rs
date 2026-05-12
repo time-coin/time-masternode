@@ -884,7 +884,10 @@ async fn handle_peer(
                         } else {
                             gate_drop_streak += 1;
                             if !gate_is_whitelisted && gate_drop_streak > GATE_HARD_DROPS {
-                                let _ = msg_read_tx.send(Err("Message flood detected: pre-channel gate triggered".to_string())).await;
+                                let _ = msg_read_tx
+                                    .send(Err("Message flood detected: pre-channel gate triggered"
+                                        .to_string()))
+                                    .await;
                                 break;
                             }
                             continue; // soft drop

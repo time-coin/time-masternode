@@ -1621,7 +1621,9 @@ impl AttackDetector {
         if count >= BLOCK_THRESHOLD {
             tracing::warn!(
                 "🚫 InvalidTxSpam from {} — {} invalid TXs in {}s — blocking",
-                addr, count, INVALID_TX_WINDOW_SECS
+                addr,
+                count,
+                INVALID_TX_WINDOW_SECS
             );
             self.maybe_add_attack(AttackPattern {
                 attack_type: AttackType::InvalidTxSpam,
@@ -1632,7 +1634,8 @@ impl AttackDetector {
                         "{} invalid transactions from {} within {}s",
                         count, addr, INVALID_TX_WINDOW_SECS
                     ),
-                    "Repeated invalid TXs (bad UTXO ref / bad signature) waste validation CPU".to_string(),
+                    "Repeated invalid TXs (bad UTXO ref / bad signature) waste validation CPU"
+                        .to_string(),
                 ],
                 first_detected: now,
                 last_seen: now,
@@ -1643,7 +1646,9 @@ impl AttackDetector {
         } else if count >= RATE_LIMIT_THRESHOLD {
             tracing::debug!(
                 "⚠️  InvalidTxSpam from {} — {} invalid TXs in {}s — rate-limiting",
-                addr, count, INVALID_TX_WINDOW_SECS
+                addr,
+                count,
+                INVALID_TX_WINDOW_SECS
             );
             self.maybe_add_attack(AttackPattern {
                 attack_type: AttackType::InvalidTxSpam,

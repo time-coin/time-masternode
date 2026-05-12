@@ -1094,8 +1094,9 @@ impl PeerConnection {
             if let Some(ref mn_registry) = config.masternode_registry {
                 if let Some(our_address) = mn_registry.get_local_address().await {
                     let local_masternodes = mn_registry.get_all().await;
-                    if let Some(our_mn) =
-                        local_masternodes.iter().find(|mn| mn.masternode.address == our_address)
+                    if let Some(our_mn) = local_masternodes
+                        .iter()
+                        .find(|mn| mn.masternode.address == our_address)
                     {
                         let cert = mn_registry.get_local_certificate().await;
                         let proof = our_mn
