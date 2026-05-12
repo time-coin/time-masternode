@@ -3954,7 +3954,7 @@ impl MessageHandler {
                                                 let mut guard = bl.write().await;
                                                 guard.add_permanent_ban(
                                                     ban_ip,
-                                                    "collateral squatter: on-chain anchor belongs to different IP",
+                                                    &format!("Collateral hijack attempt for {}:{} (on-chain anchor belongs to different IP)", hex::encode(outpoint.txid), outpoint.vout),
                                                 );
                                                 if is_relayed {
                                                     let bare_relay = peer_ip
@@ -5291,7 +5291,9 @@ impl MessageHandler {
             Ok(Some(removed)) => {
                 // Queue the collateral UTXO for unlock so it becomes spendable again.
                 if let Some(ref op) = removed.masternode.collateral_outpoint {
-                    context.masternode_registry.queue_collateral_unlock(op.clone());
+                    context
+                        .masternode_registry
+                        .queue_collateral_unlock(op.clone());
                     info!(
                         "🔓 Queued collateral {}:{} for unlock after MasternodeUnlock for {}",
                         hex::encode(op.txid),
@@ -7117,13 +7119,19 @@ impl MessageHandler {
                         .peer_registry
                         .mark_incompatible(
                             &self.peer_ip,
-                            &format!("Pre-launch block batch (height {}): {}", block.header.height, e),
+                            &format!(
+                                "Pre-launch block batch (height {}): {}",
+                                block.header.height, e
+                            ),
                             false,
                         )
                         .await;
                     self.suspend_peer_from_consensus(
                         context,
-                        &format!("Pre-launch block batch (height {}): {}", block.header.height, e),
+                        &format!(
+                            "Pre-launch block batch (height {}): {}",
+                            block.header.height, e
+                        ),
                     )
                     .await;
                     break; // Stop processing this batch; connection stays open
