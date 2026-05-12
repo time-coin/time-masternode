@@ -613,6 +613,18 @@ enum Commands {
     #[command(next_help_heading = "Masternode")]
     MasternodeStatus,
 
+    /// Release the collateral lock for a single UTXO outpoint.
+    /// Use this to free a stuck old collateral after a tier upgrade (e.g., Silver → Gold)
+    /// without disturbing other active collateral locks.
+    /// Also clears the sled anchor for that outpoint.
+    #[command(next_help_heading = "Masternode")]
+    ReleaseCollateral {
+        /// Transaction ID of the collateral UTXO
+        txid: String,
+        /// Output index of the collateral UTXO
+        vout: u32,
+    },
+
     /// Release ALL collateral locks without touching transaction UTXO locks.
     /// Use when squatters have locked your collateral UTXOs and you need to reclaim them.
     /// After running this, restart the node so legitimate masternodes re-register.
@@ -1397,6 +1409,9 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             MasternodeCommands::List { all } => ("masternodelist", json!([all])),
             MasternodeCommands::Status => ("masternodestatus", json!([])),
         },
+        Commands::ReleaseCollateral { txid, vout } => {
+            ("releasecollateral", json!([txid, vout]))
+        }
         Commands::ReleaseAllCollaterals => ("releaseallcollaterals", json!([])),
         Commands::ListLockedCollaterals => ("listlockedcollaterals", json!([])),
         Commands::MasternodeRegStatus { address } => ("masternoderegstatus", json!([address])),

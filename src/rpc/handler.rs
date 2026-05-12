@@ -246,6 +246,7 @@ impl RpcHandler {
             "unlockutxo" => self.unlock_utxo(&params_array).await,
             "unlockorphanedutxos" => self.unlock_orphaned_utxos().await,
             "forceunlockall" => self.force_unlock_all().await,
+            "releasecollateral" => self.release_collateral(&params_array).await,
             "releaseallcollaterals" => self.release_all_collaterals().await,
             "gettransactions" => self.get_transactions_batch(&params_array).await,
             "gettreasurybalance" => self.get_treasury_balance().await,
@@ -5734,6 +5735,65 @@ impl RpcHandler {
     }
 
     /// Release all collateral locks without touching transaction UTXO locks.
+    /// Release the collateral lock for a specific UTXO outpoint.
+    /// Params: [txid_hex, vout]
+    /// Use this to release a single stuck collateral (e.g., old Silver after Silver→Gold upgrade)
+    /// without disturbing other active collateral locks.
+    async fn release_collateral(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let txid_str = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Usage: releasecollateral <txid_hex> <vout>".to_string(),
+            })?;
+        let vout = params
+            .get(1)
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Usage: releasecollateral <txid_hex> <vout>".to_string(),
+            })? as u32;
+
+        let txid_bytes = hex::decode(txid_str).map_err(|_| RpcError {
+            code: -8,
+            message: "Invalid txid format".to_string(),
+        })?;
+        if txid_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -8,
+                message: "txid must be 32 bytes".to_string(),
+            });
+        }
+        let mut txid = [0u8; 32];
+        txid.copy_from_slice(&txid_bytes);
+        let outpoint = crate::types::OutPoint { txid, vout };
+
+        let was_locked = self.utxo_manager.is_collateral_locked(&outpoint);
+        let anchor_removed = self.registry.delete_collateral_anchor(&outpoint);
+
+        if was_locked {
+            let _ = self.utxo_manager.unlock_collateral(&outpoint);
+        }
+
+        tracing::warn!(
+            "🔓 RPC releasecollateral: {}:{} lock_removed={} anchor_removed={}",
+            txid_str, vout, was_locked, anchor_removed
+        );
+
+        Ok(json!({
+            "result": "success",
+            "txid": txid_str,
+            "vout": vout,
+            "collateral_lock_removed": was_locked,
+            "anchor_removed": anchor_removed,
+            "message": format!(
+                "Collateral released for {}:{}. Lock removed: {}. Anchor removed: {}.",
+                txid_str, vout, was_locked, anchor_removed
+            )
+        }))
+    }
+
     /// Use this when squatters have locked collateral UTXOs and you need to reclaim them.
     /// Safer than forceunlockall which also resets pending/finalized transaction states.
     async fn release_all_collaterals(&self) -> Result<Value, RpcError> {
