@@ -3056,7 +3056,7 @@ impl RpcHandler {
     }
 
     async fn get_fee_schedule(&self) -> Result<Value, RpcError> {
-        let schedule = crate::consensus::FeeSchedule::default();
+        let schedule = self.consensus.current_fee_schedule();
         let tiers: Vec<Value> = schedule
             .tiers
             .iter()

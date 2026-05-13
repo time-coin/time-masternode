@@ -23,7 +23,7 @@ pub const MAX_FREE_TIER_PER_SUBNET: u32 = 5;
 
 // Gossip-based status tracking constants
 const MIN_PEER_REPORTS: usize = 3; // Masternode must be seen by at least 3 peers to be active
-const REPORT_EXPIRY_SECS: u64 = 300; // Reports older than 5 minutes are stale
+const REPORT_EXPIRY_SECS: u64 = 600; // Reports older than 10 minutes are stale (20× gossip interval)
 const GOSSIP_INTERVAL_SECS: u64 = 30; // Broadcast status every 30 seconds
 const MIN_PARTICIPATION_SECS: u64 = 600; // 10 minutes minimum participation (prevents reward gaming)
 const AUTO_REMOVE_AFTER_SECS: u64 = 3600; // Auto-remove masternodes with no peer reports for 1 hour
@@ -3496,6 +3496,18 @@ impl MasternodeRegistry {
                     before_count - after_count,
                     after_count
                 );
+            }
+
+            // Refresh last_seen_at from the most recent non-expired gossip report.
+            // This extends the 120s grace window to gossip-active nodes, not just
+            // nodes we have a direct TCP connection to.  Without this, a node that
+            // only appears via gossip always has last_seen_at=0 (set only on TCP
+            // connect) and never gets the grace buffer, causing it to flip
+            // inactive the moment its reporter count drops below effective_min.
+            if let Some(most_recent) = info.peer_reports.iter().map(|e| *e.value()).max() {
+                if most_recent > info.last_seen_at {
+                    info.last_seen_at = most_recent;
+                }
             }
 
             // Update is_active based on number of recent reports
