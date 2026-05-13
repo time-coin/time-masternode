@@ -1103,6 +1103,16 @@ impl MessageHandler {
                 Ok(None)
             }
 
+            NetworkMessage::MasternodeStartedAtGossip { entries } => {
+                for (addr, started_at) in entries {
+                    context
+                        .masternode_registry
+                        .update_daemon_started_at(addr, *started_at)
+                        .await;
+                }
+                Ok(None)
+            }
+
             // === Fork Alert ===
             NetworkMessage::ForkAlert {
                 your_height,

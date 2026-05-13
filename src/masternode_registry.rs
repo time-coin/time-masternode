@@ -3275,7 +3275,7 @@ impl MasternodeRegistry {
             reporter
         );
 
-        // Find which masternodes we're connected to
+        // Find which masternodes we're connected to, and collect all known start times.
         let masternodes = self.masternodes.read().await;
 
         tracing::debug!(
@@ -3288,6 +3288,19 @@ impl MasternodeRegistry {
             .keys()
             .filter(|addr| connected_peers.contains(addr))
             .cloned()
+            .collect();
+
+        // Collect started_at for all masternodes we know about (including indirect ones).
+        // Sent as a companion message so peers can display uptime without a direct connection.
+        let started_at_entries: Vec<(String, u64)> = masternodes
+            .iter()
+            .filter_map(|(addr, info)| {
+                if info.daemon_started_at > 0 {
+                    Some((addr.clone(), info.daemon_started_at))
+                } else {
+                    None
+                }
+            })
             .collect();
 
         drop(masternodes);
@@ -3316,6 +3329,21 @@ impl MasternodeRegistry {
             .await;
 
         self.broadcast_message(msg).await;
+
+        // Broadcast daemon start timestamps as a companion message.  Old nodes that
+        // cannot deserialize MasternodeStartedAtGossip receive UnknownMessage and
+        // silently ignore it (wire.rs fallback).
+        if !started_at_entries.is_empty() {
+            // Include our own start time in the companion message.
+            let mut entries = started_at_entries;
+            let our_start = self.started_at;
+            if our_start > 0 {
+                entries.push((reporter.clone(), our_start));
+            }
+            let started_at_msg =
+                crate::network::message::NetworkMessage::MasternodeStartedAtGossip { entries };
+            self.broadcast_message(started_at_msg).await;
+        }
 
         tracing::debug!(
             "📡 Gossip: Broadcasting visibility of {} masternodes: {:?}",
@@ -3484,8 +3512,22 @@ impl MasternodeRegistry {
             // multi-subnet witnesses are actually achievable (≥3 connected peers).
             // With <3 connections reporters may all share a subnet even for a fully
             // healthy masternode.
+            // /16 subnet diversity check — only required when there is no
+            // independent TCP-level proof of reachability.
+            //
+            // Rationale: the diversity check prevents Sybil reporters (an attacker
+            // running many nodes on the same /16 and reporting each other as active).
+            // But it incorrectly penalises legitimate deployments where many nodes
+            // share the same hosting provider's /16 allocation (e.g. 50.28.x.x).
+            // When we have confirmed TCP reachability for a node — via the
+            // reachability prober or an outbound connection — that probe is
+            // independent of peer-report gossip and cannot be faked by co-located
+            // peers, so diversity is redundant and is skipped.
             let meets_diversity =
-                if total_masternodes > 12 && connected_peers.len() >= 3 && report_count >= 2 {
+                if info.is_publicly_reachable {
+                    // Independently verified via TCP probe — diversity not required.
+                    true
+                } else if total_masternodes > 12 && connected_peers.len() >= 3 && report_count >= 2 {
                     // Require witnesses from at least 2 distinct /16 subnets to prevent
                     // targeted DDoS against a node's witnesses on the same subnet.
                     // Only enforce for larger networks (>12 nodes) — small networks with

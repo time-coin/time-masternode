@@ -252,6 +252,14 @@ pub enum NetworkMessage {
         visible_masternodes: Vec<String>, // List of masternode IPs they can see
         timestamp: u64,
     },
+    /// Companion to MasternodeStatusGossip — carries daemon start timestamps
+    /// so that nodes not directly connected to a peer can still show real uptime.
+    /// Old nodes that cannot deserialize this variant receive UnknownMessage and
+    /// silently ignore it (wire.rs fallback path).
+    MasternodeStartedAtGossip {
+        /// (masternode_ip, daemon_started_at) for all masternodes the reporter knows about
+        entries: Vec<(String, u64)>,
+    },
     /// V2 masternode announcement with collateral verification
     MasternodeAnnouncementV2 {
         address: String,
@@ -538,6 +546,7 @@ impl NetworkMessage {
             NetworkMessage::FinalityProposal { .. } => "FinalityProposal",
             NetworkMessage::FallbackVote { .. } => "FallbackVote",
             NetworkMessage::MasternodeStatusGossip { .. } => "MasternodeStatusGossip",
+            NetworkMessage::MasternodeStartedAtGossip { .. } => "MasternodeStartedAtGossip",
             NetworkMessage::MasternodeAnnouncementV2 { .. } => "MasternodeAnnouncementV2",
             NetworkMessage::MasternodeAnnouncementV3 { .. } => "MasternodeAnnouncementV3",
             NetworkMessage::PaymentRequestRelay(_) => "PaymentRequestRelay",
