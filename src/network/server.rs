@@ -1166,10 +1166,9 @@ async fn handle_peer(
                                 }
                             } else {
                                 // Burst from authenticated peer — normal operation (sync, commerce, etc.).
+                                // Do NOT feed record_message_flood() here: the AI enforcement loop
+                                // would call record_violation() and issue a ban despite the intent.
                                 tracing::info!("🌊 Message burst from {} tripped pre-channel gate — disconnecting (no ban, peer was authenticated)", peer.addr);
-                                if let Some(ai) = &ai_system {
-                                    ai.attack_detector.record_message_flood(&ip_str);
-                                }
                             }
                         }
                         break;
