@@ -1022,7 +1022,9 @@ impl PeerConnection {
         mut config: MessageLoopConfig,
     ) -> Result<(), String> {
         let mut ping_interval = interval(Self::PING_INTERVAL);
+        ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut timeout_check = interval(Self::TIMEOUT_CHECK_INTERVAL);
+        timeout_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         info!(
             "🔄 [{:?}] Starting unified message loop for {} (port: {})",
