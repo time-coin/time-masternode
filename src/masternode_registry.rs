@@ -3286,7 +3286,12 @@ impl MasternodeRegistry {
 
         let visible: Vec<String> = masternodes
             .keys()
-            .filter(|addr| connected_peers.contains(addr))
+            .filter(|addr| {
+                // Strip port before checking: peer registry uses bare IPs, but masternode
+                // addresses may include a port suffix (e.g. "50.28.107.33:24000").
+                let ip = addr.split(':').next().unwrap_or(addr).to_string();
+                connected_peers.contains(&ip)
+            })
             .cloned()
             .collect();
 
@@ -3558,7 +3563,13 @@ impl MasternodeRegistry {
             // counts are temporarily insufficient.  This prevents a cascading
             // deactivation storm when connections cycle rapidly (e.g. the
             // network has more masternodes than any single node's old peer limit).
-            let is_directly_connected = connected_peers.contains(addr.as_str());
+            // Use the bare IP (no port) for the connected-peers lookup — the
+            // peer_connection_registry keys on IP only, but masternode addresses
+            // may include a port suffix (e.g. "50.28.107.33:24000"). Without
+            // stripping the port, addr.as_str() never matches and
+            // is_directly_connected is always false for port-suffixed addresses,
+            // causing Connected-but-Inactive on the dashboard.
+            let is_directly_connected = connected_peers.contains(addr_ip);
             const ACTIVE_GRACE_SECS: u64 = 120;
             let within_grace = !matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
                 && info.last_seen_at > 0
