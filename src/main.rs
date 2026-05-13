@@ -3219,6 +3219,10 @@ async fn main() {
                         if unlocked > 0 {
                             tracing::info!("🔓 Drained {} pending collateral unlock(s)", unlocked);
                         }
+                        let stale = drain_registry.cleanup_stale_anchors().await;
+                        if stale > 0 {
+                            tracing::info!("🧹 Removed {} stale collateral anchor(s)", stale);
+                        }
                     }
                 }
             }

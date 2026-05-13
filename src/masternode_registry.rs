@@ -4744,6 +4744,73 @@ impl MasternodeRegistry {
             .and_then(|v| String::from_utf8(v.to_vec()).ok())
     }
 
+    /// Scan all `collateral_anchor` sled entries and delete any that are stale:
+    ///
+    /// - No masternode is registered at the anchored IP (node deregistered), OR
+    /// - A masternode IS registered at that IP but with a *different* outpoint (tier
+    ///   upgrade completed on this node but the old anchor was never cleaned up —
+    ///   happens when remote nodes blocked the upgrade via the churn guard before the
+    ///   new Gold UTXO was confirmed in their UTXO set).
+    ///
+    /// Returns the number of stale anchors removed.
+    pub async fn cleanup_stale_anchors(&self) -> usize {
+        // Collect all anchor entries without holding any async lock.
+        let entries: Vec<(String, String)> = self
+            .db
+            .scan_prefix(b"collateral_anchor:")
+            .flatten()
+            .filter_map(|(k, v)| {
+                let key = String::from_utf8(k.to_vec()).ok()?;
+                let ip = String::from_utf8(v.to_vec()).ok()?;
+                let outpoint_str = key.strip_prefix("collateral_anchor:")?.to_string();
+                Some((outpoint_str, ip))
+            })
+            .collect();
+
+        if entries.is_empty() {
+            return 0;
+        }
+
+        let nodes = self.masternodes.read().await;
+        let mut removed = 0usize;
+
+        for (outpoint_str, anchored_ip) in entries {
+            // Find the masternode registered at the anchored IP (strip port if present).
+            let ip_bare = anchored_ip
+                .split(':')
+                .next()
+                .unwrap_or(&anchored_ip)
+                .to_string();
+            let current_outpoint = nodes
+                .iter()
+                .find(|(addr, _)| {
+                    let node_ip = addr.split(':').next().unwrap_or(addr);
+                    node_ip == ip_bare || addr.as_str() == anchored_ip
+                })
+                .and_then(|(_, info)| info.masternode.collateral_outpoint.as_ref())
+                .map(|op| format!("{}:{}", hex::encode(op.txid), op.vout));
+
+            let is_stale = match &current_outpoint {
+                None => true, // node no longer registered (or registered as Free with no outpoint)
+                Some(cur) => cur != &outpoint_str, // node upgraded to a different outpoint
+            };
+
+            if is_stale {
+                let anchor_key = format!("collateral_anchor:{}", outpoint_str);
+                if self.db.remove(anchor_key.as_bytes()).ok().flatten().is_some() {
+                    tracing::info!(
+                        "🧹 Removed stale collateral anchor {}  (anchored IP: {}  current: {})",
+                        outpoint_str,
+                        anchored_ip,
+                        current_outpoint.as_deref().unwrap_or("none"),
+                    );
+                    removed += 1;
+                }
+            }
+        }
+        removed
+    }
+
     /// Return the IP of the masternode currently claiming the given collateral outpoint
     /// in the in-memory `nodes` map, or `None` if no node claims it.
     ///
