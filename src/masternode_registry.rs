@@ -3574,8 +3574,14 @@ impl MasternodeRegistry {
             let within_grace = !matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
                 && info.last_seen_at > 0
                 && now.saturating_sub(info.last_seen_at) < ACTIVE_GRACE_SECS;
-            let consensus_active =
-                is_directly_connected || within_grace || (meets_count && meets_diversity);
+            // A TCP-reachability probe is an independent, unforgeable confirmation that
+            // the node is online — treat it as equivalent to a direct connection for
+            // liveness purposes.  Without this, a node confirmed reachable still needs
+            // ≥3 gossip reporters, making the reachability probe useless for activation.
+            let consensus_active = is_directly_connected
+                || within_grace
+                || info.is_publicly_reachable
+                || (meets_count && meets_diversity);
             info.is_active = !info.consensus_suspended && consensus_active;
 
             if was_active != info.is_active {
