@@ -1706,6 +1706,14 @@ async fn main() {
         };
 
         if registration_ok {
+            // Stamp the local node's own daemon_started_at so masternodelist
+            // shows the correct wall-clock uptime via the daemon_started_at path
+            // (the node never receives its own announcement, so the field stays 0
+            // without this explicit update).
+            registry
+                .update_daemon_started_at(&mn.address, registry.get_started_at())
+                .await;
+
             // Local masternode must be OnChain so it persists across
             // peer disconnects (Handshake nodes are removed on disconnect).
             if mn.tier != types::MasternodeTier::Free {

@@ -1249,11 +1249,14 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     mn.total_uptime
                 };
+                let uptime_mins = uptime_secs / 60;
                 let uptime_hrs = uptime_secs / 3600;
                 let uptime_str = if uptime_hrs >= 24 {
                     format!("{}d {}h", uptime_hrs / 24, uptime_hrs % 24)
-                } else {
+                } else if uptime_hrs > 0 {
                     format!("{}h", uptime_hrs)
+                } else {
+                    format!("{}m", uptime_mins)
                 };
                 let tier_color = match mn.tier.as_str() {
                     "Gold" => Color::Yellow,
