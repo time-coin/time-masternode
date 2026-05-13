@@ -75,7 +75,7 @@ Blockchain Information:
 - `masternodelist` / `masternode list` - Table format
 - `masternodestatus` / `masternode status` - Formatted status
 - `getpeerinfo` - Table format
-- `uptime` - Days/hours/minutes/seconds format
+- `uptime` - Days/hours for ≥1 hour; minutes for sub-hour nodes
 - All other commands default to pretty JSON
 
 ---
@@ -323,6 +323,14 @@ time-cli getproposal <proposal_id>
 ```
 
 Returns full proposal detail including current vote tally, yes/total weight, and quorum percentage.
+
+#### Get Fee Schedule
+
+```bash
+time-cli getfeeschedule
+```
+
+Returns the live fee schedule currently in effect on the network (minimum fee and tiered rate table). Use this to verify the current rates before sending or to inspect the result of a passed fee-schedule governance proposal.
 
 ---
 

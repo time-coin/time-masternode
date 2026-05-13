@@ -623,7 +623,7 @@ the masternode server is required to spend them.
 
 | Time after node goes offline | What happens |
 |------------------------------|-------------|
-| 5 minutes | Gossip reports expire — node becomes inactive |
+| 10 minutes | Gossip reports expire — node becomes inactive |
 | 1 hour | Registry auto-removes the node, releases the application-level lock |
 
 After 1 hour the masternode is fully cleaned up from the network's registry.
@@ -662,15 +662,21 @@ collateral automatically on startup.
 
 ### How a Node Becomes (and Stays) Active
 
-The daemon determines whether a masternode is `is_active` using two complementary signals:
+The daemon determines whether a masternode is `is_active` using three complementary signals (any one is sufficient):
 
 **1. Direct TCP Connection (Authoritative)**
 
 If a masternode has an established, post-handshake TCP connection in `PeerConnectionRegistry`, it is considered active regardless of gossip counts. `cleanup_stale_reports()` accepts a `peer_registry` reference and will never flip `is_active = false` for a directly-connected peer. Direct connections are the ground truth.
 
-**2. Gossip-Based Status (Secondary)**
+**2. TCP Reachability Probe (Independent Confirmation)**
 
-Masternodes broadcast `StatusGossip` messages to the network roughly every 60 seconds. A masternode records its own status locally (self-recording) before broadcasting, so it appears in its own registry from the first cycle. Peers relay these sightings, and the `cleanup_stale_reports()` sweep deactivates nodes that have not been seen within the TTL window.
+The daemon periodically probes masternodes via TCP. A successful probe sets `is_publicly_reachable = true`, which is treated as a standalone sufficient condition for active status — equivalent to a direct connection. This is unforgeable (unlike gossip) and allows reachable nodes to remain active even when gossip reporter counts are temporarily low.
+
+**3. Gossip-Based Status (Secondary)**
+
+Masternodes broadcast `StatusGossip` messages to the network roughly every 30 seconds. Peers relay these sightings, and the `cleanup_stale_reports()` sweep (runs every 60s) expires reports older than 10 minutes. A node with sufficient recent sightings is kept active.
+
+The `cleanup_stale_reports()` sweep also refreshes `last_seen_at` from the most recent non-expired gossip report. This extends the 120-second grace window (`ACTIVE_GRACE_SECS`) to gossip-active nodes — not just directly-connected ones — smoothing out transient reporter gaps between 30s gossip cycles.
 
 **Dynamic Minimum-Reports Threshold**
 
@@ -688,8 +694,10 @@ This prevents premature deactivation on small testnets where only a few peers ex
 
 ```
 Direct TCP connection present → is_active = true (cleanup cannot override)
-No direct connection + gossip sightings ≥ min_reports within TTL → is_active = true
-No direct connection + gossip sightings < min_reports or TTL expired → is_active = false
+TCP reachability probe succeeded (is_publicly_reachable) → is_active = true
+Last gossip report within 120s (ACTIVE_GRACE_SECS) → is_active = true
+Gossip sightings ≥ min_reports within 10-minute TTL → is_active = true
+None of the above → is_active = false
 ```
 
 ---
@@ -1121,7 +1129,7 @@ Masternode management is **local only**:
 **A:** Yes. Update `masternode.conf` with the new collateral txid/vout and restart. The daemon broadcasts a `MasternodeUnlock` for the old outpoint and registers with the new collateral. Tier upgrades (e.g. Silver → Gold) are supported directly — the Collateral-Churn guard allows the swap when the new UTXO is owned by the same wallet address.
 
 ### Q: What if my node goes offline?
-**A:** After 5 missed heartbeats (5 minutes), marked inactive. No rewards while inactive.
+**A:** After 10 minutes without gossip reports from peers, marked inactive. No rewards while inactive.
 
 ### Q: Do I need to save a signing key?
 **A:** Yes. The `masternodeprivkey` in `time.conf` is your signing key. Back it up securely. Generate one with `time-cli masternode genkey`.

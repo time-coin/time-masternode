@@ -6,6 +6,24 @@
 
 ---
 
+## Recent Changes (v1.5.6 — May 13, 2026)
+
+### False-Ban Fixes for Legitimate Nodes
+
+**Ping flood false bans** — tokio `interval()` defaults to `MissedTickBehavior::Burst`, which replays all missed ticks when the scheduler catches up after a stall. Under load, a single backlog event would fire 10–20 pings at once, pushing the peer over the 6-pings/10s limit and escalating to a `PingFlood` ban. Fixed by switching both ping and timeout-check interval timers to `MissedTickBehavior::Skip`.
+
+**MessageFlood false bans** — the pre-channel burst gate's hard-limit path called `record_message_flood()` even for authenticated (post-handshake) peers, which fed the AI enforcement loop and caused IP bans on legitimate sync bursts. Fixed by removing the flood recording call for authenticated peers — they are disconnected on burst but not banned.
+
+### Masternode Active-Status Stability
+
+**Gossip report TTL extended** — `REPORT_EXPIRY_SECS` increased from 300 s to 600 s. Reports from a peer are now valid for 10 minutes, giving 20× the 30s gossip interval as headroom for delivery delays.
+
+**`last_seen_at` refresh from gossip** — `cleanup_stale_reports()` now updates `last_seen_at` to the most recent non-expired gossip report timestamp. Previously this field was only set on TCP connect, so gossip-only nodes had `last_seen_at = 0` and never benefited from the 120s `ACTIVE_GRACE_SECS` buffer. Now any node with a recent gossip sighting holds the grace window through the inevitable inter-gossip gap.
+
+**TCP reachability as standalone active condition** — `is_publicly_reachable` (set by the TCP probe) is now a sufficient condition for `consensus_active`, independent of gossip reporter count. A probed-reachable node stays active without needing ≥3 gossip witnesses.
+
+---
+
 ## Recent Changes (May 2026)
 
 ### Signed MasternodeUnlock — Gossip-Based Collateral Release (commit 8e13246)
@@ -108,6 +126,11 @@ The inbound and outbound TLS paths previously used a single `tokio::select!` loo
 
 ### Ping/Pong Soft Rate Limit
 Excess pings are now dropped silently (`check_rate_limit_soft!`) rather than recording banlist violations. Previously, connection-churn during sync failures accumulated ping violations and triggered hour-long bans on legitimate masternodes.
+
+Ping interval timers use `MissedTickBehavior::Skip` so that accumulated ticks from a backlogged tokio runtime do not fire as a burst when the executor catches up. Without this, a brief scheduler stall would cause dozens of pings to fire at once, pushing the peer over the per-connection rate limit and triggering a false `PingFlood` violation.
+
+### MessageFlood — Authenticated-Peer Carve-Out
+The pre-channel message burst gate (hard limit 500 msg/s) no longer feeds `record_message_flood()` for authenticated peers (those that have completed the post-handshake TLS exchange). Such peers are disconnected on burst but not banned — legitimate sync bursts, gossip floods during block propagation, and RPC-heavy operations should never result in a permanent or timed IP ban. Unauthenticated pre-handshake connections are still banned on burst.
 
 ### Reduced Ban Escalation (Non-Severe Violations)
 - 3rd violation: 5 min → **1 min**
