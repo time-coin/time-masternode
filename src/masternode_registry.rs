@@ -1657,6 +1657,14 @@ impl MasternodeRegistry {
         let current_h = self
             .current_height
             .load(std::sync::atomic::Ordering::Relaxed);
+        // Preserve daemon_started_at from any existing entry — it is stamped at startup
+        // for the local node and updated via update_daemon_started_at() for remote peers.
+        // register_internal() creates a fresh MasternodeInfo, so without this the field
+        // resets to 0 every time gossip triggers a re-registration.
+        let existing_daemon_started_at = nodes
+            .get(&masternode.address)
+            .map(|e| e.daemon_started_at)
+            .unwrap_or(0);
         let info = MasternodeInfo {
             masternode: masternode.clone(),
             reward_address: reward_address.clone(),
@@ -1664,7 +1672,7 @@ impl MasternodeRegistry {
             total_uptime: 0,
             is_active: should_activate, // Only active if explicitly activated (true for connections, false for gossip)
             consensus_suspended: false,
-            daemon_started_at: 0,
+            daemon_started_at: existing_daemon_started_at,
             last_reward_height: 0,
             blocks_without_reward: 0,
             registration_height: current_h, // Anti-sybil: track when node first appeared
