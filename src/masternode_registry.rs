@@ -4551,30 +4551,59 @@ impl MasternodeRegistry {
             .insert(key.as_bytes(), bytes)
             .map_err(|e| format!("db insert: {}", e))?;
 
-        // Register in the in-memory registry
-        let mn_info = MasternodeInfo {
-            masternode: mn,
-            reward_address: reward_address.to_string(),
-            registration_source: RegistrationSource::OnChain(registration_height),
-            registration_height,
-            uptime_start: now,
-            total_uptime: 0,
-            is_active: false,
-            consensus_suspended: false,
-            daemon_started_at: 0,
-            last_reward_height: 0,
-            blocks_without_reward: 0,
-            peer_reports: Arc::new(Default::default()),
-            operator_pubkey: None,
-            is_publicly_reachable: false,
-            reachability_checked_at: 0,
-            first_seen_at: now,
-            last_seen_at: 0,
-        };
-        self.masternodes
-            .write()
-            .await
-            .insert(node_address.to_string(), mn_info);
+        // Register in the in-memory registry.
+        // If there is already an in-memory entry for this node that was updated
+        // by a direct TCP handshake (last_seen_at > 0), the handshake pubkey is
+        // more current than the on-chain TX (operator may have changed
+        // masternodeprivkey without submitting a new registration TX).  Preserve
+        // the handshake-derived pubkey in that case; update everything else
+        // (tier, collateral, slot_id, wallet_address) from the on-chain TX.
+        //
+        // If no in-memory entry exists (fresh DB / first time seeing this node),
+        // do a full insert using the on-chain pubkey as the starting point.  A
+        // subsequent handshake will correct it if the operator has since rotated
+        // their key.
+        {
+            let mut nodes = self.masternodes.write().await;
+            if let Some(existing) = nodes.get_mut(node_address) {
+                // Update on-chain authoritative fields.
+                if existing.last_seen_at == 0 {
+                    // Never directly connected — trust the on-chain pubkey.
+                    existing.masternode.public_key = public_key;
+                }
+                // else: node was seen via handshake; preserve its current pubkey
+                // so votes it signs with its live masternodeprivkey keep verifying.
+                existing.masternode.tier = mn.tier;
+                existing.masternode.collateral = mn.collateral;
+                existing.masternode.collateral_outpoint = mn.collateral_outpoint;
+                existing.masternode.wallet_address = mn.wallet_address.clone();
+                existing.masternode.slot_id = slot_id;
+                existing.reward_address = reward_address.to_string();
+                existing.registration_source = RegistrationSource::OnChain(registration_height);
+                existing.registration_height = registration_height;
+            } else {
+                let mn_info = MasternodeInfo {
+                    masternode: mn,
+                    reward_address: reward_address.to_string(),
+                    registration_source: RegistrationSource::OnChain(registration_height),
+                    registration_height,
+                    uptime_start: now,
+                    total_uptime: 0,
+                    is_active: false,
+                    consensus_suspended: false,
+                    daemon_started_at: 0,
+                    last_reward_height: 0,
+                    blocks_without_reward: 0,
+                    peer_reports: Arc::new(Default::default()),
+                    operator_pubkey: None,
+                    is_publicly_reachable: false,
+                    reachability_checked_at: 0,
+                    first_seen_at: now,
+                    last_seen_at: 0,
+                };
+                nodes.insert(node_address.to_string(), mn_info);
+            }
+        }
 
         tracing::debug!(
             "✅ Masternode registered on-chain: {} tier={:?} slot={} height={}",
