@@ -5,6 +5,117 @@ All notable changes to TimeCoin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+> **Version bump checklist** — when cutting a new release, update **both**:
+> 1. `Cargo.toml` → `version = "x.y.z"`
+> 2. `~/projects/time-website/js/config.js` → `nodeVersion`, `devNotice`, `progressInfo`
+>
+> The website does **not** read `Cargo.toml` automatically — it must be updated manually.
+
+## [1.5.7] - 2026-05-15
+
+### Fixed
+
+- **Collateral validity now based on UTXO-set state, not in-memory lock map**: The registry
+  previously checked its own lock map to decide whether a collateral outpoint was still valid.
+  After a tier upgrade or unlock, the lock map could disagree with the on-chain UTXO set,
+  causing a registered node to appear invalid or vice versa. Ground truth is now always the
+  live UTXO set. (`fead515`)
+
+- **Collateral release false positive on `tier=auto`**: When `tier=auto` was set in config,
+  the startup collateral-release path could fire for UTXOs that were still valid, incorrectly
+  unlocking collateral that should remain locked. Fixed by tightening the tier-match check
+  before releasing. (`017a295`)
+
+- **V4 collateral proof used wrong key when UTXO is at wallet address**: When the collateral
+  UTXO's address matched the node's wallet address (rather than a separate masternode key),
+  the V4 announcement proof was signed with the wrong key. Fixed to use `wallet_keypair` in
+  that path. (`94917a7`)
+
+- **Collateral release on tier upgrade (Silver → Gold)**: When a node upgraded its tier by
+  replacing its `masternode.conf` collateral entry, the old lower-tier collateral UTXO was
+  not released on remote peers, leaving it permanently locked. Periodic stale-anchor cleanup
+  in `cleanup_stale_anchors()` now removes anchors for outpoints that are no longer
+  registered on-chain. (`343d63e`, `f0452ab`)
+
+- **`releasecollateral` RPC now uses on-chain anchor as authoritative lock indicator**:
+  Previously used the in-memory lock map; after a restart the map could be empty even when
+  the on-chain anchor was still present. (`437d081`)
+
+- **Ban reason for anchor violations now includes outpoint**: Auto-unban logic keyed on the
+  ban reason string; without the outpoint in the reason, all anchor-violation bans shared the
+  same key, preventing multiple distinct bans from expiring independently. (`505fa64`)
+
+- **Unregistered-voter vote flood during collateral transitions**: When a masternode's
+  collateral was being re-registered (tier upgrade / re-registration), other nodes briefly
+  saw its votes as coming from an unregistered voter and were processing them in a tight loop.
+  Now skipped silently during the transition window. (`4e64823`)
+
+- **`is_syncing` permanently stuck `true` after reorg**: A second instance of the stuck-flag
+  bug was present in the reorg path (separate from the [1.5.5] fix). Resolved by ensuring
+  the RAII sync guard is installed before all early-return paths in the reorg flow. (`a4aea71`)
+
+- **`Active` status broken for nodes on same `/16` subnet**: `is_directly_connected()` was
+  stripping the port before IP comparison for some peers, causing intra-subnet nodes to
+  never be seen as directly connected and therefore always report `Inactive`. (`e16b758`)
+
+- **`Active` status never set for publicly reachable nodes without gossip confirmations**:
+  Nodes with a publicly reachable IP (confirmed by inbound connection from a routable peer)
+  now count as `Active` without requiring the full gossip confirmation count. (`4adae5e`)
+
+- **`Active` status cycling for same-`/16` nodes**: Fixed the activity check to correctly
+  evaluate same-subnet peers; uptime is now propagated via gossip announcements so remote
+  nodes can reflect a peer's runtime without direct connection. (`f6def71`)
+
+- **`last_seen_at` not refreshed from gossip**: Registry entries only updated `last_seen_at`
+  from direct connections. Gossip relays now also update the timestamp, reducing spurious
+  `Inactive` transitions for nodes the local node doesn't connect to directly. (`6d875d1`)
+
+- **Handshake pubkey lost when replaying on-chain registration TX**: Re-processing a
+  `MasternodeRegistration` block transaction overwrote the `public_key` field with a
+  potentially stale value from the TX payload, discarding the key that was exchanged during
+  the live TLS handshake. Now preserved. (`9a1c7be`)
+
+- **`daemon_started_at` reset on gossip re-registration**: Receiving a gossip announcement
+  for an already-registered node reset `daemon_started_at` to the current time, making uptime
+  appear to restart every gossip cycle. Now preserved on re-registration. (`74a28fe`)
+
+- **Burst-ping false bans via `MissedTickBehavior::Burst`**: Tokio interval default
+  `Burst` behaviour caused a flurry of ping ticks after a sleep/wake cycle, tripping the
+  rate-limit checker and banning legitimate peers. Switched to `MissedTickBehavior::Skip`.
+  (`9a96f82`)
+
+- **`MessageFlood` false bans for authenticated whitelisted peers**: Whitelisted masternode
+  peers that sent messages in quick succession (e.g., during sync) could trip the flood
+  detector. Flood detection now skips peers that have been authenticated against the
+  whitelist. (`21d1602`)
+
+- **Dashboard showed `0h` uptime for local node on startup**: Sub-1-hour runtimes were
+  formatted as `0h 0m`. Dashboard now shows minutes for uptimes under 1 hour (e.g. `23m`).
+  (`96bcd54`)
+
+- **Historical block replay flooded logs with reg/dereg events**: Masternode
+  `Registration`, `Deregistration`, and `PayoutUpdate` events were logged at `INFO` during
+  initial chain download, producing thousands of noisy lines per sync. They now log at
+  `DEBUG` for any block timestamped more than 1 hour in the past, regardless of which
+  sync path delivered it. (`0f7e816`)
+
+### Added
+
+- **`releasecollateral <txid> <vout>` RPC / CLI**: Targeted unlock command for a specific
+  collateral outpoint. Previously, stopping a masternode required editing `masternode.conf`
+  and restarting. This command allows immediate release without a restart. (`f25dc76`)
+
+- **Watchdog deployed as systemd service**: `scripts/install-masternode.sh` now installs
+  `mn-watchdog.sh` to `/usr/local/bin/mn-watchdog` and enables a network-aware
+  `mn-watchdog.service` (`BindsTo=timed.service` / `BindsTo=timetd.service`) via
+  `systemctl enable --now`. Replaces the previous `screen`-session approach — the watchdog
+  now survives reboots, restarts on crash, and logs to journald. (`77d81ab`)
+
+- **`scripts/migrate-watchdog-to-systemd.sh`**: One-shot migration script for existing
+  nodes running the watchdog in a `screen` session. Auto-detects network from `time.conf`,
+  installs the binary and service file, enables the service, and kills the screen session.
+  Supports `--testnet`, `--dry-run`, and `--help`. (`22b53e9`)
+
 ## [1.5.6] - 2026-05-10
 
 ### Fixed

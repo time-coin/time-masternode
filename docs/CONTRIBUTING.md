@@ -44,6 +44,14 @@ We follow conventional commits:
 4. Update CHANGELOG.md if applicable
 5. Request review from maintainers
 
+## Releasing a New Version
+
+When bumping the version number, update **both** of the following — the website does **not**
+read `Cargo.toml` automatically:
+
+1. **`Cargo.toml`** — `version = "x.y.z"`
+2. **`~/projects/time-website/js/config.js`** — `nodeVersion`, `devNotice`, `progressInfo`
+
 ## Code Review Guidelines
 
 - Be respectful and constructive

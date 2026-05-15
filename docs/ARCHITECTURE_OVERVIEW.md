@@ -1,7 +1,57 @@
 # TimeCoin Architecture Overview
 
-**Last Updated:** 2026-05-12
-**Version:** 1.5.0 (Connection unification, conflict-only voting, Avalanche gossip, UTXO state sync)
+**Last Updated:** 2026-05-15
+**Version:** 1.5.1 (Historical log suppression, watchdog systemd migration)
+
+---
+
+## Recent Updates (v1.5.1 — May 15, 2026)
+
+### Historical Block Log Suppression (commit 0f7e816)
+
+Masternode registration and deregistration events logged at `INFO` level during initial chain replay produced thousands of noisy lines when a node first synced the full chain, making it hard to spot genuine operational issues.
+
+**Root cause:** `is_syncing` (the `AtomicBool` flag) is only `true` inside `sync_from_peers()`. Blocks arriving via the peer message handler during initial chain download bypass that path, so `is_syncing` was `false` even while downloading thousands of historical blocks.
+
+**Fix in `src/blockchain.rs`:** Added an `is_historical` local variable at the top of `process_special_transactions()`:
+
+```rust
+let is_historical = self.is_syncing.load(Ordering::Acquire)
+    || (now_secs().saturating_sub(block.header.timestamp) > 3600);
+```
+
+All three `is_syncing.load()` checks (Registration, Deregistration, PayoutUpdate branches) were replaced with `is_historical`. A block timestamped more than 1 hour in the past is definitively historical regardless of which sync path delivered it. Live masternode activity always appears in blocks within the current 600-second slot.
+
+### Watchdog Deployed as systemd Service
+
+The masternode watchdog (`mn-watchdog.sh`) was previously run inside a `screen` session, which provided no automatic restart on crash, no log retention in journald, and no boot survival without custom startup scripts.
+
+**Changes:**
+
+- **`scripts/install-masternode.sh`** (commit `77d81ab`): Added `install_watchdog()` function. On fresh installs, the script now:
+  1. Copies `scripts/mn-watchdog.sh` → `/usr/local/bin/mn-watchdog`
+  2. Generates a network-aware `/etc/systemd/system/mn-watchdog.service` with `BindsTo=timed.service` (mainnet) or `BindsTo=timetd.service` (testnet)
+  3. Runs `systemctl enable --now mn-watchdog`
+
+- **`scripts/migrate-watchdog-to-systemd.sh`** (commit `22b53e9`): One-shot migration script for existing nodes running the watchdog in a `screen` session. Supports `--testnet`, `--dry-run`, and `--help` flags. Steps:
+  1. Auto-detects network from `time.conf`
+  2. Installs watchdog binary and service file
+  3. Enables and starts the systemd service
+  4. Kills the `screen -S watchdog` session
+  5. Verifies `systemctl status mn-watchdog` is active
+
+**To migrate an existing node:**
+```bash
+# Preview (no changes)
+sudo bash scripts/migrate-watchdog-to-systemd.sh --dry-run
+
+# Apply
+sudo bash scripts/migrate-watchdog-to-systemd.sh
+
+# Check status
+systemctl status mn-watchdog
+journalctl -u mn-watchdog -f
+```
 
 ---
 
