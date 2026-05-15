@@ -742,6 +742,48 @@ install_auto_update() {
     print_success "Auto-update timer installed and enabled (runs every 30 minutes)"
 }
 
+install_watchdog() {
+    print_step "Installing masternode watchdog service..."
+
+    # Install the watchdog script
+    cp "$SCRIPT_DIR/mn-watchdog.sh" /usr/local/bin/mn-watchdog
+    chmod +x /usr/local/bin/mn-watchdog
+
+    # Pass --testnet to the watchdog when installing for testnet
+    local WATCHDOG_ARGS=""
+    if [[ "$NETWORK" == "testnet" ]]; then
+        WATCHDOG_ARGS=" --testnet"
+    fi
+
+    # Generate a network-aware service file so BindsTo tracks the right service
+    # name (timed for mainnet, timetd for testnet).
+    cat > /etc/systemd/system/mn-watchdog.service <<EOF
+[Unit]
+Description=TIME Coin Masternode Registration Watchdog (${NETWORK})
+Documentation=https://github.com/time-coin/time-masternode
+After=${SERVICE_NAME}.service
+BindsTo=${SERVICE_NAME}.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mn-watchdog${WATCHDOG_ARGS}
+Restart=always
+RestartSec=10
+User=root
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mn-watchdog
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now mn-watchdog
+
+    print_success "Watchdog service installed and enabled"
+}
+
 start_service() {
     print_step "Starting service..."
     
@@ -893,6 +935,7 @@ print_summary() {
     echo "  • Data:     $DATA_DIR"
     echo "  • Logs:     $LOG_DIR"
     echo "  • Service:  ${SERVICE_NAME}.service
+  • Watchdog:  mn-watchdog.service
   • Auto-update: auto-update.timer (every 30 min)"
     echo ""
     echo -e "${BLUE}Useful Commands:${NC}"
@@ -901,7 +944,8 @@ print_summary() {
     echo "  • Stop service:    systemctl stop ${SERVICE_NAME}"
     echo "  • Start service:   systemctl start ${SERVICE_NAME}"
     echo "  • Restart service: systemctl restart ${SERVICE_NAME}"
-    echo "  • Auto-update log: journalctl -t time-auto-update -f"
+    echo "  • Auto-update log: journalctl -t time-auto-update -f
+  • Watchdog log:    journalctl -u mn-watchdog -f"
     echo "  • Edit config:     nano $CONFIG_DIR/time.conf"
     echo "  • Edit MN config:  nano $CONFIG_DIR/masternode.conf"
     echo ""
@@ -973,6 +1017,7 @@ main() {
     create_systemd_service
     enable_service
     install_auto_update
+    install_watchdog
     
     # Firewall (optional)
     create_firewall_rules
