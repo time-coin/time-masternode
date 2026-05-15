@@ -1409,9 +1409,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             MasternodeCommands::List { all } => ("masternodelist", json!([all])),
             MasternodeCommands::Status => ("masternodestatus", json!([])),
         },
-        Commands::ReleaseCollateral { txid, vout } => {
-            ("releasecollateral", json!([txid, vout]))
-        }
+        Commands::ReleaseCollateral { txid, vout } => ("releasecollateral", json!([txid, vout])),
         Commands::ReleaseAllCollaterals => ("releaseallcollaterals", json!([])),
         Commands::ListLockedCollaterals => ("listlockedcollaterals", json!([])),
         Commands::MasternodeRegStatus { address } => ("masternoderegstatus", json!([address])),

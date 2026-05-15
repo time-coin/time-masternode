@@ -16,7 +16,7 @@ use crate::blockchain::Blockchain;
 use crate::masternode_registry::MasternodeRegistry;
 use crate::network::banlist::IPBanlist;
 use crate::network::connection_manager::ConnectionManager;
-use crate::network::peer_connection::{PeerConnection, PeerStateManager};
+use crate::network::peer_connection::PeerStateManager;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
 use crate::network::tls::TlsConfig;
 use crate::peer_manager::PeerManager;
@@ -878,61 +878,57 @@ impl ConnectionResources {
                 }
             }
 
-            let connect_start = std::time::Instant::now();
-            let connect_duration: Option<std::time::Duration> = match maintain_peer_connection(
-                &ip,
-                res.port,
-                res.connection_manager.clone(),
-                res.masternode_registry.clone(),
-                res.blockchain.clone(),
-                res.peer_manager.clone(),
-                res.peer_registry.clone(),
-                res.local_ip.clone(),
-                is_masternode,
-                res.ip_banlist.clone(),
-                res.tls_config.clone(),
-                res.network_type,
-            )
-            .await
-            {
-                Ok(_) => {
-                    let elapsed = connect_start.elapsed();
-                    let connect_time = elapsed.as_millis() as u64;
-                    // A session that lived < 10 s succeeded at TCP/TLS but ended almost
-                    // immediately — typical of a version-mismatch flood-gate or frame-size
-                    // kick.  Count as a failure so the reconnect backoff applies and we don't
-                    // hammer a peer that can't stay connected at the current protocol version.
-                    if elapsed < std::time::Duration::from_secs(10) {
-                        res.reconnection_ai.record_connection_failure(
-                            &ip,
-                            is_masternode,
-                            "short-lived session",
-                        );
-                        tracing::info!(
-                            "{} Connection to {} ended quickly ({:.1}s)",
-                            tag,
-                            ip,
-                            elapsed.as_secs_f64()
-                        );
-                    } else {
-                        res.reconnection_ai.record_connection_success(
-                            &ip,
-                            is_masternode,
-                            connect_time,
-                        );
-                        tracing::info!("{} Connection to {} ended gracefully", tag, ip);
-                    }
-                    Some(elapsed)
-                }
-                Err(e) => {
-                    res.reconnection_ai
-                        .record_connection_failure(&ip, is_masternode, &e);
-                    tracing::debug!("{} Connection to {} failed: {}", tag, ip, e);
-                    None
-                }
+            let driver = crate::network::connection_driver::ConnectionDriver {
+                connection_manager: res.connection_manager.clone(),
+                masternode_registry: res.masternode_registry.clone(),
+                blockchain: res.blockchain.clone(),
+                peer_registry: res.peer_registry.clone(),
+                banlist: res.ip_banlist.clone(),
+                tls_config: res.tls_config.clone(),
+                network_type: res.network_type,
+                ai_system: None,
             };
 
-            res.connection_manager.mark_outbound_disconnected(&ip);
+            let connect_duration: Option<std::time::Duration> =
+                match driver.drive_outbound(&ip, res.port, is_masternode).await {
+                    Ok(elapsed) => {
+                        let connect_time = elapsed.as_millis() as u64;
+                        // A session that lived < 10 s succeeded at TCP/TLS but ended almost
+                        // immediately — typical of a version-mismatch flood-gate or frame-size
+                        // kick.  Count as a failure so the reconnect backoff applies and we don't
+                        // hammer a peer that can't stay connected at the current protocol version.
+                        if elapsed < std::time::Duration::from_secs(10) {
+                            res.reconnection_ai.record_connection_failure(
+                                &ip,
+                                is_masternode,
+                                "short-lived session",
+                            );
+                            tracing::info!(
+                                "{} Connection to {} ended quickly ({:.1}s)",
+                                tag,
+                                ip,
+                                elapsed.as_secs_f64()
+                            );
+                        } else {
+                            res.reconnection_ai.record_connection_success(
+                                &ip,
+                                is_masternode,
+                                connect_time,
+                            );
+                            tracing::info!("{} Connection to {} ended gracefully", tag, ip);
+                        }
+                        Some(elapsed)
+                    }
+                    Err(e) => {
+                        res.reconnection_ai
+                            .record_connection_failure(&ip, is_masternode, &e);
+                        tracing::debug!("{} Connection to {} failed: {}", tag, ip, e);
+                        None
+                    }
+                };
+
+            // cleanup (mark_outbound_disconnected and masternode inactive) is handled
+            // inside drive_outbound; we only need AV3 recording and peer_manager eviction.
             let peer_still_connected = res.peer_registry.is_connected(&ip);
 
             let connection_was_live = connect_duration.is_some();
@@ -949,160 +945,16 @@ impl ConnectionResources {
                 }
             }
 
-            // Mark inactive on disconnect (only if no live inbound connection replaced it)
-            if is_masternode && !peer_still_connected {
-                if let Err(e) = res
-                    .masternode_registry
-                    .mark_inactive_on_disconnect_with_duration(&ip, connect_duration)
-                    .await
-                {
-                    tracing::debug!("Could not mark masternode {} as inactive: {:?}", ip, e);
-                }
-
-                // If the node was removed (Free/Handshake tier), also remove it from the
-                // peer list so it doesn't re-appear as a regular peer in the Phase 3 loop.
-                if res.masternode_registry.get(&ip).await.is_none() {
-                    res.peer_manager.remove_peer(&ip).await;
-                }
+            // If the node was removed (Free/Handshake tier), also remove it from the
+            // peer list so it doesn't re-appear as a regular peer in the Phase 3 loop.
+            if is_masternode
+                && !peer_still_connected
+                && res.masternode_registry.get(&ip).await.is_none()
+            {
+                res.peer_manager.remove_peer(&ip).await;
             }
             // Task exits here. If this node is still in the registry (OnChain tier),
             // the Phase 3 loop will re-spawn a connection attempt every 120 seconds.
         });
     }
-}
-
-/// Maintain a persistent connection to a peer
-#[allow(clippy::too_many_arguments)]
-async fn maintain_peer_connection(
-    ip: &str,
-    port: u16,
-    connection_manager: Arc<ConnectionManager>,
-    masternode_registry: Arc<MasternodeRegistry>,
-    blockchain: Arc<Blockchain>,
-    _peer_manager: Arc<PeerManager>,
-    peer_registry: Arc<PeerConnectionRegistry>,
-    _local_ip: Option<String>,
-    is_masternode: bool,
-    ip_banlist: Option<Arc<RwLock<IPBanlist>>>,
-    tls_config: Option<Arc<TlsConfig>>,
-    network_type: NetworkType,
-) -> Result<(), String> {
-    // Mark in peer_registry BEFORE attempting connection to prevent race with inbound
-    if !peer_registry.mark_connecting(ip) {
-        return Err(format!(
-            "Already connecting/connected to {} in peer_registry",
-            ip
-        ));
-    }
-
-    // Create outbound connection. Try TLS first if configured; fall back to
-    // plaintext if the remote rejects the TLS handshake (e.g. the peer is
-    // running an older or plaintext-only build). The server side already
-    // auto-detects TLS vs plaintext on inbound via the 0x16 byte peek.
-    let peer_conn = match PeerConnection::new_outbound(
-        ip.to_string(),
-        port,
-        is_masternode,
-        tls_config,
-        network_type,
-    )
-    .await
-    {
-        Ok(conn) => conn,
-        Err(e) if e.contains("TLS handshake failed") => {
-            // Remote rejected TLS (plaintext-only peer). Retry without TLS.
-            tracing::debug!(
-                "🔄 [OUTBOUND] TLS rejected by {}, retrying in plaintext",
-                ip
-            );
-            match PeerConnection::new_outbound(
-                ip.to_string(),
-                port,
-                is_masternode,
-                None,
-                network_type,
-            )
-            .await
-            {
-                Ok(conn) => conn,
-                Err(e2) => {
-                    peer_registry.unregister_peer(ip).await;
-                    return Err(e2);
-                }
-            }
-        }
-        Err(e) => {
-            // Failed to connect - clean up peer_registry mark
-            peer_registry.unregister_peer(ip).await;
-            return Err(e);
-        }
-    };
-
-    tracing::info!("✓ Connected to peer: {}", ip);
-
-    // Get peer IP for later reference
-    let peer_ip = peer_conn.peer_ip().to_string();
-
-    // Mark as connected in connection_manager (transitions from Connecting -> Connected)
-    connection_manager.mark_connected(&peer_ip);
-
-    // Phase 2: Mark whitelisted masternodes in connection_manager for protection
-    if is_masternode {
-        connection_manager.mark_whitelisted(&peer_ip);
-        tracing::debug!(
-            "🛡️ Marked {} as whitelisted masternode with enhanced protection",
-            peer_ip
-        );
-    }
-
-    // Run the message loop which handles ping/pong and routes other messages
-    // Use the new unified message loop with builder pattern
-    let mut config = crate::network::peer_connection::MessageLoopConfig::new(peer_registry.clone())
-        .with_masternode_registry(masternode_registry.clone())
-        .with_blockchain(blockchain.clone());
-
-    // Add banlist for message filtering
-    if let Some(banlist) = ip_banlist {
-        config = config.with_banlist(banlist);
-    }
-
-    // Subscribe to broadcast channel if available
-    if let (_, _, Some(broadcast_tx)) = peer_registry.get_timelock_resources().await {
-        let broadcast_rx = broadcast_tx.subscribe();
-        config = config.with_broadcast_rx(broadcast_rx);
-    }
-
-    let result = peer_conn.run_message_loop_unified(config).await;
-
-    // Clean up on disconnect in both managers
-    connection_manager.mark_outbound_disconnected(&peer_ip);
-    // Only clean up peer_registry if we're still the active outbound connection.
-    // If the connection was superseded by an inbound (IP tiebreaker in
-    // try_register_inbound), skip cleanup to avoid corrupting the new inbound.
-    if peer_registry.is_outbound(&peer_ip) {
-        peer_registry.mark_disconnected(&peer_ip);
-        peer_registry.unregister_peer(&peer_ip).await;
-    } else if !peer_registry.is_connected(&peer_ip) {
-        // No connection at all — clean up normally
-        peer_registry.unregister_peer(&peer_ip).await;
-    } else {
-        tracing::info!(
-            "🔄 Outbound to {} superseded by inbound — skipping cleanup",
-            peer_ip
-        );
-    }
-
-    // If this peer is a registered masternode, mark it as inactive on disconnect
-    if masternode_registry.is_registered(&peer_ip).await {
-        if let Err(e) = masternode_registry
-            .mark_inactive_on_disconnect(&peer_ip)
-            .await
-        {
-            tracing::debug!("Could not mark masternode {} as inactive: {:?}", peer_ip, e);
-        }
-    }
-
-    tracing::debug!("🔌 Unregistered peer {}", peer_ip);
-
-    result
 }

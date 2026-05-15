@@ -265,6 +265,9 @@ pub struct MessageLoopConfig {
 
     /// Optional: AI System for recording events and making intelligent decisions
     pub ai_system: Option<Arc<crate::ai::AISystem>>,
+
+    /// Optional: Per-connection rate limiter — mirrors the inbound check_rate_limit! macro
+    pub rate_limiter: Option<Arc<RwLock<crate::network::rate_limiter::RateLimiter>>>,
 }
 
 impl MessageLoopConfig {
@@ -279,6 +282,7 @@ impl MessageLoopConfig {
             broadcast_rx: None,
             banlist: None,
             ai_system: None,
+            rate_limiter: None,
         }
     }
 
@@ -316,6 +320,44 @@ impl MessageLoopConfig {
     pub fn with_ai_system(mut self, ai_system: Arc<crate::ai::AISystem>) -> Self {
         self.ai_system = Some(ai_system);
         self
+    }
+
+    /// Add per-connection rate limiter (builder pattern)
+    pub fn with_rate_limiter(
+        mut self,
+        rl: Arc<RwLock<crate::network::rate_limiter::RateLimiter>>,
+    ) -> Self {
+        self.rate_limiter = Some(rl);
+        self
+    }
+}
+
+/// Map a `NetworkMessage` to the rate-limit bucket name used in both the inbound
+/// `check_rate_limit!` macro (server.rs) and the outbound path (handle_message_unified).
+fn rate_limit_key(msg: &NetworkMessage) -> &'static str {
+    match msg {
+        NetworkMessage::TransactionBroadcast(_) => "tx",
+        NetworkMessage::TransactionFinalized { .. } => "tx_finalized",
+        NetworkMessage::GetBlocks(..) => "get_blocks",
+        NetworkMessage::GetPeers => "get_peers",
+        NetworkMessage::MasternodeAnnouncement { .. }
+        | NetworkMessage::MasternodeAnnouncementV2 { .. }
+        | NetworkMessage::MasternodeAnnouncementV3 { .. }
+        | NetworkMessage::MasternodeAnnouncementV4 { .. } => "masternode_announce",
+        NetworkMessage::BlockAnnouncement(_)
+        | NetworkMessage::BlockResponse(_)
+        | NetworkMessage::TimeLockBlockProposal { .. } => "block",
+        NetworkMessage::TimeVoteRequest { .. }
+        | NetworkMessage::TimeVoteResponse { .. }
+        | NetworkMessage::TimeVoteBroadcast { .. }
+        | NetworkMessage::TimeVotePrepare { .. }
+        | NetworkMessage::TimeVotePrecommit { .. }
+        | NetworkMessage::TransactionVoteRequest { .. }
+        | NetworkMessage::TransactionVoteResponse { .. }
+        | NetworkMessage::FinalityVoteRequest { .. }
+        | NetworkMessage::FinalityVoteResponse { .. }
+        | NetworkMessage::FinalityVoteBroadcast { .. } => "vote",
+        _ => "general",
     }
 }
 
@@ -929,6 +971,21 @@ impl PeerConnection {
             }
             _ => {
                 // All other messages go through MessageHandler
+            }
+        }
+
+        // Apply per-connection rate limiting on the outbound path — mirrors the
+        // inbound check_rate_limit! macro in server.rs so both paths are consistent.
+        if let Some(ref rl) = config.rate_limiter {
+            let mut limiter = rl.write().await;
+            if !limiter.check(rate_limit_key(&message), &self.peer_ip) {
+                tracing::warn!(
+                    "⚠️ [{:?}] Rate limit exceeded for {} from {}",
+                    self.direction,
+                    rate_limit_key(&message),
+                    self.peer_ip
+                );
+                return Ok(());
             }
         }
 

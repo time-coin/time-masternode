@@ -1,7 +1,9 @@
 # 📚 TIME Coin Documentation Index
 
 **Last Updated:** April 10, 2026
-**Status:** ✅ Production Ready (v1.4.34)
+**Status:** ✅ Production Ready (v1.5.7)
+
+> **Note:** Protocol specification, architecture, security audit, roadmap, and other developer/researcher reference documents have moved to the [TIME Coin website repository](https://github.com/time-coin/time-website/tree/main/docs).
 
 ---
 
@@ -21,10 +23,6 @@
 | Build & test locally (developer) | [QUICKSTART.md](QUICKSTART.md)                             |
 | Use the CLI                      | [CLI_GUIDE.md](CLI_GUIDE.md)                               |
 | Vote or submit a governance proposal | [GOVERNANCE.md](GOVERNANCE.md)                         |
-| Understand the protocol          | [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md)               |
-| Review security                  | [COMPREHENSIVE_SECURITY_AUDIT.md](COMPREHENSIVE_SECURITY_AUDIT.md) |
-| Configure networking             | [NETWORK_ARCHITECTURE.md](NETWORK_ARCHITECTURE.md)         |
-| Contribute code                  | [CONTRIBUTING.md](CONTRIBUTING.md)                         |
 
 ---
 
@@ -39,21 +37,6 @@
 | [QUICKSTART.md](QUICKSTART.md) | Build, test, and run nodes locally; multi-node setup | Developers |
 | [CLI_GUIDE.md](CLI_GUIDE.md) | Full command reference for `time-cli`, wallet operations | All Users |
 
-### Protocol & Architecture
-
-| Document | Purpose | Audience |
-|----------|---------|----------|
-| [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md) | Complete protocol specification (§1–§27) + appendices: fee collection mechanism, cryptography rationale | Developers, Researchers |
-| [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md) | System architecture, complete transaction/consensus flow, TimeProof conflict detection | All Developers |
-| [NETWORK_ARCHITECTURE.md](NETWORK_ARCHITECTURE.md) | P2P network layer design, network configuration reference, integration guide | Network Developers |
-
-### Security
-
-| Document | Purpose | Audience |
-|----------|---------|----------|
-| [COMPREHENSIVE_SECURITY_AUDIT.md](COMPREHENSIVE_SECURITY_AUDIT.md) | Full attack-vector analysis (30+ vectors) | Security Reviewers |
-| [SECURITY.md](SECURITY.md) | Vulnerability reporting policy, threat analysis, UTXO attack vectors | Security Researchers |
-
 ### Governance
 
 | Document | Purpose | Audience |
@@ -65,14 +48,6 @@
 | Document | Purpose | Audience |
 |----------|---------|----------|
 | [QUICK_REFERENCE.md](QUICK_REFERENCE.md) | One-page parameter lookup | All Users |
-| [PRE_MAINNET_CHECKLIST.md](PRE_MAINNET_CHECKLIST.md) | Implementation status checklist | Developers |
-
-### Project Management
-
-| Document | Purpose | Audience |
-|----------|---------|----------|
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Development guidelines, commit conventions | Contributors |
-| [ROADMAP.md](ROADMAP.md) | Development roadmap | All |
 | [../CHANGELOG.md](../CHANGELOG.md) | Version history | All |
 
 ---
@@ -86,14 +61,7 @@
 
 ### For Developers
 1. [QUICKSTART.md](QUICKSTART.md) — Build, test, run locally
-2. [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md) — System design and flows
-3. [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md) — Protocol specification
-4. [CONTRIBUTING.md](CONTRIBUTING.md) — How to contribute
-
-### For Security Reviewers
-1. [COMPREHENSIVE_SECURITY_AUDIT.md](COMPREHENSIVE_SECURITY_AUDIT.md) — Attack analysis
-2. [SECURITY.md](SECURITY.md) — Threat analysis and policy
-3. [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md) — Protocol details and cryptography rationale (Appendix B)
+2. [GOVERNANCE.md](GOVERNANCE.md) — Governance system
 
 ---
 
@@ -101,8 +69,7 @@
 
 | Category | Detail |
 |----------|--------|
-| Protocol Version | v6.2 |
-| Software Version | v1.2.0 |
+| Software Version | v1.5.7 |
 | Consensus | TimeVote (real-time) + TimeLock (archival) |
 | Finality | <1 second (deterministic) |
 | Block Time | 600 seconds |

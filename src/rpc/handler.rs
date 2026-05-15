@@ -5778,7 +5778,10 @@ impl RpcHandler {
 
         tracing::warn!(
             "🔓 RPC releasecollateral: {}:{} lock_removed={} anchor_removed={}",
-            txid_str, vout, was_locked, anchor_removed
+            txid_str,
+            vout,
+            was_locked,
+            anchor_removed
         );
 
         Ok(json!({

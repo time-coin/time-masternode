@@ -2,6 +2,7 @@ pub mod attack_log;
 pub mod banlist;
 pub mod block_cache;
 pub mod client;
+pub mod connection_driver;
 pub mod connection_manager;
 pub mod ddos_guard;
 pub mod dedup_filter;
