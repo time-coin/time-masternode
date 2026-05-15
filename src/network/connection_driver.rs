@@ -494,7 +494,6 @@ impl ConnectionDriver {
         }
 
         let mut handshake_done = false;
-        let mut is_stable_connection = false;
 
         // Per-connection UTXO lock flood counter: tracks how many UTXOStateUpdate (Locked)
         // messages this peer has sent for each TX.  A legitimate TX with N inputs produces
@@ -1506,332 +1505,9 @@ impl ConnectionDriver {
                                             }
                                         }
                                     }
-                                    NetworkMessage::UTXOStateQuery(_) => {
-                                        check_rate_limit!("utxo_query");
-
-                                        // Use unified message handler
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let mut context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-                                        context.utxo_manager = Some(Arc::clone(&resources.utxo_mgr));
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&ip_str, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
                                     NetworkMessage::Subscribe(sub) => {
                                         check_rate_limit!("subscribe");
                                         resources.subs.write().await.insert(sub.id.clone(), sub.clone());
-                                    }
-                                    NetworkMessage::GetBlockHeight => {
-                                        // Use unified message handler
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&ip_str, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::GetChainTip => {
-                                        // Use unified message handler
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&ip_str, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::GetPendingTransactions => {
-                                        // Get pending transactions from mempool
-                                        let pending_txs = self.blockchain.get_pending_transactions();
-                                        let reply = NetworkMessage::PendingTransactionsResponse(pending_txs);
-                                        let _ = self.peer_registry.send_to_peer(&ip_str, reply).await;
-                                    }
-                                    NetworkMessage::GetBlocks(_start, _end) => {
-                                        check_rate_limit!("get_blocks");
-
-                                        // Use unified message handler
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&ip_str, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::GetUTXOStateHash => {
-                                        // Use unified message handler
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&ip_str, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::GetUTXOSet => {
-                                        // Use unified message handler
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&ip_str, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::MasternodeAnnouncement { .. } => {
-                                        // V1 deprecated ΓÇö all nodes use V2 now
-                                        tracing::debug!("ΓÅ¡∩╕Å  Ignoring deprecated V1 masternode announcement from {}", peer_addr);
-                                    }
-                                    NetworkMessage::MasternodeAnnouncementV2 { address: _, reward_address, tier, public_key, collateral_outpoint } => {
-                                        // V2 without certificate ΓÇö delegate to V3 handler with empty cert
-                                        let v3_msg = NetworkMessage::MasternodeAnnouncementV3 {
-                                            address: peer_addr.split(':').next().unwrap_or("").to_string(),
-                                            reward_address: reward_address.clone(),
-                                            tier: *tier,
-                                            public_key: *public_key,
-                                            collateral_outpoint: collateral_outpoint.clone(),
-                                            certificate: vec![0u8; 64],
-                                            started_at: 0,
-                                        };
-                                        // Fall through to V3 handler below
-                                        // (re-dispatch via the message handler for consistency)
-                                        check_rate_limit!("masternode_announce");
-                                        if !is_stable_connection {
-                                            is_stable_connection = true;
-                                        }
-                                        let peer_ip_str = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip_str, ConnectionDirection::Inbound);
-                                        let mut context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-                                        context.utxo_manager = Some(Arc::clone(&resources.consensus.utxo_manager));
-                                        context.peer_manager = Some(Arc::clone(&resources.peer_manager));
-                                        match handler.handle_message(&v3_msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&peer_addr, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::MasternodeAnnouncementV3 { address: _, reward_address, tier, public_key, collateral_outpoint, certificate, started_at } => {
-                                        check_rate_limit!("masternode_announce");
-                                        if !is_stable_connection {
-                                            is_stable_connection = true;
-                                        }
-                                        let peer_ip_str = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        if peer_ip_str.is_empty() { continue; }
-                                        // Delegate to unified message handler (same path as V2)
-                                        let v3_msg = NetworkMessage::MasternodeAnnouncementV3 {
-                                            address: peer_ip_str.clone(),
-                                            reward_address: reward_address.clone(),
-                                            tier: *tier,
-                                            public_key: *public_key,
-                                            collateral_outpoint: collateral_outpoint.clone(),
-                                            certificate: certificate.clone(),
-                                            started_at: *started_at,
-                                        };
-                                        let handler = MessageHandler::new(peer_ip_str, ConnectionDirection::Inbound);
-                                        let mut context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-                                        context.utxo_manager = Some(Arc::clone(&resources.consensus.utxo_manager));
-                                        context.peer_manager = Some(Arc::clone(&resources.peer_manager));
-                                        match handler.handle_message(&v3_msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&peer_addr, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::MasternodeAnnouncementV4 { address: _, reward_address, tier, public_key, collateral_outpoint, certificate, started_at, collateral_proof } => {
-                                        check_rate_limit!("masternode_announce");
-                                        if !is_stable_connection {
-                                            is_stable_connection = true;
-                                        }
-                                        let peer_ip_str = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        if peer_ip_str.is_empty() { continue; }
-                                        let v4_msg = NetworkMessage::MasternodeAnnouncementV4 {
-                                            address: peer_ip_str.clone(),
-                                            reward_address: reward_address.clone(),
-                                            tier: *tier,
-                                            public_key: *public_key,
-                                            collateral_outpoint: collateral_outpoint.clone(),
-                                            certificate: certificate.clone(),
-                                            started_at: *started_at,
-                                            collateral_proof: collateral_proof.clone(),
-                                        };
-                                        let handler = MessageHandler::new(peer_ip_str, ConnectionDirection::Inbound);
-                                        let mut context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-                                        context.utxo_manager = Some(Arc::clone(&resources.consensus.utxo_manager));
-                                        context.peer_manager = Some(Arc::clone(&resources.peer_manager));
-                                        match handler.handle_message(&v4_msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&peer_addr, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::MempoolSyncRequest => {
-                                        // Peer is asking for our current pool contents.
-                                        // Respond with a single MempoolSyncResponse bulk frame instead
-                                        // of individual TransactionFinalized/TransactionBroadcast
-                                        // messages; the per-message approach tripped the peer's
-                                        // tx_finalized rate limiter when our mempool had ΓëÑ20 entries.
-                                        check_rate_limit!("general");
-                                        let peer_ip_str = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip_str, ConnectionDirection::Inbound);
-                                        let mut context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-                                        context.consensus = Some(Arc::clone(&resources.consensus));
-                                        if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
-                                            let _ = self.peer_registry.send_to_peer(&ip_str, response).await;
-                                        }
-                                    }
-                                    NetworkMessage::GetPeers => {
-                                        check_rate_limit!("get_peers");
-
-                                        // Use unified message handler
-                                        let peer_ip_str = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip_str, ConnectionDirection::Inbound);
-                                        let mut context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-                                        context.peer_manager = Some(Arc::clone(&resources.peer_manager));
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&ip_str, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::GetMasternodes => {
-                                        // Use unified message handler
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&ip_str, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::PeersResponse(peers) => {
-                                        // Use unified message handler with resources.peer_manager
-                                        let peer_ip_str = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip_str, ConnectionDirection::Inbound);
-                                        let mut context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-                                        context.peer_manager = Some(Arc::clone(&resources.peer_manager));
-
-                                        let _ = handler.handle_message(&msg, &context).await;
-
-                                        // Log statistics
-                                        tracing::debug!("≡ƒôÑ Received PeersResponse from {} with {} peer(s)", peer_addr, peers.len());
-                                    }
-                                    NetworkMessage::MasternodesResponse(_) => {
-                                        // Use unified message handler
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        let _ = handler.handle_message(&msg, &context).await;
-                                    }
-                                    NetworkMessage::BlockInventory(_) => {
-                                        check_rate_limit!("block");
-
-                                        // Use unified message handler
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&ip_str, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::BlockRequest(_) => {
-                                        check_rate_limit!("block");
-
-                                        // Use unified message handler
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&ip_str, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
                                     }
                                     NetworkMessage::BlockResponse(block) => {
                                         check_message_size!(MAX_BLOCK_SIZE, "Block");
@@ -2050,87 +1726,6 @@ impl ConnectionDriver {
                                                 tracing::warn!("ΓÜá∩╕Å  Genesis validation failed: {}", e);
                                             }
                                         }
-                                    }
-                                    NetworkMessage::RequestGenesis => {
-                                        check_rate_limit!("genesis_request");
-
-                                        // Use unified message handler
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&ip_str, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::GetBlockHash(_) => {
-                                        // Use unified message handler
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&ip_str, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::ConsensusQuery { .. } => {
-                                        // Use unified message handler
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&ip_str, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::GetBlockRange { .. } => {
-                                        // Use unified message handler
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&ip_str, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::BlocksResponse(_) | NetworkMessage::BlockRangeResponse(_) => {
-                                        // Γ£à REFACTORED: Route through unified message_handler.rs
-                                        // See: analysis/REFACTORING_ROADMAP.md - Phase 1, Step 1.2 (COMPLETED)
-
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        // Handle the message through unified handler
-                                        let _ = handler.handle_message(&msg, &context).await;
                                     }
                                     // Health Check Messages
                                     NetworkMessage::Ping { .. } | NetworkMessage::Pong { .. } => {
@@ -2540,71 +2135,6 @@ impl ConnectionDriver {
                                             tracing::debug!("Γ£à Finality vote recorded from {}", peer_addr);
                                         }
                                     }
-                                    NetworkMessage::TimeLockBlockProposal { .. }
-                                    | NetworkMessage::TimeVotePrepare { .. }
-                                    | NetworkMessage::TimeVotePrecommit { .. } => {
-                                        // SECURITY: Check resources.banlist before processing ANY resources.consensus messages
-                                        {
-                                            let mut bl = resources.banlist.write().await;
-                                            if let Some(reason) = bl.is_banned(ip) {
-                                                tracing::warn!(
-                                                    "≡ƒÜ½ REJECTING TimeLock message from banned peer {}: {}",
-                                                    peer_addr, reason
-                                                );
-                                                continue;
-                                            }
-                                        }
-
-                                        // Use unified message handler for TimeLock messages
-                                        let handler = MessageHandler::new(ip_str.clone(), ConnectionDirection::Inbound);
-                                        // Get local masternode address for vote identity
-                                        let local_mn_addr = self.masternode_registry.get_local_address().await;
-                                        let context = MessageContext::with_consensus(
-                                            self.blockchain.clone(),
-                                            self.peer_registry.clone(),
-                                            self.masternode_registry.clone(),
-                                            resources.consensus.clone(),
-                                            resources.block_cache.clone(),
-                                            resources.broadcast_tx.clone(),
-                                            local_mn_addr,
-                                        ).with_banlist(Arc::clone(&resources.banlist));
-
-                                        if let Err(e) = handler.handle_message(&msg, &context).await {
-                                            tracing::warn!("[Inbound] Error handling TimeLock message from {}: {}", peer_addr, e);
-                                        }
-                                    }
-                                    NetworkMessage::GetChainWork => {
-                                        // Use unified message handler
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&ip_str, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::GetChainWorkAt(_) => {
-                                        // Use unified message handler
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&ip_str, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
                                     NetworkMessage::ChainWorkResponse { height, tip_hash, cumulative_work } => {
                                         // Handle response - check if peer has better chain and potentially trigger reorg
                                         let _our_height = self.blockchain.get_height();
@@ -2638,41 +2168,10 @@ impl ConnectionDriver {
                                         // Handle via response system - dispatched to waiting oneshot channels
                                         self.peer_registry.handle_response(&ip_str, msg).await;
                                     }
-                                    NetworkMessage::ChainTipResponse { .. } => {
-                                        // Route through unified message handler to update peer_chain_tips cache
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Err(e) if e.contains("DISCONNECT:") => {
-                                                tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e);
-                                                break;
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::MasternodeStatusGossip { .. } => {
-                                        // Handle gossip via unified message handler
-                                        let handler = MessageHandler::new(ip_str.clone(), ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        if let Err(e) = handler.handle_message(&msg, &context).await {
-                                            tracing::warn!("[Inbound] Error handling gossip from {}: {}", peer_addr, e);
-                                        }
-                                    }
                                     _ => {
                                         // Fallback: delegate any unhandled message types to MessageHandler
-                                        // with full resources.consensus context so messages like MempoolSyncResponse
-                                        // (which need resources.consensus to add transactions) are processed correctly.
+                                        // with full context so messages like MempoolSyncResponse,
+                                        // GetPeers, MasternodeAnnouncement, etc. are processed correctly.
                                         let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
                                         let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
                                         let mut context = MessageContext::from_registry(
@@ -2681,6 +2180,7 @@ impl ConnectionDriver {
                                             Arc::clone(&self.masternode_registry),
                                         ).await;
                                         context.banlist = Some(Arc::clone(&resources.banlist));
+                                        context.peer_manager = Some(Arc::clone(&resources.peer_manager));
                                         if let Some(ref ai) = self.ai_system {
                                             context.ai_system = Some(Arc::clone(ai));
                                         }
@@ -2690,7 +2190,7 @@ impl ConnectionDriver {
                                                 let _ = self.peer_registry.send_to_peer(&ip_str, response).await;
                                             }
                                             Err(e) if e.contains("DISCONNECT:") => {
-                                                tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e);
+                                                tracing::warn!("Disconnecting {} — {}", peer_addr, e);
                                                 break;
                                             }
                                             _ => {}
