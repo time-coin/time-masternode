@@ -2099,15 +2099,13 @@ async fn main() {
             // Persist the V4 proof in the registry so per-connection announcements
             // (sent by peer_connection.rs via get_v4_proof) also use it.
             if let NetworkMessage::MasternodeAnnouncementV4 {
-                ref collateral_outpoint,
+                collateral_outpoint: Some(ref op),
                 ref collateral_proof,
                 ..
             } = announcement
             {
-                if let Some(ref op) = collateral_outpoint {
-                    if !collateral_proof.is_empty() {
-                        registry_for_announcement.store_v4_proof(op, collateral_proof);
-                    }
+                if !collateral_proof.is_empty() {
+                    registry_for_announcement.store_v4_proof(op, collateral_proof);
                 }
             }
             peer_registry_for_announcement.broadcast(announcement).await;

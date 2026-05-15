@@ -6196,6 +6196,20 @@ impl Blockchain {
         use crate::types::SpecialTransactionData;
         use std::collections::HashSet;
 
+        // A block is "historical" (replay) when we're explicitly in sync_from_peers(),
+        // OR when the block's timestamp is more than 1 hour old — which covers the
+        // common case where a new node downloads historical blocks via peer push without
+        // going through sync_from_peers().  Historical registrations log at DEBUG so
+        // operators aren't flooded with MasternodeRegistration/Deregistration messages
+        // for every block during the initial chain download.
+        let is_historical = self.is_syncing.load(Ordering::Acquire) || {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            now - block.header.timestamp > 3600
+        };
+
         let mut undo = SpecialTxUndoRecord::default();
         // AV49: deduplicate deregistrations within a block — only the first
         // deregistration for a given slot_id is applied; subsequent ones are
@@ -6259,7 +6273,7 @@ impl Blockchain {
                     {
                         Ok(slot_id) => {
                             // During sync this fires for every historical block — keep quiet.
-                            if self.is_syncing.load(Ordering::Acquire) {
+                            if is_historical {
                                 tracing::debug!(
                                     "✅ MasternodeRegistration applied (replay): {} -> {} slot={} (tx {})",
                                     node_address,
@@ -6314,7 +6328,7 @@ impl Blockchain {
                         .await
                     {
                         Ok(()) => {
-                            if self.is_syncing.load(Ordering::Acquire) {
+                            if is_historical {
                                 tracing::debug!(
                                     "✅ MasternodeDeregistration applied (replay): {} slot={} (tx {})",
                                     node_address,
@@ -6357,7 +6371,7 @@ impl Blockchain {
                         .await
                     {
                         Ok(()) => {
-                            if self.is_syncing.load(Ordering::Acquire) {
+                            if is_historical {
                                 tracing::debug!(
                                     "✅ MasternodePayoutUpdate applied (replay): {} -> {} (tx {})",
                                     node_address,
