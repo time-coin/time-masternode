@@ -2,7 +2,7 @@
 
 This document outlines the development roadmap for TimeCoin.
 
-## Current Version: v1.5.0
+## Current Version: v1.5.7
 
 ---
 
@@ -73,7 +73,7 @@ This document outlines the development roadmap for TimeCoin.
 - [x] **Enforce TLS for P2P** — enabled by default; self-signed certs auto-generated; `tls=0` opt-out for debugging
 - [x] **Enforce TLS for RPC** — enabled by default; `rpctls=0` opt-out; `time-cli` auto-negotiates TLS
 - [x] **Stub completion** — all 6 blockchain stubs implemented with real data
-- [ ] **Network partition detection** — detect when a node is isolated from the rest of the network and alert/recover automatically
+- [x] **Network partition detection** — detect when a node is isolated from the rest of the network and alert/recover automatically
 - [ ] **Checkpoint system** — replace placeholder checkpoints with real mainnet/testnet block hashes
 
 ### Medium Priority
@@ -87,7 +87,8 @@ This document outlines the development roadmap for TimeCoin.
 ## 🗓️ Phase 2 — Governance & Ecosystem (Q2–Q3 2026)
 
 ### Governance
-- [ ] **On-chain governance proposals** — masternode voting framework exists (power defined per tier); add proposal submission, voting, and execution
+- [x] **On-chain governance proposals** — masternode voting framework; proposal submission, voting, and execution live
+- [x] **Governance TUI dashboard** — integrated into `time-dashboard` (vote / reject interface)
 - [ ] **Treasury management** — allocate a portion of block rewards to a treasury governed by masternode vote
 - [ ] **Fee schedule governance** — allow masternodes to adjust fee parameters via proposal votes (architecture already supports this)
 
@@ -132,11 +133,12 @@ This document outlines the development roadmap for TimeCoin.
 
 | Version | Focus | Target |
 |---------|-------|--------|
-| **1.2.x** | Bug fixes, testnet stability | Ongoing |
-| **1.3.0** | Mandatory TLS, partition detection, stub completion | Q2 2026 |
-| **1.4.0** | Block explorer, governance proposals, treasury | Q3 2026 |
-| **1.5.0** | Light clients, state compression, DHT discovery | Q4 2026 |
-| **2.0.0** | Smart contracts, production mainnet launch | 2027 |
+| **1.2.x** | Bug fixes, testnet stability | Released |
+| **1.5.5** | TLS (P2P + RPC), on-chain governance, partition detection, fork resolution, API stubs | Released |
+| **1.5.6** | Signed collateral deregistration, outbound tier announcement, tier-upgrade churn-guard fix | Released |
+| **1.5.7** | Collateral validity via UTXO set, `releasecollateral` RPC, watchdog systemd service, masternode activity fixes | Released |
+| **1.6.0** | Block explorer, IPv6, NAT traversal, parallel block validation, checkpoint system | In Progress |
+| **2.0.0** | Smart contracts, mobile wallet, multi-signature, light clients, state compression, DHT discovery | 2027 |
 
 ---
 
@@ -146,4 +148,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get involved.
 
 ---
 
-*Last updated: April 28, 2026*
+*Last updated: May 15, 2026*
