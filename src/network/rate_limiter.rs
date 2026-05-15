@@ -35,7 +35,7 @@ impl RateLimiter {
             limits: [
                 // Phase 2.2: Per-peer message limits (more restrictive for DoS protection)
                 ("tx".to_string(), (Duration::from_secs(1), 50)), // 50 tx/second
-                ("tx_finalized".to_string(), (Duration::from_secs(10), 20)), // 20 finalized-tx announcements per 10s (AV38)
+                ("tx_finalized".to_string(), (Duration::from_secs(10), 60)), // 60 finalized-tx announcements per 10s; raised from 20 to avoid false-positive log spam during mempool sync (AV38 escalation still triggers at streak ≥5)
                 ("utxo_query".to_string(), (Duration::from_secs(1), 100)),   // 100 queries/sec
                 ("subscribe".to_string(), (Duration::from_secs(60), 10)),    // 10 subs/min
                 ("vote".to_string(), (Duration::from_secs(1), 100)),         // 100 votes/sec

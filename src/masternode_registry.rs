@@ -3141,10 +3141,12 @@ impl MasternodeRegistry {
                     // Collateral is fine — reset any pending miss count
                     self.collateral_miss_counts.remove(address);
                 } else {
-                    // If the node was active very recently, it may be mid-collateral-transition
-                    // (old UTXO spent, new announcement not yet received). Reset miss count
-                    // and wait — it will re-register on the next connection or announcement.
-                    if now.saturating_sub(info.last_seen_at) < ACTIVE_GRACE_SECS {
+                    // If the node is currently active AND was seen very recently, it may be
+                    // mid-collateral-transition (old UTXO spent, new one not yet announced).
+                    // Only defer miss counting while the node is still live — a disconnected
+                    // node with spent collateral should proceed through the miss threshold
+                    // regardless of when it was last seen.
+                    if info.is_active && now.saturating_sub(info.last_seen_at) < ACTIVE_GRACE_SECS {
                         self.collateral_miss_counts.remove(address);
                         continue;
                     }
@@ -3548,31 +3550,30 @@ impl MasternodeRegistry {
             // reachability prober or an outbound connection — that probe is
             // independent of peer-report gossip and cannot be faked by co-located
             // peers, so diversity is redundant and is skipped.
-            let meets_diversity =
-                if info.is_publicly_reachable {
-                    // Independently verified via TCP probe — diversity not required.
-                    true
-                } else if total_masternodes > 12 && connected_peers.len() >= 3 && report_count >= 2 {
-                    // Require witnesses from at least 2 distinct /16 subnets to prevent
-                    // targeted DDoS against a node's witnesses on the same subnet.
-                    // Only enforce for larger networks (>12 nodes) — small networks with
-                    // co-located infrastructure (shared /16 subnets) would otherwise have
-                    // nodes stuck inactive despite being fully online and reachable.
-                    let mut subnets = std::collections::HashSet::new();
-                    for entry in info.peer_reports.iter() {
-                        let peer_addr: &String = entry.key();
-                        // Extract /16 prefix from IP address (e.g., "192.168" from "192.168.1.1:24000")
-                        if let Some(ip_part) = peer_addr.split(':').next() {
-                            let octets: Vec<&str> = ip_part.split('.').collect();
-                            if octets.len() >= 2 {
-                                subnets.insert(format!("{}.{}", octets[0], octets[1]));
-                            }
+            let meets_diversity = if info.is_publicly_reachable {
+                // Independently verified via TCP probe — diversity not required.
+                true
+            } else if total_masternodes > 12 && connected_peers.len() >= 3 && report_count >= 2 {
+                // Require witnesses from at least 2 distinct /16 subnets to prevent
+                // targeted DDoS against a node's witnesses on the same subnet.
+                // Only enforce for larger networks (>12 nodes) — small networks with
+                // co-located infrastructure (shared /16 subnets) would otherwise have
+                // nodes stuck inactive despite being fully online and reachable.
+                let mut subnets = std::collections::HashSet::new();
+                for entry in info.peer_reports.iter() {
+                    let peer_addr: &String = entry.key();
+                    // Extract /16 prefix from IP address (e.g., "192.168" from "192.168.1.1:24000")
+                    if let Some(ip_part) = peer_addr.split(':').next() {
+                        let octets: Vec<&str> = ip_part.split('.').collect();
+                        if octets.len() >= 2 {
+                            subnets.insert(format!("{}.{}", octets[0], octets[1]));
                         }
                     }
-                    subnets.len() >= 2
-                } else {
-                    true // Small networks or under-connected state exempt from diversity requirement
-                };
+                }
+                subnets.len() >= 2
+            } else {
+                true // Small networks or under-connected state exempt from diversity requirement
+            };
             // A direct TCP connection is authoritative proof of liveness —
             // gossip counts are a secondary signal for nodes we aren't directly
             // connected to. Never flip is_active to false while we have a live
@@ -4905,7 +4906,13 @@ impl MasternodeRegistry {
 
             if is_stale {
                 let anchor_key = format!("collateral_anchor:{}", outpoint_str);
-                if self.db.remove(anchor_key.as_bytes()).ok().flatten().is_some() {
+                if self
+                    .db
+                    .remove(anchor_key.as_bytes())
+                    .ok()
+                    .flatten()
+                    .is_some()
+                {
                     tracing::info!(
                         "🧹 Removed stale collateral anchor {}  (anchored IP: {}  current: {})",
                         outpoint_str,
@@ -5733,6 +5740,15 @@ mod tests {
         // Unlock and spend the collateral (simulating spent collateral)
         utxo_manager.unlock_collateral(&outpoint).unwrap();
         utxo_manager.spend_utxo(&outpoint).await.unwrap();
+
+        // Simulate the connection dropping after collateral is invalidated — in production
+        // the peer disconnects and mark_inactive_on_disconnect is called, setting
+        // is_active = false.  Without this the grace period (is_active + recent last_seen_at)
+        // would defer deregistration indefinitely in tests.
+        registry
+            .mark_inactive_on_disconnect("test_node")
+            .await
+            .unwrap();
 
         // Run cleanup — miss threshold is 3 consecutive misses before deregistration
         registry.cleanup_invalid_collaterals(&utxo_manager).await;

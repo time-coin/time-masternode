@@ -1422,26 +1422,20 @@ async fn handle_peer(
                                         let get_mn_msg = NetworkMessage::GetMasternodes;
                                         let _ = peer_registry.send_to_peer(&ip_str, get_mn_msg).await;
 
-                                        // Push our local mempool to the new peer so they immediately
-                                        // learn about finalized + pending transactions without waiting
-                                        // for the 2-minute rebroadcast loop.  Finalized first (most
-                                        // important), then pending.  Cap at 100 each to prevent
-                                        // flooding a reconnecting peer on a large backlog.
+                                        // Send our local mempool as a single bulk MempoolSyncResponse
+                                        // so the peer can bootstrap its pool in one frame.  Using
+                                        // individual TransactionFinalized messages here trips the
+                                        // peer's tx_finalized rate limiter on every connect when the
+                                        // mempool has ≥20 entries.
                                         {
-                                            let finalized = consensus.get_finalized_transactions_for_block();
-                                            for tx in finalized.into_iter().take(100) {
-                                                let txid = tx.txid();
-                                                let msg = NetworkMessage::TransactionFinalized { txid, tx };
-                                                let _ = peer_registry.send_to_peer(&ip_str, msg).await;
-                                            }
-                                            let pending = consensus.tx_pool.get_stale_pending(std::time::Duration::ZERO);
-                                            for (_txid, tx) in pending.into_iter().take(100) {
-                                                let msg = NetworkMessage::TransactionBroadcast(tx);
+                                            let entries = consensus.get_all_for_sync();
+                                            if !entries.is_empty() {
+                                                let msg = NetworkMessage::MempoolSyncResponse(entries);
                                                 let _ = peer_registry.send_to_peer(&ip_str, msg).await;
                                             }
                                         }
 
-                                        // Also ask the peer for their mempool so we learn about any
+                                        // Ask the peer for their mempool so we learn about any
                                         // transactions they have that we don't.
                                         let mempool_req = NetworkMessage::MempoolSyncRequest;
                                         let _ = peer_registry.send_to_peer(&ip_str, mempool_req).await;
@@ -2278,26 +2272,22 @@ async fn handle_peer(
                                 }
                                 NetworkMessage::MempoolSyncRequest => {
                                     // Peer is asking for our current pool contents.
-                                    // Push finalized transactions first (they are the most critical),
-                                    // then pending.  Rate-limited via the general bucket.
+                                    // Respond with a single MempoolSyncResponse bulk frame instead
+                                    // of individual TransactionFinalized/TransactionBroadcast
+                                    // messages; the per-message approach tripped the peer's
+                                    // tx_finalized rate limiter when our mempool had ≥20 entries.
                                     check_rate_limit!("general");
-                                    let finalized = consensus.get_finalized_transactions_for_block();
-                                    let count_f = finalized.len().min(100);
-                                    for tx in finalized.into_iter().take(100) {
-                                        let txid = tx.txid();
-                                        let msg = NetworkMessage::TransactionFinalized { txid, tx };
-                                        let _ = peer_registry.send_to_peer(&ip_str, msg).await;
-                                    }
-                                    let pending = consensus.tx_pool.get_stale_pending(std::time::Duration::ZERO);
-                                    let count_p = pending.len().min(100);
-                                    for (_txid, tx) in pending.into_iter().take(100) {
-                                        let msg = NetworkMessage::TransactionBroadcast(tx);
-                                        let _ = peer_registry.send_to_peer(&ip_str, msg).await;
-                                    }
-                                    tracing::debug!(
-                                        "📤 Sent mempool to {}: {} finalized + {} pending",
-                                        peer.addr, count_f, count_p
+                                    let peer_ip_str = peer.addr.split(':').next().unwrap_or("").to_string();
+                                    let handler = MessageHandler::new(peer_ip_str, ConnectionDirection::Inbound);
+                                    let mut context = MessageContext::minimal(
+                                        Arc::clone(&blockchain),
+                                        Arc::clone(&peer_registry),
+                                        Arc::clone(&masternode_registry),
                                     );
+                                    context.consensus = Some(Arc::clone(&consensus));
+                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
+                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    }
                                 }
                                 NetworkMessage::GetPeers => {
                                     check_rate_limit!("get_peers");
@@ -3236,15 +3226,19 @@ async fn handle_peer(
                                 }
                                 _ => {
                                     // Fallback: delegate any unhandled message types to MessageHandler
-                                    // This prevents silently dropping messages that server.rs doesn't
-                                    // explicitly handle (e.g. BlockHeightResponse, ForkAlert, LivenessAlert)
+                                    // with full consensus context so messages like MempoolSyncResponse
+                                    // (which need consensus to add transactions) are processed correctly.
                                     let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
                                     let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                    let context = MessageContext::minimal(
+                                    let mut context = MessageContext::from_registry(
                                         Arc::clone(&blockchain),
                                         Arc::clone(&peer_registry),
                                         Arc::clone(&masternode_registry),
-                                    );
+                                    ).await;
+                                    context.banlist = Some(Arc::clone(&banlist));
+                                    if let Some(ref ai) = ai_system {
+                                        context.ai_system = Some(Arc::clone(ai));
+                                    }
 
                                     match handler.handle_message(&msg, &context).await {
                                         Ok(Some(response)) => {
