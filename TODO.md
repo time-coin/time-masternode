@@ -7,8 +7,8 @@
 - [x] Phase 2 (`37fa014`) — MessageLoopConfig rate_limiter, ConnectionDriver
 - [x] Phase 3 (`2332ed3`) — server.rs 3354→917 lines, drive_inbound created
 - [x] Phase 4 (`cae7375`) — removed 28 redundant arms (−504 lines) from drive_inbound
-- [ ] **Phase 5 — IN PROGRESS** — route remaining inline handlers in `drive_inbound` through `MessageHandler`
-- [ ] Phase 6 (future) — replace `drive_inbound`'s manual loop with `run_message_loop_unified`
+- [x] **Phase 5** (`aeca67e`) — route remaining inline handlers in `drive_inbound` through `MessageHandler` (−552 lines)
+- [x] **Phase 6** (`95de322`) — replace `drive_inbound`'s manual loop with `run_message_loop_unified`
 
 ### Phase 5 Details
 
