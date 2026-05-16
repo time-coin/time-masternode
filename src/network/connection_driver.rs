@@ -20,12 +20,10 @@ use tokio::sync::RwLock;
 use crate::network::banlist::IPBanlist;
 use crate::network::connection_manager::ConnectionManager;
 use crate::network::message::NetworkMessage;
-use crate::network::message_handler::{ConnectionDirection, MessageContext, MessageHandler};
 use crate::network::peer_connection::{MessageLoopConfig, PeerConnection};
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
 use crate::network::rate_limiter::RateLimiter;
 use crate::network::tls::TlsConfig;
-use crate::UTXOState;
 
 /// Per-connection resources for an inbound peer that are NOT already on `ConnectionDriver`.
 pub struct InboundResources {
@@ -221,7 +219,7 @@ impl ConnectionDriver {
         // the write-lock contention that the shared NetworkServer RateLimiter caused
         // under load (50+ peers ├ù multiple msg/s = constant write-lock contention).
         // The shared `rate_limiter` parameter is intentionally shadowed here.
-        let rate_limiter = Arc::new(RwLock::new(RateLimiter::new()));
+        let _rate_limiter = Arc::new(RwLock::new(RateLimiter::new()));
 
         // Get WebSocket tx event sender for real-time wallet notifications
         let _ws_tx_event_sender = self.peer_registry.get_tx_event_sender().await;
@@ -242,7 +240,7 @@ impl ConnectionDriver {
         // the handshake completes.
         // For non-TLS: `TcpStream::into_split()` is already correct (true full-duplex).
         let (msg_read_tx, mut msg_read_rx) =
-            tokio::sync::mpsc::channel::<Result<Option<NetworkMessage>, String>>(512);
+            tokio::sync::mpsc::unbounded_channel::<Result<Option<NetworkMessage>, String>>();
         let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let writer_tx: crate::network::peer_connection_registry::PeerWriterTx = write_tx;
 
@@ -323,17 +321,15 @@ impl ConnectionDriver {
                             } else {
                                 gate_drop_streak += 1;
                                 if !gate_is_whitelisted && gate_drop_streak > GATE_HARD_DROPS {
-                                    let _ = msg_read_tx
-                                        .send(Err(
-                                            "Message flood detected: pre-channel gate triggered"
-                                                .to_string(),
-                                        ))
-                                        .await;
+                                    let _ = msg_read_tx.send(Err(
+                                        "Message flood detected: pre-channel gate triggered"
+                                            .to_string(),
+                                    ));
                                     break;
                                 }
                                 continue; // soft drop
                             }
-                            if msg_read_tx.send(result).await.is_err() {
+                            if msg_read_tx.send(result).is_err() {
                                 break; // receiver dropped
                             }
                             if is_eof || is_err {
@@ -443,13 +439,12 @@ impl ConnectionDriver {
                         if !gate_is_whitelisted && gate_drop_streak > GATE_HARD_DROPS {
                             let _ = msg_read_tx
                                 .send(Err("Message flood detected: pre-channel gate triggered"
-                                    .to_string()))
-                                .await;
+                                    .to_string()));
                             break;
                         }
                         continue; // soft drop
                     }
-                    if msg_read_tx.send(result).await.is_err() {
+                    if msg_read_tx.send(result).is_err() {
                         break;
                     }
                     if is_eof || is_err {
@@ -498,20 +493,6 @@ impl ConnectionDriver {
         // Per-connection UTXO lock flood counter: tracks how many UTXOStateUpdate (Locked)
         // messages this peer has sent for each TX.  A legitimate TX with N inputs produces
         // exactly N lock messages ΓÇö an attacker who sends far more is DoS-flooding us.
-        let mut peer_tx_lock_counts: std::collections::HashMap<[u8; 32], u32> =
-            std::collections::HashMap::new();
-        const MAX_UTXO_LOCKS_PER_TX: u32 = 50;
-
-        let mut ping_excess_streak: u32 = 0;
-        // Per-connection rate-limit drop counters.  Declared here (outside the per-message
-        // loop) so they accumulate across messages on the same connection, enabling the
-        // suppression log ("N msgs suppressed in last 60s") and the record_severe_violation
-        // escalation path (ΓëÑ10 drops) to actually fire.
-        let mut rl_drop_count: u32 = 0;
-        let mut rl_last_log = std::time::Instant::now() - std::time::Duration::from_secs(61);
-        // Per-connection counter for invalid transactions removed — TransactionBroadcast arm
-        // is now routed through MessageHandler fallback.
-
         let magic_bytes = self.network_type.magic_bytes();
 
         // A connection that completes TLS but never sends a Handshake message holds an open
@@ -901,38 +882,7 @@ impl ConnectionDriver {
                                                 let request_genesis_msg = NetworkMessage::RequestGenesis;
                                                 let _ = self.peer_registry.send_to_peer(&ip_str, request_genesis_msg).await;
                                             }
-                                            // Spawn periodic ping task for RTT measurement on this inbound connection.
-                                            // Without this, ping times would only be tracked for outbound connections.
-                                            {
-                                                let ping_ip = ip_str.clone();
-                                                let ping_registry = Arc::clone(&self.peer_registry);
-                                                let ping_blockchain = Arc::clone(&self.blockchain);
-                                                tokio::spawn(async move {
-                                                    let mut interval = tokio::time::interval(
-                                                        std::time::Duration::from_secs(30),
-                                                    );
-                                                    // Skip the immediate tick ΓÇö let the connection settle first.
-                                                    interval.tick().await;
-                                                    loop {
-                                                        interval.tick().await;
-                                                        if !ping_registry.is_connected(&ping_ip) {
-                                                            break;
-                                                        }
-                                                        let nonce = rand::random::<u64>();
-                                                        let height = ping_blockchain.get_height();
-                                                        let msg = crate::network::message::NetworkMessage::Ping {
-                                                            nonce,
-                                                            timestamp: chrono::Utc::now().timestamp(),
-                                                            height: Some(height),
-                                                        };
-                                                        ping_registry.record_ping_sent(&ping_ip, nonce).await;
-                                                        if ping_registry.send_to_peer(&ping_ip, msg).await.is_err() {
-                                                            break;
-                                                        }
-                                                    }
-                                                });
-                                            }
-                                            continue;
+                                            break;
                                         }
                                         _ => {
                                             tracing::warn!("ΓÜá∩╕Å  {} sent message before handshake - closing connection", peer_addr);
@@ -947,347 +897,6 @@ impl ConnectionDriver {
                                                 bl.record_violation(ip, "Sent message before completing handshake");
                                             }
                                             break;
-                                        }
-                                    }
-                                }
-
-                                tracing::debug!("≡ƒôª Parsed message type from {}: {:?}", peer_addr, std::mem::discriminant(&msg));
-
-                                // Phase 2.2: Rate limiting and resources.banlist enforcement
-                                //
-                                // rl_drop_count / rl_last_log are declared outside this loop so
-                                // they accumulate across messages on the same connection.
-
-                                // Define helper macro for rate limit checking with auto-ban
-                                macro_rules! check_rate_limit {
-                                    ($msg_type:expr) => {{
-                                        let mut limiter = rate_limiter.write().await;
-                                        let mut banlist_guard = resources.banlist.write().await;
-
-                                        if !limiter.check($msg_type, &ip_str) {
-                                            // Log at first occurrence in each 60s window.
-                                            let now = std::time::Instant::now();
-                                            let first_in_window = rl_drop_count == 0
-                                                || now.duration_since(rl_last_log).as_secs() >= 60;
-                                            if first_in_window {
-                                                if rl_drop_count > 0 {
-                                                    tracing::warn!(
-                                                        "ΓÜá∩╕Å  Rate limit exceeded for {} from {} \
-                                                         ({} msgs suppressed in last 60s)",
-                                                        $msg_type, peer_addr, rl_drop_count
-                                                    );
-                                                } else {
-                                                    tracing::warn!(
-                                                        "ΓÜá∩╕Å  Rate limit exceeded for {} from {}",
-                                                        $msg_type, peer_addr
-                                                    );
-                                                }
-                                                rl_last_log = now;
-                                            }
-                                            rl_drop_count += 1;
-
-                                            // Sync-safe messages are fundamental to network operation
-                                            // (chain sync, peer discovery, liveness). Rate-limiting them
-                                            // is correct ΓÇö dropping excess protects our resources ΓÇö but
-                                            // they must never escalate to a ban. A syncing node legitimately
-                                            // sends bursts of get_blocks and block messages during IBD; a
-                                            // node coming online sends get_peers and pings. None of these
-                                            // are abuse signals.
-                                            //
-                                            // Only abuse-prone messages (tx spam, announce spam, etc.)
-                                            // should score violations when sustained rate-limiting occurs.
-                                            let is_sync_safe = matches!(
-                                                $msg_type,
-                                                "get_blocks"
-                                                    | "block"
-                                                    | "get_peers"
-                                                    | "ping"
-                                                    | "pong"
-                                                    | "genesis_request"
-                                            );
-
-                                            let should_ban = if is_sync_safe {
-                                                false // Never ban for sync/discovery/liveness bursts
-                                            } else if rl_drop_count >= 10 && !is_whitelisted {
-                                                banlist_guard.record_severe_violation(ip,
-                                                    &format!("Mass flood: {} ({}+ msgs dropped)", $msg_type, rl_drop_count))
-                                            } else if rl_drop_count >= 5 && !is_whitelisted {
-                                                // Sustained rate-limiting of an abuse-prone message type.
-                                                banlist_guard.record_violation(ip,
-                                                    &format!("Sustained rate-limit flood: {} ({} msgs dropped)", $msg_type, rl_drop_count))
-                                            } else {
-                                                false
-                                            };
-
-                                            if should_ban && !is_whitelisted {
-                                                tracing::warn!(
-                                                    "≡ƒÜ½ Disconnecting {} due to rate limit flood ({} dropped)",
-                                                    peer_addr, rl_drop_count
-                                                );
-                                                drop(banlist_guard);
-                                                drop(limiter);
-                                                self.peer_registry.kick_peer(&ip_str).await;
-                                                break; // Exit connection loop
-                                            }
-                                            continue; // Skip processing this message
-                                        }
-
-                                        drop(limiter);
-                                        drop(banlist_guard);
-                                    }};
-                                }
-
-                                // Size validation handled by wire protocol (4MB max frame)
-                                macro_rules! check_message_size {
-                                    ($max_size:expr, $msg_type:expr) => {{}};
-                                }
-
-                                match &msg {
-                                    // PRIORITY: UTXO locks MUST be processed immediately, even during block sync
-                                    // This prevents double-spend race conditions
-                                    NetworkMessage::UTXOStateUpdate { outpoint, state } => {
-                                        // Create unique identifier for this UTXO lock update
-                                        let mut lock_id = Vec::new();
-                                        lock_id.extend_from_slice(&outpoint.txid);
-                                        lock_id.extend_from_slice(&outpoint.vout.to_le_bytes());
-
-                                        // Add state discriminant to differentiate lock types
-                                        match state {
-                                            UTXOState::Locked { txid, .. } => {
-                                                lock_id.push(1); // Locked state
-                                                lock_id.extend_from_slice(txid);
-                                            }
-                                            UTXOState::Unspent => lock_id.push(2),
-                                            UTXOState::SpentPending { txid, .. } => {
-                                                lock_id.push(3);
-                                                lock_id.extend_from_slice(txid);
-                                            }
-                                            UTXOState::SpentFinalized { txid, .. } => {
-                                                lock_id.push(4);
-                                                lock_id.extend_from_slice(txid);
-                                            }
-                                            UTXOState::Archived { txid, .. } => {
-                                                lock_id.push(5);
-                                                lock_id.extend_from_slice(txid);
-                                            }
-                                        }
-
-                                        // Check if we've already processed this exact UTXO lock update
-                                        let already_seen = resources.seen_utxo_locks.check_and_insert(&lock_id).await;
-
-                                        if already_seen {
-                                            tracing::debug!("≡ƒöü Ignoring duplicate UTXO lock update from {}", peer_addr);
-                                            continue;
-                                        }
-
-                                        // FLOOD GUARD: count distinct Locked messages per TX from this peer.
-                                        // A legitimate TX with N inputs sends exactly N lock messages.
-                                        // Anything beyond MAX_UTXO_LOCKS_PER_TX is a DoS flood ΓÇö flag and drop.
-                                        if let UTXOState::Locked { txid, .. } = &state {
-                                            let count = peer_tx_lock_counts.entry(*txid).or_insert(0);
-                                            *count += 1;
-                                            if *count > MAX_UTXO_LOCKS_PER_TX {
-                                                if let Some(ref ai) = self.ai_system {
-                                                    ai.attack_detector.record_utxo_lock_flood(
-                                                        &ip_str,
-                                                        &hex::encode(txid),
-                                                        *count,
-                                                    );
-                                                }
-                                                tracing::warn!(
-                                                    "≡ƒÜ½ UTXO lock flood from {}: {} locks for TX {} (max {}), dropping",
-                                                    peer_addr,
-                                                    count,
-                                                    hex::encode(txid),
-                                                    MAX_UTXO_LOCKS_PER_TX
-                                                );
-                                                continue;
-                                            }
-                                        }
-
-                                        tracing::debug!("≡ƒöÆ PRIORITY: Received UTXO lock update from {}", peer_addr);
-                                        resources.consensus.utxo_manager.update_state(outpoint, state.clone());
-
-                                        if let UTXOState::Locked { txid, .. } = state {
-                                            tracing::debug!(
-                                                "≡ƒöÆ Applied UTXO lock from peer {} for TX {}",
-                                                peer_addr,
-                                                hex::encode(txid)
-                                            );
-                                        }
-
-                                        // Gossip lock to other peers immediately (only if not duplicate)
-                                        let _ = resources.broadcast_tx.send(msg.clone());
-                                    }
-
-                                    NetworkMessage::Ack { message_type } => {
-                                        tracing::debug!("✓ Received ACK for {} from {}", message_type, peer_addr);
-                                        // ACKs are informational, no action needed
-                                    }
-                                    NetworkMessage::Subscribe(sub) => {
-                                        check_rate_limit!("subscribe");
-                                        resources.subs.write().await.insert(sub.id.clone(), sub.clone());
-                                    }
-                                    NetworkMessage::GenesisAnnouncement(block) => {
-                                        // Special handling for genesis block announcements
-                                        check_message_size!(MAX_BLOCK_SIZE, "GenesisBlock");
-                                        check_rate_limit!("genesis");
-
-                                        // Verify this is actually a genesis block
-                                        if block.header.height != 0 {
-                                            tracing::warn!("ΓÜá∩╕Å  Received GenesisAnnouncement for non-genesis block {} from {}", block.header.height, peer_addr);
-                                            continue;
-                                        }
-
-                                        // Check if we already have genesis - try to get block at height 0
-                                        if self.blockchain.get_block_by_height(0).await.is_ok() {
-                                            tracing::debug!("ΓÅ¡∩╕Å Ignoring genesis announcement (already have genesis) from {}", peer_addr);
-                                            continue;
-                                        }
-
-                                        tracing::info!("≡ƒôª Received genesis announcement from {}", peer_addr);
-
-                                        // Simply verify basic genesis structure
-                                        use crate::block::genesis::GenesisBlock;
-                                        match GenesisBlock::verify_structure(block) {
-                                            Ok(()) => {
-                                                tracing::info!("Γ£à Genesis structure validation passed, adding to chain");
-
-                                                // Add genesis to our self.blockchain
-                                                match self.blockchain.add_block(block.clone()).await {
-                                                    Ok(()) => {
-                                                        tracing::info!("Γ£à Genesis block added successfully, hash: {}", hex::encode(&block.hash()[..8]));
-
-                                                        // Broadcast to other peers who might not have it yet
-                                                        let msg = NetworkMessage::GenesisAnnouncement(block.clone());
-                                                        let _ = resources.broadcast_tx.send(msg);
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::error!("Γ¥î Failed to add genesis block: {}", e);
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!("ΓÜá∩╕Å  Genesis validation failed: {}", e);
-                                            }
-                                        }
-                                    }
-                                    // Health Check Messages
-                                    NetworkMessage::Ping { .. } | NetworkMessage::Pong { .. } => {
-                                        let rate_ok = {
-                                            let mut limiter = rate_limiter.write().await;
-                                            let msg_type = if matches!(&msg, NetworkMessage::Ping { .. }) { "ping" } else { "pong" };
-                                            limiter.check(msg_type, &ip_str)
-                                        };
-                                        if !rate_ok {
-                                            if matches!(&msg, NetworkMessage::Ping { .. }) {
-                                                ping_excess_streak += 1;
-                                                tracing::debug!(
-                                                    "ΓÜí Ping rate limit exceeded from {} (excess streak: {})",
-                                                    peer_addr, ping_excess_streak
-                                                );
-                                                if ping_excess_streak >= 3 {
-                                                    tracing::warn!(
-                                                        "≡ƒîè Ping flood from {} (excess streak {}): recording violation",
-                                                        peer_addr, ping_excess_streak
-                                                    );
-                                                    let should_ban = resources.banlist.write().await.record_violation(
-                                                        ip,
-                                                        "Ping flood: sustained excess pings"
-                                                    );
-                                                    if let Some(ai) = &self.ai_system {
-                                                        ai.attack_detector.record_ping_flood(&ip_str);
-                                                    }
-                                                    if should_ban {
-                                                        tracing::warn!("≡ƒÜ½ Disconnecting {} due to ping flood violations", peer_addr);
-                                                        self.peer_registry.kick_peer(&ip_str).await;
-                                                        break;
-                                                    }
-                                                    ping_excess_streak = 0;
-                                                }
-                                            }
-                                            continue;
-                                        }
-                                        ping_excess_streak = 0;
-
-                                        // Route through unified message handler
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let context = MessageContext::minimal(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        );
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => { let _ = self.peer_registry.send_to_peer(&ip_str, response).await; }
-                                            Err(e) if e.contains("DISCONNECT:") => { tracing::warn!("≡ƒöî Disconnecting {} ΓÇö {}", peer_addr, e); break; }
-                                            _ => {}
-                                        }
-                                    }
-                                    NetworkMessage::ChainWorkResponse { height, tip_hash, cumulative_work } => {
-                                        // Handle response - check if peer has better chain and potentially trigger reorg
-                                        let _our_height = self.blockchain.get_height();
-
-                                        if self.blockchain.should_switch_by_work(*cumulative_work, *height, tip_hash, Some(&ip_str)).await {
-                                            tracing::info!(
-                                                "≡ƒôè Peer {} has better chain, requesting blocks",
-                                                peer_addr
-                                            );
-
-                                            // Check for fork and request the first batch of missing blocks.
-                                            // Cap to 50 blocks to stay well within the 16MB frame limit;
-                                            // subsequent batches will be fetched by the normal sync path.
-                                            if let Some(fork_height) = self.blockchain.detect_fork(*height, *tip_hash).await {
-                                                tracing::warn!(
-                                                    "≡ƒöÇ Fork detected at height {} with {}, requesting blocks",
-                                                    fork_height, peer_addr
-                                                );
-
-                                                let batch_end = (*height).min(fork_height + 49);
-                                                let request = NetworkMessage::GetBlockRange {
-                                                    start_height: fork_height,
-                                                    end_height: batch_end,
-                                                };
-                                                let _ = self.peer_registry.send_to_peer(&ip_str, request).await;
-                                            }
-                                        }
-                                    }
-                                    NetworkMessage::ChainWorkAtResponse { .. }
-                                    | NetworkMessage::BlockHashResponse { .. } => {
-                                        // Handle via response system - dispatched to waiting oneshot channels
-                                        self.peer_registry.handle_response(&ip_str, msg).await;
-                                    }
-                                    _ => {
-                                        // Fallback: delegate any unhandled message types to MessageHandler
-                                        // with full context so messages like MempoolSyncResponse,
-                                        // GetPeers, MasternodeAnnouncement, etc. are processed correctly.
-                                        let peer_ip = peer_addr.split(':').next().unwrap_or("").to_string();
-                                        let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                        let mut context = MessageContext::from_registry(
-                                            Arc::clone(&self.blockchain),
-                                            Arc::clone(&self.peer_registry),
-                                            Arc::clone(&self.masternode_registry),
-                                        ).await;
-                                        context.banlist = Some(Arc::clone(&resources.banlist));
-                                        context.peer_manager = Some(Arc::clone(&resources.peer_manager));
-                                        context.seen_blocks = Some(Arc::clone(&resources.seen_blocks));
-                                        context.seen_transactions = Some(Arc::clone(&resources.seen_transactions));
-                                        context.seen_tx_finalized = Some(Arc::clone(&resources.seen_tx_finalized));
-                                        context.seen_utxo_locks = Some(Arc::clone(&resources.seen_utxo_locks));
-                                        if let Some(ref ai) = self.ai_system {
-                                            context.ai_system = Some(Arc::clone(ai));
-                                        }
-
-                                        match handler.handle_message(&msg, &context).await {
-                                            Ok(Some(response)) => {
-                                                let _ = self.peer_registry.send_to_peer(&ip_str, response).await;
-                                            }
-                                            Err(e) if e.contains("DISCONNECT:") => {
-                                                tracing::warn!("Disconnecting {} — {}", peer_addr, e);
-                                                break;
-                                            }
-                                            _ => {}
                                         }
                                     }
                                 }
@@ -1336,6 +945,42 @@ impl ConnectionDriver {
                     }
                     break;
                 }
+            }
+        }
+
+        // After the pre-handshake loop, hand off to the unified message loop.
+        if handshake_done {
+            let remote_port = peer_addr
+                .split(':')
+                .next_back()
+                .and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or(0);
+            if let Ok(peer_conn) = PeerConnection::new_inbound(
+                ip_str.clone(),
+                remote_port,
+                0,
+                is_whitelisted,
+                self.network_type,
+                writer_tx,
+                msg_read_rx,
+            ) {
+                let mut loop_config = MessageLoopConfig::new(self.peer_registry.clone())
+                    .with_masternode_registry(self.masternode_registry.clone())
+                    .with_blockchain(self.blockchain.clone());
+                if let Some(ref banlist) = self.banlist {
+                    loop_config = loop_config.with_banlist(banlist.clone());
+                }
+                if let (_, _, Some(broadcast_tx)) =
+                    self.peer_registry.get_timelock_resources().await
+                {
+                    loop_config = loop_config.with_broadcast_rx(broadcast_tx.subscribe());
+                }
+                if let Some(ref ai) = self.ai_system {
+                    loop_config = loop_config.with_ai_system(ai.clone());
+                }
+                let rl = Arc::new(RwLock::new(RateLimiter::new()));
+                loop_config = loop_config.with_rate_limiter(rl);
+                let _ = peer_conn.run_message_loop_unified(loop_config).await;
             }
         }
 

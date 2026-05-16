@@ -15,6 +15,7 @@ use crate::network::banlist::IPBanlist;
 use crate::network::message::NetworkMessage;
 use crate::network::message_handler::{ConnectionDirection, MessageContext, MessageHandler};
 use crate::network::tls::TlsConfig;
+use std::collections::HashMap;
 
 /// State for tracking ping/pong health
 #[derive(Debug)]
@@ -242,6 +243,12 @@ pub struct PeerConnection {
 
     /// Network type (mainnet/testnet) for handshake
     network_type: crate::network_type::NetworkType,
+
+    /// Per-TX UTXOStateUpdate (Locked) count for AV10 flood detection
+    peer_tx_lock_counts: HashMap<[u8; 32], u32>,
+
+    /// Consecutive excess-ping count for AV27 rate-limit detection
+    ping_excess_streak: u32,
 }
 
 /// Configuration for peer connection message loop
@@ -513,135 +520,42 @@ impl PeerConnection {
             remote_port: remote_addr.port(),
             is_whitelisted,
             network_type,
+            peer_tx_lock_counts: HashMap::new(),
+            ping_excess_streak: 0,
         })
     }
 
-    /// Create a new inbound connection from a peer
+    /// Create a new inbound connection from an already-established channel pair.
+    ///
+    /// `drive_inbound` handles TLS/plaintext I/O setup, pre-handshake loop,
+    /// and peer registration before calling this.  This constructor receives the
+    /// ready channel pair so `run_message_loop_unified` can take over immediately.
     #[allow(dead_code)]
-    pub async fn new_inbound(
-        stream: TcpStream,
+    pub fn new_inbound(
+        peer_ip: String,
+        remote_port: u16,
+        local_port: u16,
         is_whitelisted: bool,
-        tls_config: Option<Arc<TlsConfig>>,
         network_type: crate::network_type::NetworkType,
+        writer_tx: crate::network::peer_connection_registry::PeerWriterTx,
+        msg_reader: tokio::sync::mpsc::UnboundedReceiver<Result<Option<NetworkMessage>, String>>,
     ) -> Result<Self, String> {
-        let peer_addr = stream
-            .peer_addr()
-            .map_err(|e| format!("Failed to get peer address: {}", e))?;
-
-        let local_addr = stream
-            .local_addr()
-            .map_err(|e| format!("Failed to get local address: {}", e))?;
-
-        let peer_ip = peer_addr.ip().to_string();
-
-        if is_whitelisted {
-            info!(
-                "🔗 [INBOUND-WHITELIST] Accepted masternode connection from {}",
-                peer_addr
-            );
-        } else {
-            info!("🔗 [Inbound] Accepted connection from {}", peer_addr);
-        }
-
-        // Create channel-based I/O to avoid tokio::io::split() on TLS streams
-        let (msg_read_tx, msg_read_rx) =
-            tokio::sync::mpsc::unbounded_channel::<Result<Option<NetworkMessage>, String>>();
-        let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-
-        if let Some(tls) = tls_config {
-            debug!("🔒 [INBOUND] TLS handshake with {}", peer_addr);
-            let tls_stream = tls
-                .accept_server(stream)
-                .await
-                .map_err(|e| format!("TLS accept failed from {}: {}", peer_addr, e))?;
-            let addr_str = peer_addr.to_string();
-            // Single I/O bridge task: same pattern as server.rs inbound TLS.
-            // See new_outbound() comment above for why tokio::io::split() is unsafe
-            // on TLS streams.
-            tokio::spawn(async move {
-                use tokio::io::AsyncWriteExt;
-                let mut stream = tls_stream;
-                loop {
-                    tokio::select! {
-                        result = crate::network::wire::read_message(&mut stream) => {
-                            let is_eof = matches!(&result, Ok(None));
-                            let is_err = result.is_err();
-                            if msg_read_tx.send(result).is_err() {
-                                break;
-                            }
-                            if is_eof || is_err {
-                                break;
-                            }
-                        }
-                        bytes = write_rx.recv() => {
-                            match bytes {
-                                Some(data) => {
-                                    if let Err(e) = stream.write_all(&data).await {
-                                        tracing::debug!("🔒 TLS write error for {}: {}", addr_str, e);
-                                        break;
-                                    }
-                                    if let Err(e) = stream.flush().await {
-                                        tracing::debug!("🔒 TLS flush error for {}: {}", addr_str, e);
-                                        break;
-                                    }
-                                }
-                                None => break,
-                            }
-                        }
-                    }
-                }
-                tracing::debug!("🔒 TLS I/O bridge exiting for {}", addr_str);
-            });
-        } else {
-            let (r, w) = stream.into_split();
-            let addr_str = peer_addr.to_string();
-            tokio::spawn(async move {
-                let mut reader = r;
-                loop {
-                    let result = crate::network::wire::read_message(&mut reader).await;
-                    let is_eof = matches!(&result, Ok(None));
-                    let is_err = result.is_err();
-                    if msg_read_tx.send(result).is_err() {
-                        break;
-                    }
-                    if is_eof || is_err {
-                        break;
-                    }
-                }
-                tracing::debug!("📖 Reader task exiting for {}", addr_str);
-            });
-            let addr_str2 = peer_addr.to_string();
-            tokio::spawn(async move {
-                use tokio::io::AsyncWriteExt;
-                let mut writer = w;
-                while let Some(data) = write_rx.recv().await {
-                    if let Err(e) = writer.write_all(&data).await {
-                        tracing::debug!("📝 Write error for {}: {}", addr_str2, e);
-                        break;
-                    }
-                    if let Err(e) = writer.flush().await {
-                        tracing::debug!("📝 Flush error for {}: {}", addr_str2, e);
-                        break;
-                    }
-                }
-                tracing::debug!("📝 Writer task exiting for {}", addr_str2);
-            });
-        }
-
         Ok(Self {
             peer_ip,
             direction: ConnectionDirection::Inbound,
-            msg_reader: msg_read_rx,
-            writer_tx: write_tx,
+            msg_reader,
+            writer_tx,
             ping_state: Arc::new(RwLock::new(PingState::new())),
             invalid_block_count: Arc::new(RwLock::new(0)),
             peer_height: Arc::new(RwLock::new(None)),
             fork_resolution_tracker: Arc::new(RwLock::new(None)),
             last_opportunistic_sync: Arc::new(RwLock::new(None)),
-            local_port: local_addr.port(),
-            remote_port: peer_addr.port(),
+            local_port,
+            remote_port,
             is_whitelisted,
             network_type,
+            peer_tx_lock_counts: HashMap::new(),
+            ping_excess_streak: 0,
         })
     }
 
@@ -1435,7 +1349,6 @@ impl PeerConnection {
 
 // ===== PeerStateManager (formerly in peer_state.rs) =====
 
-use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 /// Manages all active peer connections
