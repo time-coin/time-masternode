@@ -755,14 +755,11 @@ install_watchdog() {
         WATCHDOG_ARGS=" --testnet"
     fi
 
-    # Generate a network-aware service file so BindsTo tracks the right service
-    # name (timed for mainnet, timetd for testnet).
     cat > /etc/systemd/system/mn-watchdog.service <<EOF
 [Unit]
 Description=TIME Coin Masternode Registration Watchdog (${NETWORK})
 Documentation=https://github.com/time-coin/time-masternode
 After=${SERVICE_NAME}.service
-BindsTo=${SERVICE_NAME}.service
 
 [Service]
 Type=simple

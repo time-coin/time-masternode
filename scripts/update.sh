@@ -69,6 +69,8 @@ git log -1
 #cargo clean
 cargo build --profile release-fast --bin timed --bin time-cli
 
+systemctl stop mn-watchdog 2>/dev/null || true
+
 for NET in mainnet testnet; do
     [[ "$NETWORK" != "both" && "$NETWORK" != "$NET" ]] && continue
 
@@ -107,3 +109,8 @@ for NET in mainnet testnet; do
         journalctl -u "$SVC" -f | ccze -A
     fi
 done
+
+if systemctl is-enabled --quiet mn-watchdog 2>/dev/null; then
+    echo "==> Restarting mn-watchdog..."
+    systemctl start mn-watchdog
+fi

@@ -147,7 +147,6 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 Description=TIME Coin Masternode Registration Watchdog (${NETWORK})
 Documentation=https://github.com/time-coin/time-masternode
 After=${SERVICE_NAME}.service
-BindsTo=${SERVICE_NAME}.service
 
 [Service]
 Type=simple
@@ -175,7 +174,6 @@ else
 Description=TIME Coin Masternode Registration Watchdog (${NETWORK})
 Documentation=https://github.com/time-coin/time-masternode
 After=${SERVICE_NAME}.service
-BindsTo=${SERVICE_NAME}.service
 
 [Service]
 Type=simple

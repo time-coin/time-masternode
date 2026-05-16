@@ -298,6 +298,8 @@ pub struct MessageContext {
     pub peer_manager: Option<Arc<PeerManager>>,
     pub seen_blocks: Option<Arc<DeduplicationFilter>>,
     pub seen_transactions: Option<Arc<DeduplicationFilter>>,
+    pub seen_tx_finalized: Option<Arc<crate::network::dedup_filter::DeduplicationFilter>>,
+    pub seen_utxo_locks: Option<Arc<crate::network::dedup_filter::DeduplicationFilter>>,
     // Node identity for voting
     pub node_masternode_address: Option<String>,
     // Banlist for rejecting messages from banned peers
@@ -328,6 +330,8 @@ impl MessageContext {
             peer_manager: None,
             seen_blocks: None,
             seen_transactions: None,
+            seen_tx_finalized: None,
+            seen_utxo_locks: None,
             node_masternode_address: None,
             banlist: None,
             ai_system: None,
@@ -357,6 +361,8 @@ impl MessageContext {
             peer_manager: None,
             seen_blocks: None,
             seen_transactions: None,
+            seen_tx_finalized: None,
+            seen_utxo_locks: None,
             node_masternode_address,
             banlist: None,
             ai_system: None,
@@ -397,6 +403,8 @@ impl MessageContext {
             peer_manager: None,
             seen_blocks: None,
             seen_transactions: None,
+            seen_tx_finalized: None,
+            seen_utxo_locks: None,
             node_masternode_address,
             banlist: None,
             ai_system,
@@ -863,6 +871,10 @@ impl MessageHandler {
             // === Transaction Messages ===
             NetworkMessage::TransactionBroadcast(tx) => {
                 self.handle_transaction_broadcast(tx.clone(), context).await
+            }
+            NetworkMessage::TransactionFinalized { txid, tx } => {
+                self.handle_transaction_finalized(*txid, tx.clone(), context)
+                    .await
             }
             NetworkMessage::MempoolSyncRequest => self.handle_mempool_sync_request(context).await,
             NetworkMessage::MempoolSyncResponse(entries) => {
@@ -3306,6 +3318,238 @@ impl MessageHandler {
                 "⚠️ [{}] No consensus engine to process transaction",
                 self.direction
             );
+        }
+
+        Ok(None)
+    }
+
+    async fn handle_transaction_finalized(
+        &self,
+        txid: [u8; 32],
+        tx: crate::types::Transaction,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        // Skip while syncing — UTXOs not yet indexed
+        if context.blockchain.is_syncing() {
+            tracing::debug!(
+                "⏸️ Skipping TransactionFinalized {} — node is syncing",
+                hex::encode(txid)
+            );
+            return Ok(None);
+        }
+
+        // Dedup: skip if we've already processed this finalization
+        if let Some(seen_tx_finalized) = &context.seen_tx_finalized {
+            if seen_tx_finalized.check_and_insert(&txid).await {
+                tracing::debug!(
+                    "🔁 Ignoring duplicate TransactionFinalized {} from {}",
+                    hex::encode(txid),
+                    self.peer_ip
+                );
+                return Ok(None);
+            }
+        }
+
+        tracing::info!(
+            "✅ Transaction {} finalized (from {})",
+            hex::encode(txid),
+            self.peer_ip
+        );
+
+        // AV38+AV40: drop null TXs (0 inputs, 0 outputs, no special_data)
+        if tx.inputs.is_empty() && tx.outputs.is_empty() && tx.special_data.is_none() {
+            tracing::debug!(
+                "🗑️ Null TX {} via TransactionFinalized from {} — dropped (AV38+AV40)",
+                hex::encode(txid),
+                self.peer_ip
+            );
+            if let Some(ref ai) = context.ai_system {
+                ai.attack_detector.record_finality_injection(&self.peer_ip);
+            }
+            return Ok(None);
+        }
+
+        // AV41: ghost special_data guard — inputs/outputs empty but special_data present
+        if tx.inputs.is_empty() && tx.outputs.is_empty() {
+            let sig_ok = tx.special_data.as_ref().is_some_and(|sd| {
+                sd.validate_fields().is_ok()
+                    && sd.verify_signature().is_ok()
+                    && sd.verify_address_binding().is_ok()
+            });
+            if !sig_ok {
+                tracing::debug!(
+                    "🗑️ Ghost/forged special_data TX {} via TransactionFinalized from {} — dropped (AV41)",
+                    hex::encode(txid),
+                    self.peer_ip
+                );
+                if let Some(ref ai) = context.ai_system {
+                    ai.attack_detector.record_finality_injection(&self.peer_ip);
+                }
+                return Ok(None);
+            }
+        }
+
+        let consensus = match &context.consensus {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+
+        // Already finalized — gossip but don't re-process
+        if consensus.tx_pool.is_finalized(&txid) {
+            tracing::debug!(
+                "📪 TX {} already in finalized pool, gossiping",
+                hex::encode(txid)
+            );
+            if let Some(ref broadcast_tx) = context.broadcast_tx {
+                let _ = broadcast_tx.send(
+                    crate::network::message::NetworkMessage::TransactionFinalized {
+                        txid,
+                        tx: tx.clone(),
+                    },
+                );
+            }
+            return Ok(None);
+        }
+
+        // Check whether all input UTXOs are accounted for locally.
+        // Tombstoned inputs are legitimately spent (removed from sled storage by
+        // mark_timevote_finalized) and must NOT be treated as a UTXO-set divergence.
+        let mut inputs_exist = true;
+        for input in &tx.inputs {
+            let in_storage = consensus
+                .utxo_manager
+                .get_utxo(&input.previous_output)
+                .await
+                .is_ok();
+            let tombstoned = consensus.utxo_manager.is_tombstoned(&input.previous_output);
+            if !in_storage && !tombstoned {
+                tracing::warn!(
+                    "⚠️ TransactionFinalized {} from {}: input {} not in local storage \
+                     and not tombstoned (UTXO set diverged) — will apply outputs without \
+                     marking inputs spent",
+                    hex::encode(txid),
+                    self.peer_ip,
+                    input.previous_output
+                );
+                inputs_exist = false;
+                break;
+            }
+        }
+
+        if !inputs_exist {
+            // Apply outputs directly so the recipient wallet sees the new UTXOs
+            // even while our local set is diverged.
+            for (idx, output) in tx.outputs.iter().enumerate() {
+                let outpoint = crate::types::OutPoint {
+                    txid,
+                    vout: idx as u32,
+                };
+                let utxo = crate::types::UTXO {
+                    outpoint: outpoint.clone(),
+                    value: output.value,
+                    script_pubkey: output.script_pubkey.clone(),
+                    address: String::from_utf8(output.script_pubkey.clone()).unwrap_or_default(),
+                    masternode_key: None,
+                };
+                if let Err(e) = consensus.utxo_manager.add_utxo(utxo).await {
+                    tracing::warn!(
+                        "Failed to add output UTXO vout={} for diverged TX {}: {}",
+                        idx,
+                        hex::encode(txid),
+                        e
+                    );
+                } else {
+                    consensus
+                        .utxo_manager
+                        .update_state(&outpoint, crate::types::UTXOState::Unspent);
+                }
+            }
+            if let Some(ref broadcast_tx) = context.broadcast_tx {
+                let _ = broadcast_tx.send(
+                    crate::network::message::NetworkMessage::TransactionFinalized {
+                        txid,
+                        tx: tx.clone(),
+                    },
+                );
+            }
+            return Ok(None);
+        }
+
+        // Add to pool if not present — use add_pending (NOT process_transaction) to avoid
+        // AV38: Finality Injection amplification (process_transaction would broadcast a
+        // TimeVoteRequest to all validators, giving ~49x amplification to the attacker).
+        if !consensus.tx_pool.has_transaction(&txid) {
+            tracing::warn!(
+                "⚠️ TransactionFinalized for unknown TX {} from {} — \
+                 adding to pool without consensus re-broadcast (AV38 guard)",
+                hex::encode(txid),
+                self.peer_ip
+            );
+            if let Some(ref ai) = context.ai_system {
+                ai.attack_detector.record_finality_injection(&self.peer_ip);
+            }
+            let _ = consensus.tx_pool.add_pending(tx.clone(), 0);
+        }
+
+        // Manual finalization: move TX to finalized pool and update UTXO states
+        if consensus.tx_pool.finalize_transaction(txid) {
+            tracing::info!(
+                "📪 Moved TX {} to finalized pool on this node",
+                hex::encode(txid)
+            );
+
+            // Transition input UTXOs → SpentFinalized (removes from sled + address_index)
+            for input in &tx.inputs {
+                consensus
+                    .utxo_manager
+                    .mark_timevote_finalized(&input.previous_output, txid)
+                    .await;
+            }
+
+            // Create output UTXOs
+            for (idx, output) in tx.outputs.iter().enumerate() {
+                let outpoint = crate::types::OutPoint {
+                    txid,
+                    vout: idx as u32,
+                };
+                let utxo = crate::types::UTXO {
+                    outpoint: outpoint.clone(),
+                    value: output.value,
+                    script_pubkey: output.script_pubkey.clone(),
+                    address: String::from_utf8(output.script_pubkey.clone()).unwrap_or_default(),
+                    masternode_key: None,
+                };
+                if let Err(e) = consensus.utxo_manager.add_utxo(utxo).await {
+                    tracing::warn!("Failed to add output UTXO vout={}: {}", idx, e);
+                }
+                consensus
+                    .utxo_manager
+                    .update_state(&outpoint, crate::types::UTXOState::Unspent);
+            }
+        } else {
+            tracing::debug!(
+                "⚠️ Could not finalize TX {} (not in pending pool)",
+                hex::encode(txid)
+            );
+        }
+
+        // Signal WS subscribers
+        consensus.signal_tx_finalized(txid);
+
+        // Gossip finalization to other peers
+        if let Some(ref broadcast_tx) = context.broadcast_tx {
+            match broadcast_tx.send(
+                crate::network::message::NetworkMessage::TransactionFinalized {
+                    txid,
+                    tx: tx.clone(),
+                },
+            ) {
+                Ok(receivers) => tracing::debug!(
+                    "🔄 Gossiped finalization to {} peer(s)",
+                    receivers.saturating_sub(1)
+                ),
+                Err(e) => tracing::debug!("Failed to gossip finalization: {}", e),
+            }
         }
 
         Ok(None)
@@ -8002,6 +8246,34 @@ impl MessageHandler {
         state: UTXOState,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
+        // Dedup: skip if we've already processed this exact UTXO state update
+        let mut lock_id = Vec::new();
+        lock_id.extend_from_slice(&outpoint.txid);
+        lock_id.extend_from_slice(&outpoint.vout.to_le_bytes());
+        match &state {
+            UTXOState::Locked { txid, .. } => {
+                lock_id.push(1);
+                lock_id.extend_from_slice(txid);
+            }
+            UTXOState::Unspent => lock_id.push(2),
+            UTXOState::SpentPending { txid, .. } => {
+                lock_id.push(3);
+                lock_id.extend_from_slice(txid);
+            }
+            UTXOState::SpentFinalized { txid, .. } => {
+                lock_id.push(4);
+                lock_id.extend_from_slice(txid);
+            }
+            UTXOState::Archived { txid, .. } => {
+                lock_id.push(5);
+                lock_id.extend_from_slice(txid);
+            }
+        }
+        if let Some(seen_utxo_locks) = &context.seen_utxo_locks {
+            if seen_utxo_locks.check_and_insert(&lock_id).await {
+                return Ok(None);
+            }
+        }
         tracing::debug!(
             "🔒 [{}] Received UTXO state update for {} -> {:?}",
             self.direction,
