@@ -114,6 +114,11 @@ pub struct PeerConnectionRegistry {
     // can accumulate the MIN_PEERS_FOR_FORK_SWITCH quorum.
     #[allow(clippy::type_complexity)]
     recent_chain_tip_cache: Arc<RwLock<HashMap<String, (u64, [u8; 32], std::time::Instant)>>>,
+    // Node-wide dedup filter for vote relay.  Every unique (block_hash, voter_id, vote_type)
+    // triple is relayed exactly once regardless of how many peers forward the same vote.
+    // Without this, two peers bouncing the same vote message back and forth creates an
+    // O(N²) relay loop that saturates the rate limiter (AV-relay-loop).
+    pub seen_votes: Arc<crate::network::dedup_filter::DeduplicationFilter>,
 }
 
 fn extract_ip(addr: &str) -> &str {
@@ -156,6 +161,9 @@ impl PeerConnectionRegistry {
             pending_genesis_checks: Arc::new(dashmap::DashSet::new()),
             genesis_check_last_attempt: Arc::new(dashmap::DashMap::new()),
             recent_chain_tip_cache: Arc::new(RwLock::new(HashMap::new())),
+            seen_votes: Arc::new(crate::network::dedup_filter::DeduplicationFilter::new(
+                std::time::Duration::from_secs(300), // 5-min rotation matches one block slot
+            )),
         }
     }
 

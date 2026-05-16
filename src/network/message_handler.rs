@@ -300,6 +300,8 @@ pub struct MessageContext {
     pub seen_transactions: Option<Arc<DeduplicationFilter>>,
     pub seen_tx_finalized: Option<Arc<crate::network::dedup_filter::DeduplicationFilter>>,
     pub seen_utxo_locks: Option<Arc<crate::network::dedup_filter::DeduplicationFilter>>,
+    // Node-wide vote relay dedup — prevents relay loops between peers
+    pub seen_votes: Option<Arc<crate::network::dedup_filter::DeduplicationFilter>>,
     // Node identity for voting
     pub node_masternode_address: Option<String>,
     // Banlist for rejecting messages from banned peers
@@ -332,6 +334,7 @@ impl MessageContext {
             seen_transactions: None,
             seen_tx_finalized: None,
             seen_utxo_locks: None,
+            seen_votes: None,
             node_masternode_address: None,
             banlist: None,
             ai_system: None,
@@ -363,6 +366,7 @@ impl MessageContext {
             seen_transactions: None,
             seen_tx_finalized: None,
             seen_utxo_locks: None,
+            seen_votes: None,
             node_masternode_address,
             banlist: None,
             ai_system: None,
@@ -391,6 +395,7 @@ impl MessageContext {
 
         // Fetch WebSocket tx event sender from peer registry
         let tx_event_sender = peer_registry.get_tx_event_sender().await;
+        let seen_votes = Arc::clone(&peer_registry.seen_votes);
 
         Self {
             blockchain,
@@ -405,6 +410,7 @@ impl MessageContext {
             seen_transactions: None,
             seen_tx_finalized: None,
             seen_utxo_locks: None,
+            seen_votes: Some(seen_votes),
             node_masternode_address,
             banlist: None,
             ai_system,
@@ -428,6 +434,15 @@ impl MessageContext {
     /// Set the AI system for intelligent event recording and decision making
     pub fn with_ai_system(mut self, ai_system: Arc<crate::ai::AISystem>) -> Self {
         self.ai_system = Some(ai_system);
+        self
+    }
+
+    /// Override the vote relay dedup filter (used in tests; production path gets it from peer_registry)
+    pub fn with_seen_votes(
+        mut self,
+        seen_votes: Arc<crate::network::dedup_filter::DeduplicationFilter>,
+    ) -> Self {
+        self.seen_votes = Some(seen_votes);
         self
     }
 }
@@ -2135,14 +2150,25 @@ impl MessageHandler {
 
         // Gossip the prepare vote to all peers so it reaches the producer even when
         // the originating free node is not directly connected to the producer.
-        // The accumulator's "first vote wins" rule makes duplicate receipt harmless.
+        // Dedup by (block_hash || voter_id || 'P') so we relay each unique vote exactly
+        // once — without this, two peers bounce the same vote back and forth indefinitely.
         if let Some(broadcast_tx) = &context.broadcast_tx {
-            let relay = NetworkMessage::TimeVotePrepare {
-                block_hash,
-                voter_id: voter_id.clone(),
-                signature: signature.clone(),
+            let mut relay_key = block_hash.to_vec();
+            relay_key.extend_from_slice(voter_id.as_bytes());
+            relay_key.push(b'P');
+            let already_relayed = if let Some(ref seen) = context.seen_votes {
+                !seen.check_and_insert(&relay_key).await
+            } else {
+                false
             };
-            let _ = broadcast_tx.send(relay);
+            if !already_relayed {
+                let relay = NetworkMessage::TimeVotePrepare {
+                    block_hash,
+                    voter_id: voter_id.clone(),
+                    signature: signature.clone(),
+                };
+                let _ = broadcast_tx.send(relay);
+            }
         }
 
         // Check if prepare consensus reached (>50% majority timevote)
@@ -2267,13 +2293,24 @@ impl MessageHandler {
         );
 
         // Gossip the precommit vote to all peers for the same reason as prepare votes.
+        // Same dedup key pattern: (block_hash || voter_id || 'C').
         if let Some(broadcast_tx) = &context.broadcast_tx {
-            let relay = NetworkMessage::TimeVotePrecommit {
-                block_hash,
-                voter_id: voter_id.clone(),
-                signature: signature.clone(),
+            let mut relay_key = block_hash.to_vec();
+            relay_key.extend_from_slice(voter_id.as_bytes());
+            relay_key.push(b'C');
+            let already_relayed = if let Some(ref seen) = context.seen_votes {
+                !seen.check_and_insert(&relay_key).await
+            } else {
+                false
             };
-            let _ = broadcast_tx.send(relay);
+            if !already_relayed {
+                let relay = NetworkMessage::TimeVotePrecommit {
+                    block_hash,
+                    voter_id: voter_id.clone(),
+                    signature: signature.clone(),
+                };
+                let _ = broadcast_tx.send(relay);
+            }
         }
 
         // Check if precommit consensus reached (>50% majority timevote)

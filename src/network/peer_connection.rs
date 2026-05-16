@@ -249,10 +249,6 @@ pub struct PeerConnection {
 
     /// Consecutive excess-ping count for AV27 rate-limit detection
     ping_excess_streak: u32,
-
-    /// Per-message-type rate-limit drop counters for log suppression.
-    /// key = rate_limit_key() bucket (e.g. "vote"), value = (drops_since_last_log, last_log_time)
-    rl_drop_counts: HashMap<String, (u32, std::time::Instant)>,
 }
 
 /// Configuration for peer connection message loop
@@ -526,7 +522,6 @@ impl PeerConnection {
             network_type,
             peer_tx_lock_counts: HashMap::new(),
             ping_excess_streak: 0,
-            rl_drop_counts: HashMap::new(),
         })
     }
 
@@ -561,7 +556,6 @@ impl PeerConnection {
             network_type,
             peer_tx_lock_counts: HashMap::new(),
             ping_excess_streak: 0,
-            rl_drop_counts: HashMap::new(),
         })
     }
 
@@ -894,76 +888,17 @@ impl PeerConnection {
             }
         }
 
-        // Apply per-connection rate limiting on the outbound path — mirrors the
-        // inbound check_rate_limit! macro in server.rs so both paths are consistent.
+        // Apply per-connection rate limiting — mirrors the inbound check_rate_limit! macro.
         if let Some(ref rl) = config.rate_limiter {
             let mut limiter = rl.write().await;
             if !limiter.check(rate_limit_key(&message), &self.peer_ip) {
-                let bucket = rate_limit_key(&message);
-                let now = std::time::Instant::now();
-                let entry = self
-                    .rl_drop_counts
-                    .entry(bucket.to_string())
-                    .or_insert((0, now));
-                let (drop_count, last_log) = entry;
-
-                // Log only on first drop in each 60s window, with suppressed-count on repeat
-                let log_now = *drop_count == 0 || now.duration_since(*last_log).as_secs() >= 60;
-                if log_now {
-                    if *drop_count > 0 {
-                        tracing::warn!(
-                            "⚠️ [{:?}] Rate limit exceeded for {} from {} ({} msgs suppressed in last 60s)",
-                            self.direction, bucket, self.peer_ip, drop_count
-                        );
-                    } else {
-                        tracing::warn!(
-                            "⚠️ [{:?}] Rate limit exceeded for {} from {}",
-                            self.direction,
-                            bucket,
-                            self.peer_ip
-                        );
-                    }
-                    *last_log = now;
-                }
-                *drop_count += 1;
-
-                // Escalating violation recording for abuse-prone message types.
-                // Sync-safe bursts (block sync, peer discovery, liveness) never score violations.
-                let is_sync_safe = matches!(
-                    bucket,
-                    "get_blocks" | "block" | "get_peers" | "ping" | "pong" | "genesis_request"
+                tracing::warn!(
+                    "⚠️ [{:?}] Rate limit exceeded for {} from {}",
+                    self.direction,
+                    rate_limit_key(&message),
+                    self.peer_ip
                 );
-                if !is_sync_safe && !self.is_whitelisted {
-                    if let Some(ref banlist) = config.banlist {
-                        let peer_ip: std::net::IpAddr = self
-                            .peer_ip
-                            .parse()
-                            .unwrap_or_else(|_| "0.0.0.0".parse().unwrap());
-                        let count = *drop_count;
-                        if count == 10 {
-                            let mut bl = banlist.write().await;
-                            bl.record_severe_violation(
-                                peer_ip,
-                                &format!("Mass flood: {} ({}+ msgs dropped)", bucket, count),
-                            );
-                        } else if count == 5 {
-                            let mut bl = banlist.write().await;
-                            bl.record_violation(
-                                peer_ip,
-                                &format!(
-                                    "Sustained rate-limit flood: {} ({} msgs dropped)",
-                                    bucket, count
-                                ),
-                            );
-                        }
-                    }
-                }
                 return Ok(());
-            }
-            // Message passed rate limit — reset drop counter for this bucket
-            let bucket = rate_limit_key(&message);
-            if let Some(entry) = self.rl_drop_counts.get_mut(bucket) {
-                entry.0 = 0;
             }
         }
 
