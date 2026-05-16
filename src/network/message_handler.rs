@@ -396,6 +396,7 @@ impl MessageContext {
         // Fetch WebSocket tx event sender from peer registry
         let tx_event_sender = peer_registry.get_tx_event_sender().await;
         let seen_votes = Arc::clone(&peer_registry.seen_votes);
+        let seen_tx_finalized = Arc::clone(&peer_registry.seen_tx_finalized);
 
         Self {
             blockchain,
@@ -408,7 +409,7 @@ impl MessageContext {
             peer_manager: None,
             seen_blocks: None,
             seen_transactions: None,
-            seen_tx_finalized: None,
+            seen_tx_finalized: Some(seen_tx_finalized),
             seen_utxo_locks: None,
             seen_votes: Some(seen_votes),
             node_masternode_address,
@@ -3431,20 +3432,14 @@ impl MessageHandler {
             None => return Ok(None),
         };
 
-        // Already finalized — gossip but don't re-process
+        // Already finalized — skip silently; the seen_tx_finalized dedup filter ensures
+        // we already gossiped this txid exactly once, so re-gossiping here would
+        // create an O(N²) broadcast storm identical to the vote relay loop (AV-relay-loop).
         if consensus.tx_pool.is_finalized(&txid) {
             tracing::debug!(
-                "📪 TX {} already in finalized pool, gossiping",
+                "📪 TX {} already in finalized pool, skipping re-gossip",
                 hex::encode(txid)
             );
-            if let Some(ref broadcast_tx) = context.broadcast_tx {
-                let _ = broadcast_tx.send(
-                    crate::network::message::NetworkMessage::TransactionFinalized {
-                        txid,
-                        tx: tx.clone(),
-                    },
-                );
-            }
             return Ok(None);
         }
 

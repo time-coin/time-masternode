@@ -119,6 +119,10 @@ pub struct PeerConnectionRegistry {
     // Without this, two peers bouncing the same vote message back and forth creates an
     // O(N²) relay loop that saturates the rate limiter (AV-relay-loop).
     pub seen_votes: Arc<crate::network::dedup_filter::DeduplicationFilter>,
+    // Node-wide dedup filter for TransactionFinalized relay.  Each unique txid is gossiped
+    // exactly once per rotation window regardless of how many peers send it.
+    // Without this, the already-finalized re-gossip path creates the same O(N²) storm.
+    pub seen_tx_finalized: Arc<crate::network::dedup_filter::DeduplicationFilter>,
 }
 
 fn extract_ip(addr: &str) -> &str {
@@ -163,6 +167,9 @@ impl PeerConnectionRegistry {
             recent_chain_tip_cache: Arc::new(RwLock::new(HashMap::new())),
             seen_votes: Arc::new(crate::network::dedup_filter::DeduplicationFilter::new(
                 std::time::Duration::from_secs(300), // 5-min rotation matches one block slot
+            )),
+            seen_tx_finalized: Arc::new(crate::network::dedup_filter::DeduplicationFilter::new(
+                std::time::Duration::from_secs(300), // same 5-min window as votes
             )),
         }
     }
