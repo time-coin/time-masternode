@@ -2158,7 +2158,7 @@ impl MessageHandler {
             relay_key.extend_from_slice(voter_id.as_bytes());
             relay_key.push(b'P');
             let already_relayed = if let Some(ref seen) = context.seen_votes {
-                !seen.check_and_insert(&relay_key).await
+                seen.check_and_insert(&relay_key).await
             } else {
                 false
             };
@@ -2300,7 +2300,7 @@ impl MessageHandler {
             relay_key.extend_from_slice(voter_id.as_bytes());
             relay_key.push(b'C');
             let already_relayed = if let Some(ref seen) = context.seen_votes {
-                !seen.check_and_insert(&relay_key).await
+                seen.check_and_insert(&relay_key).await
             } else {
                 false
             };
