@@ -1794,20 +1794,11 @@ impl ConsensusEngine {
             let (received_at, finalized_at) = entry.value_mut();
             *finalized_at = Some(now);
 
-            // Calculate finality time in milliseconds
-            let finality_ms = now.duration_since(*received_at).as_secs_f64() * 1000.0;
-
-            // Update rolling average (keep last 20 measurements)
-            let mut avg = self.avg_finality_ms.write();
-            avg.push(finality_ms);
-            if avg.len() > 20 {
-                avg.remove(0);
-            }
-
+            let processing_ms = now.duration_since(*received_at).as_secs_f64() * 1000.0;
             tracing::debug!(
-                "📊 Block {} finalized in {:.2}ms",
+                "📊 Block {} processed in {:.2}ms",
                 hex::encode(block_hash),
-                finality_ms
+                processing_ms
             );
         }
     }
@@ -3992,8 +3983,25 @@ impl ConsensusEngine {
 
     /// Transition transaction to Finalized state (§8)
     pub fn transition_to_finalized(&self, txid: Hash256, vfp_weight: u64) {
+        let finalized_at_ms = chrono::Utc::now().timestamp_millis();
+
+        // Measure TX finality: voting start → finalized.
+        // Only record for the direct Voting → Finalized path; fallback-resolved
+        // TXs are rare and would skew the average high, so they are excluded.
+        if let Some(entry) = self.timevote.tx_status.get(&txid) {
+            if let TransactionStatus::Voting { started_at, .. } = entry.value() {
+                let finality_ms = (finalized_at_ms - started_at).max(0) as f64;
+                tracing::debug!("⚡ TX {} finalized in {:.0}ms", hex::encode(txid), finality_ms);
+                let mut avg = self.avg_finality_ms.write();
+                avg.push(finality_ms);
+                if avg.len() > 50 {
+                    avg.remove(0);
+                }
+            }
+        }
+
         let status = TransactionStatus::Finalized {
-            finalized_at: chrono::Utc::now().timestamp_millis(),
+            finalized_at: finalized_at_ms,
             vfp_weight,
         };
         self.set_tx_status(txid, status);
