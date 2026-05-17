@@ -5678,7 +5678,40 @@ impl Blockchain {
             })
     }
 
-    /// Get block by height  
+    /// Evict confirmed-pool entries that are already committed to the chain.
+    ///
+    /// After a daemon restart the persisted mempool is reloaded unconditionally.
+    /// Transactions that landed in blocks before the restart re-appear as
+    /// "finalized" pool entries because clear_finalized_txs only runs during
+    /// block production, not on startup.  This pass checks every confirmed TX
+    /// against tx_index and removes the ones that are already archived.
+    pub fn evict_archived_from_pool(&self) -> usize {
+        let tx_index = match &self.tx_index {
+            Some(idx) => idx.clone(),
+            None => return 0, // no index yet — skip; the already-archived guard in produce_block_at_height will catch them
+        };
+        let archived: Vec<[u8; 32]> = self
+            .consensus
+            .tx_pool
+            .get_finalized_transactions_with_fees()
+            .into_iter()
+            .filter_map(|(tx, _)| {
+                let txid = tx.txid();
+                if tx_index.get_location(&txid).is_some() {
+                    Some(txid)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let count = archived.len();
+        if count > 0 {
+            self.consensus.clear_finalized_txs(&archived);
+        }
+        count
+    }
+
+    /// Get block by height
     pub async fn get_block_by_height(&self, height: u64) -> Result<Block, String> {
         self.get_block(height)
     }

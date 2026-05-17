@@ -1278,6 +1278,19 @@ async fn main() {
         );
     }
 
+    // Remove confirmed-pool entries whose TXIDs are already committed to the
+    // chain.  These are ghost entries reloaded from the persisted mempool after
+    // a restart — they were cleared when the block was originally processed but
+    // the on-disk mempool snapshot predates that clear.
+    let archived_evicted = blockchain.evict_archived_from_pool();
+    if archived_evicted > 0 {
+        tracing::warn!(
+            "🧹 Startup: evicted {} already-archived TX(s) from finalized pool \
+             (ghost entries from persisted mempool)",
+            archived_evicted
+        );
+    }
+
     // Verify chain height integrity on startup (fix inconsistencies from crashes)
     tracing::info!("🔍 Verifying chain height integrity...");
     match blockchain.verify_and_fix_chain_height() {
