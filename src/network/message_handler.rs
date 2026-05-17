@@ -8151,6 +8151,14 @@ impl MessageHandler {
                 continue; // Skip coinbase and reward distribution (validated separately)
             }
 
+            // TXs already in our finalized pool were validated by TimeVote consensus
+            // (67% stake threshold — stricter than the block vote threshold). Their
+            // input UTXOs are tombstoned (removed from sled) so validate_transaction
+            // would fail with "UTXO not found". Skip re-validation: we already agreed.
+            if consensus.tx_pool.is_finalized(&tx.txid()) {
+                continue;
+            }
+
             // Validate transaction structure and signatures
             if let Err(e) = consensus.validate_transaction(tx).await {
                 return Err(format!("Invalid transaction at index {}: {}", idx, e));

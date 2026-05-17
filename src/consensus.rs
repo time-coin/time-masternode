@@ -2638,7 +2638,18 @@ impl ConsensusEngine {
                     return Err(format!("UTXO not unspent: {}", state));
                 }
                 None => {
-                    return Err("UTXO not found".to_string());
+                    // Not in DashMap and not tombstoned. Unspent UTXOs on nodes that
+                    // never explicitly locked this input only exist in sled — check there
+                    // before declaring it missing.
+                    if self
+                        .utxo_manager
+                        .get_utxo(&input.previous_output)
+                        .await
+                        .is_err()
+                    {
+                        return Err("UTXO not found".to_string());
+                    }
+                    all_inputs_finalized = false;
                 }
             }
         }
