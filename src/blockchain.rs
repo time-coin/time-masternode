@@ -3827,22 +3827,22 @@ impl Blockchain {
                 continue;
             }
 
-            // Replay-protection version check (AV-REPLAY): from block 1000 onward all
-            // value-transfer transactions (those with inputs) must use version >= 2,
-            // i.e. signed with CHAIN_ID prepended to the signing message.
-            // Special/coinbase transactions (no inputs) are exempt — they carry no
-            // user signature and cannot be replayed cross-chain.
+            // Replay-protection version check (AV-REPLAY): new v1 transactions are
+            // blocked at pool entry (process_transaction / handle_transaction_finalized),
+            // so any v1 TX reaching here was finalized before the v2 wallet fix shipped.
+            // These legacy TXs carry valid v1 signatures; validators verify them in v1
+            // format (no CHAIN_ID prefix), so they are safe to include.  The process_transaction
+            // gate prevents new v1 TXs from reaching this point going forward.
             if next_height >= crate::constants::fork_heights::REPLAY_PROTECTION_ACTIVATION_HEIGHT
                 && !tx.inputs.is_empty()
                 && tx.version < 2
             {
-                tracing::warn!(
-                    "🗑️ Block {}: Evicting v1 TX {} — replay-protection requires version >= 2 at this height",
-                    next_height, hex::encode(txid)
+                tracing::info!(
+                    "📜 Block {}: including legacy v1 TX {} (finalized before v2 wallet fix; v1 sig valid)",
+                    next_height,
+                    hex::encode(txid)
                 );
-                evict_txids.push(txid);
-                ds_invalid_count += 1;
-                continue;
+                // Fall through — do not evict; validators accept v1 sigs in v1-format verification.
             }
 
             // Validate input UTXOs exist and are in a spent state (SpentFinalized/SpentPending/Locked).

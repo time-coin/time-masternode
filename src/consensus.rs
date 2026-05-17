@@ -3081,6 +3081,17 @@ impl ConsensusEngine {
                 return Err("Transaction has no outputs".to_string());
             }
         }
+
+        // Reject new v1 transactions: the wallet now generates v2 (CHAIN_ID-prefixed sigs).
+        // v1 TXs that were finalized before this fix are handled by produce_block_at_height
+        // via a legacy exception; new ones must not enter the pool.
+        if !tx.inputs.is_empty() && tx.version < 2 {
+            return Err(format!(
+                "Transaction {} rejected: version 1 is no longer accepted (upgrade your wallet to generate v2 transactions)",
+                hex::encode(txid)
+            ));
+        }
+
         // UTXOs are already in Locked state - DO NOT transition to SpentPending here
         // That transition happens when voting actually starts (after broadcast)
 

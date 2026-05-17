@@ -3427,6 +3427,17 @@ impl MessageHandler {
             }
         }
 
+        // Block new v1 value-transfer TXs from entering the finalized pool via gossip.
+        // Legacy v1 TXs already in the pool are handled by produce_block_at_height.
+        if !tx.inputs.is_empty() && tx.version < 2 {
+            tracing::debug!(
+                "🚫 TransactionFinalized {} from {} dropped — v1 TXs no longer accepted (upgrade wallet)",
+                hex::encode(txid),
+                self.peer_ip
+            );
+            return Ok(None);
+        }
+
         let consensus = match &context.consensus {
             Some(c) => c,
             None => return Ok(None),
@@ -3658,6 +3669,16 @@ impl MessageHandler {
                 let txid = entry.tx.txid();
 
                 if consensus.tx_pool.has_transaction(&txid) {
+                    continue;
+                }
+
+                // Block new v1 value-transfer TXs from entering the pool via mempool sync.
+                if !entry.tx.inputs.is_empty() && entry.tx.version < 2 {
+                    tracing::debug!(
+                        "🚫 MempoolSync TX {} from {} dropped — v1 TXs no longer accepted",
+                        hex::encode(txid),
+                        self.peer_ip
+                    );
                     continue;
                 }
 
