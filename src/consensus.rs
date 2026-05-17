@@ -2595,7 +2595,13 @@ impl ConsensusEngine {
             }
         }
 
-        // 2. Check inputs exist and are unspent (or locked/finalized by this tx)
+        // 2. Check inputs exist and are unspent (or locked/finalized by this tx).
+        // Track whether every input is already finalized so we can skip fee/signature
+        // re-validation for TXs that were already processed by TimeVote consensus.
+        // After finalization, input UTXOs are tombstoned (removed from sled) so the
+        // normal get_utxo path would return "UTXO not found" — causing false rejections
+        // of valid block proposals containing finalized transactions.
+        let mut all_inputs_finalized = !tx.inputs.is_empty();
         for input in &tx.inputs {
             // Check if UTXO is locked as masternode collateral (separate from UTXO state)
             if self
@@ -2608,17 +2614,25 @@ impl ConsensusEngine {
                 ));
             }
 
+            let is_tombstoned = self.utxo_manager.is_tombstoned(&input.previous_output);
             match self.utxo_manager.get_state(&input.previous_output) {
-                Some(UTXOState::Unspent) => {}
+                Some(UTXOState::Unspent) => {
+                    all_inputs_finalized = false;
+                }
                 Some(UTXOState::Locked { txid, .. }) if txid == our_txid => {
                     // OK - locked by this transaction
+                    all_inputs_finalized = false;
                 }
                 Some(UTXOState::SpentPending { txid, .. }) if txid == our_txid => {
                     // OK - voting in progress for this transaction
+                    all_inputs_finalized = false;
                 }
                 Some(UTXOState::SpentFinalized { txid, .. }) if txid == our_txid => {
-                    // OK - already finalized by this transaction (e.g., receiving a block
-                    // containing a TX we already finalized locally via TimeVote)
+                    // OK - already finalized by this transaction; UTXO is tombstoned
+                }
+                None if is_tombstoned => {
+                    // After restart, DashMap is empty but tombstone survives in sled.
+                    // Tombstone = UTXO was finalized and removed; valid for block inclusion.
                 }
                 Some(state) => {
                     return Err(format!("UTXO not unspent: {}", state));
@@ -2627,6 +2641,13 @@ impl ConsensusEngine {
                     return Err("UTXO not found".to_string());
                 }
             }
+        }
+
+        // All inputs are tombstoned/finalized — the TX was fully validated during
+        // TimeVote finalization (fee, balance, signatures). Skip re-validation since
+        // the UTXOs are no longer in sled and get_utxo would return errors.
+        if all_inputs_finalized {
+            return Ok(0);
         }
 
         // 3. Check input values >= output values (no inflation)

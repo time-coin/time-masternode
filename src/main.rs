@@ -6080,15 +6080,12 @@ fn build_masternode_reg_tx(
     let owner_pubkey = wallet_key.verifying_key();
     let owner_pubkey_hex = hex::encode(owner_pubkey.as_bytes());
 
-    let message = {
-        use sha2::{Digest, Sha256};
-        let msg = format!(
-            "MN_REG:{}:{}:{}:{}",
-            outpoint_str, mn.address, p2p_port, mn.wallet_address
-        );
-        Sha256::digest(msg.as_bytes()).to_vec()
-    };
-    let signature = wallet_key.sign(&message);
+    let node_address = format!("{}:{}", mn.address, p2p_port);
+    let msg = format!(
+        "MNREG:{}:{}:{}:{}",
+        node_address, mn.wallet_address, owner_pubkey_hex, outpoint_str
+    );
+    let signature = wallet_key.sign(msg.as_bytes());
     let signature_hex = hex::encode(signature.to_bytes());
 
     Some(types::Transaction {
@@ -6098,7 +6095,7 @@ fn build_masternode_reg_tx(
         lock_time: 0,
         timestamp: chrono::Utc::now().timestamp(),
         special_data: Some(types::SpecialTransactionData::MasternodeRegistration {
-            node_address: format!("{}:{}", mn.address, p2p_port),
+            node_address,
             wallet_address: mn.wallet_address.clone(),
             reward_address: String::new(),
             collateral_outpoint: outpoint_str,
