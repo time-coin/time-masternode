@@ -180,6 +180,7 @@ impl RpcHandler {
 
         let result = match request.method.as_str() {
             "getblockchaininfo" => self.get_blockchain_info().await,
+            "getsupply" => self.get_supply(&params_array).await,
             "getblockcount" => self.get_block_count().await,
             "getblock" => self.get_block(&params_array).await,
             "getbestblockhash" => self.get_best_block_hash().await,
@@ -363,6 +364,48 @@ impl RpcHandler {
             "emission_satoshis_per_block": self.blockchain.get_current_block_reward(),
             "emission_time_per_block": self.blockchain.get_current_block_reward() as f64 / 100_000_000.0,
             "storage_version": crate::constants::STORAGE_VERSION
+        }))
+    }
+
+    async fn get_supply(&self, params: &[Value]) -> Result<Value, RpcError> {
+        // Optional: dormant_years (default 1). Coins unmoved for this long are dormant.
+        let dormant_years = params
+            .first()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0)
+            .max(0.1);
+
+        let height = self.blockchain.get_height();
+        // 1 year ≈ 365.25 days × 144 blocks/day (600s blocks)
+        let dormant_after_blocks = (dormant_years * 365.25 * 144.0) as u64;
+
+        let stats = self
+            .utxo_manager
+            .get_supply_stats(height, dormant_after_blocks)
+            .await;
+
+        // total_minted: fixed 100 TIME/block, no halvening
+        let block_reward = self.blockchain.get_current_block_reward();
+        let total_minted_satoshis = height.saturating_mul(block_reward);
+
+        let sat = crate::constants::blockchain::SATOSHIS_PER_TIME as f64;
+        Ok(json!({
+            "height": height,
+            "dormant_threshold_years": dormant_years,
+            "dormant_threshold_blocks": dormant_after_blocks,
+            "total_minted": total_minted_satoshis as f64 / sat,
+            "total_minted_satoshis": total_minted_satoshis,
+            "circulating": stats.circulating_satoshis as f64 / sat,
+            "circulating_satoshis": stats.circulating_satoshis,
+            "locked_collateral": stats.locked_collateral_satoshis as f64 / sat,
+            "locked_collateral_satoshis": stats.locked_collateral_satoshis,
+            "dormant": stats.dormant_satoshis as f64 / sat,
+            "dormant_satoshis": stats.dormant_satoshis,
+            "dormant_utxo_count": stats.dormant_utxo_count,
+            "adjusted_circulating": stats.adjusted_circulating_satoshis as f64 / sat,
+            "adjusted_circulating_satoshis": stats.adjusted_circulating_satoshis,
+            "unknown_age": stats.unknown_age_satoshis as f64 / sat,
+            "unknown_age_satoshis": stats.unknown_age_satoshis,
         }))
     }
 

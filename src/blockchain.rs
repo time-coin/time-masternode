@@ -6115,6 +6115,7 @@ impl Blockchain {
                     address: address.clone(),
                     masternode_key: None,
                 };
+                let op = OutPoint { txid: block_hash, vout: vout as u32 };
                 if let Err(e) = self.utxo_manager.add_utxo(utxo).await {
                     tracing::warn!(
                         "⚠️  Could not add genesis reward UTXO for {} in genesis block: {:?}",
@@ -6122,6 +6123,7 @@ impl Blockchain {
                         e
                     );
                 } else {
+                    self.utxo_manager.record_utxo_height(&op, block.header.height);
                     utxos_created += 1;
                     tracing::info!(
                         "💰 Genesis UTXO created: {} TIME → {}",
@@ -6198,7 +6200,7 @@ impl Blockchain {
                 let address = String::from_utf8_lossy(&output.script_pubkey).to_string();
 
                 let utxo = UTXO {
-                    outpoint,
+                    outpoint: outpoint.clone(),
                     value: output.value,
                     script_pubkey: output.script_pubkey.clone(),
                     address: address.clone(),
@@ -6214,6 +6216,7 @@ impl Blockchain {
                         e
                     );
                 } else {
+                    self.utxo_manager.record_utxo_height(&outpoint, block.header.height);
                     utxos_created += 1;
                 }
             }

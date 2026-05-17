@@ -164,6 +164,14 @@ enum Commands {
     #[command(next_help_heading = "Blockchain")]
     GetBlockchainInfo,
 
+    /// Get circulating supply and dormant coin statistics
+    #[command(next_help_heading = "Blockchain")]
+    GetSupply {
+        /// Coins unmoved for this many years are counted as dormant (default: 1)
+        #[arg(default_value = "1")]
+        dormant_years: f64,
+    },
+
     /// Get information about a specific block
     #[command(next_help_heading = "Blockchain")]
     GetBlock {
@@ -1331,6 +1339,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let (method, params) = match &args.command {
         Commands::GetBlockchainInfo => ("getblockchaininfo", json!([])),
+        Commands::GetSupply { dormant_years } => ("getsupply", json!([dormant_years])),
         Commands::GetBlock { height } => ("getblock", json!([height])),
         Commands::GetBlockCount => ("getblockcount", json!([])),
         Commands::GetBestBlockHash => ("getbestblockhash", json!([])),

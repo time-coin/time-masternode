@@ -58,6 +58,25 @@ pub struct UTXOStateManager {
     /// sled have been cleared.  Backed by a sled tree so the guard survives restarts.
     spent_tombstones: DashSet<OutPoint>,
     spent_db: Option<sled::Tree>,
+    /// Block height at which each Unspent UTXO was created.
+    /// Set via record_utxo_height() during block processing; not serialized over the network.
+    /// UTXOs without an entry have unknown age (pre-upgrade or pre-index).
+    pub creation_heights: DashMap<OutPoint, u64>,
+}
+
+/// Aggregated supply statistics used by the getsupply RPC.
+pub struct SupplyStats {
+    pub total_unspent_satoshis: u64,
+    pub locked_collateral_satoshis: u64,
+    /// total_unspent minus locked masternode collateral
+    pub circulating_satoshis: u64,
+    /// Unspent, non-collateral UTXOs older than the dormancy threshold
+    pub dormant_satoshis: u64,
+    pub dormant_utxo_count: usize,
+    /// circulating minus dormant
+    pub adjusted_circulating_satoshis: u64,
+    /// Unspent UTXOs with no recorded creation height (created before height tracking)
+    pub unknown_age_satoshis: u64,
 }
 
 impl Default for UTXOStateManager {
@@ -78,6 +97,7 @@ impl UTXOStateManager {
             pubkey_cache: DashMap::new(),
             spent_tombstones: DashSet::new(),
             spent_db: None,
+            creation_heights: DashMap::new(),
         }
     }
 
@@ -92,6 +112,7 @@ impl UTXOStateManager {
             pubkey_cache: DashMap::new(),
             spent_tombstones: DashSet::new(),
             spent_db: None,
+            creation_heights: DashMap::new(),
         }
     }
 
@@ -724,6 +745,70 @@ impl UTXOStateManager {
     /// Get all UTXOs (for diagnostics)
     pub async fn list_all_utxos(&self) -> Vec<UTXO> {
         self.storage.list_utxos().await
+    }
+
+    /// Record the block height at which a UTXO was created.
+    /// Call this immediately after a successful add_utxo() in block processing.
+    pub fn record_utxo_height(&self, outpoint: &OutPoint, height: u64) {
+        self.creation_heights.insert(outpoint.clone(), height);
+    }
+
+    /// Compute supply statistics for the getsupply RPC.
+    /// `dormant_after_blocks`: UTXOs older than this many blocks are counted as dormant.
+    pub async fn get_supply_stats(
+        &self,
+        current_height: u64,
+        dormant_after_blocks: u64,
+    ) -> SupplyStats {
+        let utxos = self.storage.list_utxos().await;
+        let mut total_unspent = 0u64;
+        let mut locked_collateral = 0u64;
+        let mut dormant = 0u64;
+        let mut dormant_count = 0usize;
+        let mut unknown_age = 0u64;
+
+        for utxo in &utxos {
+            let is_unspent = self
+                .utxo_states
+                .get(&utxo.outpoint)
+                .map(|s| matches!(*s, UTXOState::Unspent))
+                .unwrap_or(false);
+            if !is_unspent {
+                continue;
+            }
+
+            total_unspent += utxo.value;
+
+            if self.locked_collaterals.contains_key(&utxo.outpoint) {
+                locked_collateral += utxo.value;
+                continue; // collateral is intentionally immobile — not dormant
+            }
+
+            match self.creation_heights.get(&utxo.outpoint) {
+                Some(h) => {
+                    if current_height.saturating_sub(*h) > dormant_after_blocks {
+                        dormant += utxo.value;
+                        dormant_count += 1;
+                    }
+                }
+                None => {
+                    unknown_age += utxo.value;
+                }
+            }
+        }
+
+        let circulating = total_unspent.saturating_sub(locked_collateral);
+        let adjusted_circulating = circulating.saturating_sub(dormant);
+
+        SupplyStats {
+            total_unspent_satoshis: total_unspent,
+            locked_collateral_satoshis: locked_collateral,
+            circulating_satoshis: circulating,
+            dormant_satoshis: dormant,
+            dormant_utxo_count: dormant_count,
+            adjusted_circulating_satoshis: adjusted_circulating,
+            unknown_age_satoshis: unknown_age,
+        }
     }
 
     /// Get UTXOs for a specific address using the address index (O(n) in address UTXOs, not all UTXOs)
