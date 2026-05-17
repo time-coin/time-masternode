@@ -483,6 +483,65 @@ impl MasternodeRegistry {
         }
     }
 
+    /// Evict paid-tier masternodes that have been offline for longer than `max_inactive_secs`.
+    /// The collateral UTXO is not spent — the node re-registers normally when it returns.
+    pub async fn cleanup_inactive_paid_nodes(&self, max_inactive_secs: u64) -> usize {
+        let now = Self::now();
+        let local_addr = self.local_masternode_address.read().await.clone();
+        let mut to_evict: Vec<(String, u64)> = Vec::new();
+
+        {
+            let nodes = self.masternodes.read().await;
+            for (address, info) in nodes.iter() {
+                if let Some(ref local) = local_addr {
+                    if address == local {
+                        continue;
+                    }
+                }
+                if matches!(info.masternode.tier, crate::types::MasternodeTier::Free) {
+                    continue;
+                }
+                if !info.is_active
+                    && info.last_seen_at > 0
+                    && now.saturating_sub(info.last_seen_at) > max_inactive_secs
+                {
+                    to_evict.push((address.clone(), info.last_seen_at));
+                }
+            }
+        }
+
+        let count = to_evict.len();
+        if count == 0 {
+            return 0;
+        }
+
+        let utxo_mgr = self.utxo_manager.read().await.clone();
+        for (address, last_seen_at) in to_evict {
+            let inactive_days = now.saturating_sub(last_seen_at) / 86400;
+            tracing::warn!(
+                "🗑️ Evicting paid-tier masternode {} — offline for {} day(s) (threshold {}d)",
+                address,
+                inactive_days,
+                max_inactive_secs / 86400
+            );
+            match self.unregister(&address).await {
+                Ok(Some(info)) => {
+                    if let (Some(ref utxo_manager), Some(ref outpoint)) =
+                        (&utxo_mgr, &info.masternode.collateral_outpoint)
+                    {
+                        let _ = utxo_manager.unlock_collateral(outpoint);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!("Failed to evict inactive masternode {}: {:?}", address, e);
+                }
+            }
+        }
+
+        count
+    }
+
     /// Record that a V4-proof eviction just occurred for `outpoint_key`
     /// (formatted as `"<txid_hex>:<vout>"`).
     ///
