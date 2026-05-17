@@ -1200,6 +1200,20 @@ async fn main() {
             stuck_evicted
         );
     }
+    // Fix crash window: if the daemon died between finalize_transaction and
+    // mark_timevote_finalized, input UTXOs are still in sled (loaded as Unspent
+    // by initialize_states).  Tombstone them now so produce_block_at_height
+    // treats these confirmed TXs as legitimately spent instead of evicting them.
+    let tombstoned_inputs = consensus_engine
+        .tombstone_confirmed_inputs_on_startup()
+        .await;
+    if tombstoned_inputs > 0 {
+        tracing::warn!(
+            "🪦 Startup: tombstoned {} input UTXO(s) for confirmed TXs with stale sled entries \
+             (crash-window recovery)",
+            tombstoned_inputs
+        );
+    }
 
     let consensus_engine = Arc::new(consensus_engine);
     tracing::info!("✓ Consensus engine initialized with AI validation and TimeLock voting");

@@ -3670,6 +3670,50 @@ impl ConsensusEngine {
         evicted
     }
 
+    /// Tombstone input UTXOs for confirmed-pool TXs whose inputs are still in sled.
+    ///
+    /// This fixes the crash window between `finalize_transaction` and
+    /// `mark_timevote_finalized`: if the daemon crashed in that gap, the TX
+    /// ends up in the confirmed pool (sled-persisted) but its inputs were never
+    /// removed from sled or tombstoned.  After restart, `initialize_states`
+    /// loads those inputs as `Unspent`, and `produce_block_at_height` evicts
+    /// the TX every block because inputs are in the wrong state.
+    ///
+    /// Must be called AFTER `evict_finalized_with_missing_inputs` so that the
+    /// pool only contains TXs with all inputs accounted for.
+    ///
+    /// Returns the number of input UTXOs tombstoned.
+    pub async fn tombstone_confirmed_inputs_on_startup(&self) -> usize {
+        let confirmed = self.tx_pool.get_finalized_transactions_with_fees();
+        if confirmed.is_empty() {
+            return 0;
+        }
+        let mut tombstoned = 0usize;
+        for (tx, _) in confirmed {
+            let txid = tx.txid();
+            for input in &tx.inputs {
+                if self.utxo_manager.is_tombstoned(&input.previous_output) {
+                    continue; // already properly tombstoned
+                }
+                // Input is still in sled — tombstone it now so block assembly
+                // sees it as legitimately spent rather than erroneously evicting
+                // this finalized TX.
+                if self
+                    .utxo_manager
+                    .get_utxo(&input.previous_output)
+                    .await
+                    .is_ok()
+                {
+                    self.utxo_manager
+                        .mark_timevote_finalized(&input.previous_output, txid)
+                        .await;
+                    tombstoned += 1;
+                }
+            }
+        }
+        tombstoned
+    }
+
     /// Apply the hardcoded phantom-finalized banlist (`crate::purge_list`).
     ///
     /// For each banned txid:

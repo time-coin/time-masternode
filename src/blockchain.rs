@@ -4078,10 +4078,20 @@ impl Blockchain {
                 );
             }
         } else {
-            tracing::debug!(
-                "🔍 Block {}: No finalized transactions to include",
-                next_height
-            );
+            let pool_size = self.consensus.tx_pool.finalized_count();
+            if pool_size > 0 {
+                tracing::warn!(
+                    "⚠️  Block {}: No finalized transactions included, but pool has {} entry(ies) — \
+                     all were evicted (check UTXO state warnings above)",
+                    next_height,
+                    pool_size,
+                );
+            } else {
+                tracing::debug!(
+                    "🔍 Block {}: No finalized transactions to include",
+                    next_height
+                );
+            }
         }
 
         // Calculate rewards: base_reward + fees_from_finalized_txs_in_this_block
