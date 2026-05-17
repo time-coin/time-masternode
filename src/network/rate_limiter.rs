@@ -49,6 +49,9 @@ impl RateLimiter {
                 ("ping".to_string(), (Duration::from_secs(10), 6)),         // 6 pings/10sec
                 ("pong".to_string(), (Duration::from_secs(10), 6)), // 6 pongs/10sec (replies to our pings)
                 ("general".to_string(), (Duration::from_secs(1), 100)), // 100 general msgs/sec
+                // Bulk sync responses (BlocksResponse, UTXO chunks) arrive in bursts by design.
+                // 500/s gives plenty of headroom without removing the DoS ceiling.
+                ("sync".to_string(), (Duration::from_secs(1), 500)),
             ]
             .into(),
             counters: HashMap::new(),

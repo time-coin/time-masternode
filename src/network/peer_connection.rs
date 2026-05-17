@@ -364,6 +364,14 @@ fn rate_limit_key(msg: &NetworkMessage) -> &'static str {
         | NetworkMessage::FinalityVoteRequest { .. }
         | NetworkMessage::FinalityVoteResponse { .. }
         | NetworkMessage::FinalityVoteBroadcast { .. } => "vote",
+        // Bulk sync responses arrive in bursts by design; give them a dedicated
+        // high-limit bucket so they don't saturate the 100/s "general" limit.
+        NetworkMessage::BlocksResponse(_)
+        | NetworkMessage::BlockRangeResponse(_)
+        | NetworkMessage::UTXOSetResponse(_)
+        | NetworkMessage::UTXOSetChunk { .. }
+        | NetworkMessage::UtxoReconciliationResponse { .. }
+        | NetworkMessage::UtxoReconciliationChunk { .. } => "sync",
         _ => "general",
     }
 }

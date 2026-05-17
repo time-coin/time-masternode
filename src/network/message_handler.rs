@@ -1515,6 +1515,7 @@ impl MessageHandler {
                         utxos: chunk.clone(),
                     };
                     let _ = context.peer_registry.send_to_peer(&self.peer_ip, msg).await;
+                    tokio::task::yield_now().await;
                 }
 
                 let last_chunk = chunks.into_iter().last().unwrap_or_default();
@@ -6027,6 +6028,8 @@ impl MessageHandler {
 
         // Stream all chunks except the last directly; return the last one as the
         // normal handler response so the caller's send path is used for it.
+        // yield_now() between chunks lets other tasks run and prevents the entire
+        // burst from landing in the same tokio scheduler tick at the receiver.
         for (i, chunk) in chunks.iter().enumerate().take((total - 1) as usize) {
             let msg = NetworkMessage::UTXOSetChunk {
                 index: i as u32,
@@ -6034,6 +6037,7 @@ impl MessageHandler {
                 utxos: chunk.clone(),
             };
             let _ = context.peer_registry.send_to_peer(&self.peer_ip, msg).await;
+            tokio::task::yield_now().await;
         }
 
         let last_chunk = chunks.into_iter().last().unwrap_or_default();
