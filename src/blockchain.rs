@@ -5884,6 +5884,14 @@ impl Blockchain {
     /// Get how many blocks deep a transaction is (1-based confirmations).
     ///
     /// Returns `None` when the transaction has not yet been included in any block.
+    /// Returns true if this TXID is already committed to the chain.
+    /// Used to drop gossip re-broadcasts of transactions that landed in a block.
+    pub fn is_tx_archived(&self, txid: &[u8; 32]) -> bool {
+        self.tx_index
+            .as_ref()
+            .is_some_and(|idx| idx.get_location(txid).is_some())
+    }
+
     pub async fn get_transaction_confirmations(&self, txid: &[u8; 32]) -> Option<u64> {
         if let Some(ref tx_index) = self.tx_index {
             if let Some(location) = tx_index.get_location(txid) {

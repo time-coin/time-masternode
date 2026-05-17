@@ -3388,6 +3388,18 @@ impl MessageHandler {
             }
         }
 
+        // Drop TXs already committed to the chain — re-gossip of archived TXs must not
+        // re-populate the confirmed pool, which would cause them to persist indefinitely
+        // across restarts (the persisted mempool reloads them on every startup).
+        if context.blockchain.is_tx_archived(&txid) {
+            tracing::debug!(
+                "⛓️ TransactionFinalized {} from {} dropped — already in chain",
+                hex::encode(txid),
+                self.peer_ip
+            );
+            return Ok(None);
+        }
+
         tracing::info!(
             "✅ Transaction {} finalized (from {})",
             hex::encode(txid),
@@ -3669,6 +3681,17 @@ impl MessageHandler {
                 let txid = entry.tx.txid();
 
                 if consensus.tx_pool.has_transaction(&txid) {
+                    continue;
+                }
+
+                // Drop TXs already committed to the chain — prevents archived TXs from
+                // re-entering the pool via mempool sync on every peer connection.
+                if context.blockchain.is_tx_archived(&txid) {
+                    tracing::debug!(
+                        "⛓️ MempoolSync TX {} from {} dropped — already in chain",
+                        hex::encode(txid),
+                        self.peer_ip
+                    );
                     continue;
                 }
 
