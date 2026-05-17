@@ -3850,27 +3850,21 @@ impl MasternodeRegistry {
     }
 
     /// Update blocks_without_reward counters for all masternodes in a single lock.
-    /// For each masternode: if its effective wallet address appears in `rewarded_wallets`,
-    /// reset its counter (record reward); otherwise increment it.
+    /// Only the block leader resets to 0; every other node increments by 1.
+    /// This tracks "blocks since last time I was leader", which is the quantity
+    /// used for VRF fairness bonuses — matching what get_verifiable_reward_tracking
+    /// computes from the blockchain. Previously this reset for any pool reward
+    /// (every block for every active node), making the counter always 0.
     /// Called from add_block after a block is committed — O(n) in-memory only, no sled I/O
     /// except for the periodic persist (every 10 blocks) which uses the background writer.
-    pub async fn update_reward_counters(
-        &self,
-        block_height: u64,
-        rewarded_wallets: &std::collections::HashSet<String>,
-    ) {
+    pub async fn update_reward_counters(&self, block_height: u64, block_leader: &str) {
         let persist_now = block_height % 10 == 0;
         let mut masternodes = self.masternodes.write().await;
         for info in masternodes.values_mut() {
-            let effective_wallet = if !info.reward_address.is_empty() {
-                info.reward_address.as_str()
-            } else {
-                info.masternode.wallet_address.as_str()
-            };
-            if rewarded_wallets.contains(effective_wallet) {
+            if info.masternode.address == block_leader {
                 info.last_reward_height = block_height;
                 info.blocks_without_reward = 0;
-                // Always persist reward resets so restart recovery stays accurate
+                // Always persist leader resets so restart recovery stays accurate
                 if let Ok(data) = bincode::serialize(info) {
                     self.sled_insert_bg(
                         format!("masternode:{}", info.masternode.address).into_bytes(),

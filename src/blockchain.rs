@@ -5449,19 +5449,11 @@ impl Blockchain {
         }
 
         // Update the in-memory blocks_without_reward counters so that
-        // get_reward_tracking_from_memory() is accurate for future blocks.
-        // O(n) in-memory write; no sled I/O here.
-        {
-            let rewarded_wallets: std::collections::HashSet<String> = block
-                .masternode_rewards
-                .iter()
-                .filter(|(_, amt)| *amt > 0)
-                .map(|(w, _)| w.clone())
-                .collect();
-            self.masternode_registry
-                .update_reward_counters(block.header.height, &rewarded_wallets)
-                .await;
-        }
+        // get_reward_tracking_from_memory() is accurate for future VRF fairness bonuses.
+        // Only the block leader resets to 0; all others increment.
+        self.masternode_registry
+            .update_reward_counters(block.header.height, &block.header.leader)
+            .await;
 
         // Signal any waiters (e.g. block production loop) that a new block was added
         self.block_added_signal.notify_waiters();
