@@ -7990,10 +7990,14 @@ impl MessageHandler {
                 ));
             }
 
-            // Verify the proposer's VRF score qualifies them (sampling weight + fairness bonus)
+            // Verify the proposer's VRF score qualifies them (sampling weight + fairness bonus).
+            // Use the in-memory counter (same source as the producer) so both sides compute
+            // identical bonuses and thresholds. The blockchain-scan alternative
+            // (get_verifiable_reward_tracking) resets only on leader blocks while pool rewards
+            // reset the in-memory counter every block for all nodes, causing drift.
             let blocks_without_reward_map = context
                 .masternode_registry
-                .get_verifiable_reward_tracking(&context.blockchain)
+                .get_reward_tracking_from_memory()
                 .await;
 
             let proposer_blocks_without = blocks_without_reward_map
@@ -8044,20 +8048,21 @@ impl MessageHandler {
                 );
 
                 if !is_eligible {
-                    // Allow relaxed threshold during timeout (same exponential backoff)
-                    // Check if we've been waiting for this height
+                    // Allow relaxed threshold during timeout — same exponential backoff as
+                    // the producer (main.rs: 1u64 << leader_attempt.min(20), one attempt
+                    // per LEADER_TIMEOUT_SECS=30s). Cap timeout_attempts at 20 to match.
                     let our_height = context.blockchain.get_height();
                     let expected_height = our_height + 1;
                     if block.header.height == expected_height {
-                        // Check how long since the slot started
                         let genesis_ts = context.blockchain.genesis_timestamp();
                         let slot_time = genesis_ts + (block.header.height as i64 * 600);
                         let now = chrono::Utc::now().timestamp();
                         let elapsed = (now - slot_time).max(0) as u64;
-                        let timeout_attempts = elapsed / 30;
+                        // Cap at 20 to match producer's `leader_attempt.min(20)` cap.
+                        let timeout_attempts = (elapsed / 30).min(20);
 
                         if timeout_attempts > 0 {
-                            let multiplier = 1u64 << timeout_attempts.min(20);
+                            let multiplier = 1u64 << timeout_attempts;
                             let relaxed_weight = proposer_weight
                                 .saturating_mul(multiplier)
                                 .min(total_sampling_weight);
@@ -8068,17 +8073,17 @@ impl MessageHandler {
                             );
                             if !eligible_relaxed {
                                 return Err(format!(
-                                    "Proposer {} VRF score {} exceeds threshold (even with {}x relaxation)",
-                                    proposer, block.header.vrf_score, multiplier
+                                    "Proposer {} VRF score {} exceeds threshold (even with {}x relaxation after {}s)",
+                                    proposer, block.header.vrf_score, multiplier, elapsed
                                 ));
                             }
                             debug!(
-                                "🎲 [{}] Block {} proposer {} accepted with relaxed VRF threshold (attempt {})",
-                                self.direction, block.header.height, proposer, timeout_attempts
+                                "🎲 [{}] Block {} proposer {} accepted with relaxed VRF threshold ({}x after {}s)",
+                                self.direction, block.header.height, proposer, multiplier, elapsed
                             );
                         } else {
                             return Err(format!(
-                                "Proposer {} VRF score {} exceeds threshold (weight {}/{})",
+                                "Proposer {} VRF score {} exceeds threshold (weight {}/{}, slot just started)",
                                 proposer,
                                 block.header.vrf_score,
                                 proposer_weight,
@@ -8086,6 +8091,8 @@ impl MessageHandler {
                             ));
                         }
                     }
+                    // height != expected_height: block is for a non-tip height (sync),
+                    // VRF eligibility was already checked when it was first proposed.
                 }
             }
 

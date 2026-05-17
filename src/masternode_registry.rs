@@ -2335,7 +2335,12 @@ impl MasternodeRegistry {
         let nodes = self.masternodes.read().await;
         match nodes.get(address) {
             Some(info) => {
-                !info.consensus_suspended
+                // Require is_active so the producer's VRF-eligible set matches what the
+                // validator computes via get_vrf_eligible (which also requires is_active).
+                // Without this, inactive nodes inflate the producer's total_sampling_weight
+                // giving a different threshold denominator than the validator uses.
+                info.is_active
+                    && !info.consensus_suspended
                     && Self::is_mature_for_sortition(info, current_height, self.network)
             }
             None => true,
