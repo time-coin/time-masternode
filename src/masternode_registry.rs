@@ -456,10 +456,17 @@ impl MasternodeRegistry {
             for (addr, info) in nodes.iter() {
                 if info.masternode.tier == crate::types::MasternodeTier::Free
                     && !info.is_active
-                    && info.last_seen_at > 0
-                    && now.saturating_sub(info.last_seen_at) > max_inactive_secs
                 {
-                    to_remove.push(addr.clone());
+                    // Gossip-sourced and suspended nodes have last_seen_at == 0.
+                    // Fall back to first_seen_at so they are not exempt from cleanup.
+                    let reference = if info.last_seen_at > 0 {
+                        info.last_seen_at
+                    } else {
+                        info.first_seen_at
+                    };
+                    if reference > 0 && now.saturating_sub(reference) > max_inactive_secs {
+                        to_remove.push(addr.clone());
+                    }
                 }
             }
         }
