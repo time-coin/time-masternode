@@ -327,6 +327,9 @@ impl UTXOStateManager {
             let _ = tree.clear();
         }
 
+        // Clear creation height index — rebuilt by record_utxo_height() as blocks replay.
+        self.creation_heights.clear();
+
         tracing::info!("✅ All UTXOs cleared");
         Ok(())
     }
