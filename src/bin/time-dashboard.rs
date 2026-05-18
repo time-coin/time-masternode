@@ -20,7 +20,7 @@ use std::{
 };
 use timed::http_client::HttpClient;
 
-const DASHBOARD_VERSION: &str = "1.0.0";
+const DASHBOARD_VERSION: &str = "1.5.8";
 
 use timed::rpc::credentials::resolve_credentials;
 
@@ -341,6 +341,7 @@ struct App {
     mempool_detail: Option<usize>,
     peer_scroll: usize,
     block_scroll: usize,
+    block_cursor: usize,
     block_detail: Option<usize>,
     block_tx_scroll: usize,
     block_tx_cursor: usize,
@@ -369,6 +370,7 @@ impl App {
             mempool_detail: None,
             peer_scroll: 0,
             block_scroll: 0,
+            block_cursor: 0,
             block_detail: None,
             block_tx_scroll: 0,
             block_tx_cursor: 0,
@@ -1730,7 +1732,7 @@ fn render_blocks(f: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, blk)| {
             let idx = start + i;
-            let selected = idx == app.block_scroll;
+            let selected = idx == app.block_cursor;
             let short_hash = if blk.hash.len() > 16 {
                 format!("{}…", &blk.hash[..16])
             } else {
@@ -1774,7 +1776,7 @@ fn render_blocks(f: &mut Frame, area: Rect, app: &App) {
     .header(header)
     .block(Block::default().borders(Borders::ALL).title(format!(
         "Block Explorer ({}/{})  ↑↓ Navigate  Enter: Details",
-        start + 1,
+        app.block_cursor + 1,
         app.data.recent_blocks.len()
     )));
     f.render_widget(table, area);
@@ -2568,7 +2570,12 @@ async fn run_app<B: ratatui::backend::Backend>(
                                         }
                                     }
                                 } else {
-                                    app.block_scroll = app.block_scroll.saturating_sub(1);
+                                    if app.block_cursor > 0 {
+                                        app.block_cursor -= 1;
+                                        if app.block_cursor < app.block_scroll {
+                                            app.block_scroll = app.block_cursor;
+                                        }
+                                    }
                                 }
                             } else if app.current_tab == 5 {
                                 app.governance_scroll = app.governance_scroll.saturating_sub(1);
@@ -2625,8 +2632,13 @@ async fn run_app<B: ratatui::backend::Backend>(
                                     }
                                 } else {
                                     let max = app.data.recent_blocks.len().saturating_sub(1);
-                                    if app.block_scroll < max {
-                                        app.block_scroll += 1;
+                                    if app.block_cursor < max {
+                                        app.block_cursor += 1;
+                                        let page = 20usize;
+                                        if app.block_cursor >= app.block_scroll + page {
+                                            app.block_scroll =
+                                                app.block_cursor.saturating_sub(page - 1);
+                                        }
                                     }
                                 }
                             } else if app.current_tab == 5 {
@@ -2677,7 +2689,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                                         }
                                     }
                                 } else if !app.data.recent_blocks.is_empty() {
-                                    app.block_detail = Some(app.block_scroll);
+                                    app.block_detail = Some(app.block_cursor);
                                     app.block_tx_scroll = 0;
                                     app.block_tx_cursor = 0;
                                 }
