@@ -508,11 +508,16 @@ impl MasternodeRegistry {
                 if matches!(info.masternode.tier, crate::types::MasternodeTier::Free) {
                     continue;
                 }
+                let reference = if info.last_seen_at > 0 {
+                    info.last_seen_at
+                } else {
+                    info.first_seen_at
+                };
                 if !info.is_active
-                    && info.last_seen_at > 0
-                    && now.saturating_sub(info.last_seen_at) > max_inactive_secs
+                    && reference > 0
+                    && now.saturating_sub(reference) > max_inactive_secs
                 {
-                    to_evict.push((address.clone(), info.last_seen_at));
+                    to_evict.push((address.clone(), reference));
                 }
             }
         }
