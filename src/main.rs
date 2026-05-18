@@ -1931,14 +1931,14 @@ async fn main() {
                         // window; this call prunes the ones that never came back.
                         health_registry.clean_stale_free_tier_nodes(300).await;
 
-                        // Evict paid-tier masternodes offline for more than 3 days.
+                        // Evict paid-tier masternodes offline for more than 1 hour.
                         // Collateral is not spent — the node re-registers on return.
                         let evicted = health_registry
-                            .cleanup_inactive_paid_nodes(3 * 24 * 3600)
+                            .cleanup_inactive_paid_nodes(3600)
                             .await;
                         if evicted > 0 {
                             tracing::info!(
-                                "🗑️ Evicted {} paid-tier masternode(s) offline for >3 days",
+                                "🗑️ Evicted {} paid-tier masternode(s) offline for >1 hour",
                                 evicted
                             );
                         }

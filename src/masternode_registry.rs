@@ -524,12 +524,12 @@ impl MasternodeRegistry {
 
         let utxo_mgr = self.utxo_manager.read().await.clone();
         for (address, last_seen_at) in to_evict {
-            let inactive_days = now.saturating_sub(last_seen_at) / 86400;
+            let inactive_mins = now.saturating_sub(last_seen_at) / 60;
             tracing::warn!(
-                "🗑️ Evicting paid-tier masternode {} — offline for {} day(s) (threshold {}d)",
+                "🗑️ Evicting paid-tier masternode {} — offline for {} min(s) (threshold {}m)",
                 address,
-                inactive_days,
-                max_inactive_secs / 86400
+                inactive_mins,
+                max_inactive_secs / 60
             );
             match self.unregister(&address).await {
                 Ok(Some(info)) => {
