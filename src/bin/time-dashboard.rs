@@ -157,7 +157,6 @@ struct MasternodeListEntry {
 
 #[derive(Debug, Deserialize)]
 struct MasternodeList {
-    total: usize,
     total_in_registry: usize,
     masternodes: Vec<MasternodeListEntry>,
 }
@@ -1314,8 +1313,9 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
             ),
         )
         .block(Block::default().borders(Borders::ALL).title(format!(
-            "Network Masternodes ({}/{})  [↑↓ scroll]",
-            list.total, list.total_in_registry
+            "Network Masternodes ({} connected / {} registered)  [↑↓ scroll]",
+            list.masternodes.iter().filter(|mn| mn.is_connected).count(),
+            list.total_in_registry
         )))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .style(Style::default().fg(Color::White));
