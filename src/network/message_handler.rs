@@ -178,6 +178,20 @@ async fn check_sliding_window(
     }
 }
 
+/// Tracks outpoints that have had ≥ 3 unique IPs permanently banned for claiming them
+/// without proof.  Once an outpoint is "contested", any new non-V4 claimant is rejected
+/// immediately — before the expensive UTXO lookup — preventing ban-list exhaustion DoS.
+/// Key = "<txid_hex>:<vout>", value = count of distinct IPs banned for this outpoint.
+fn contested_outpoints() -> &'static dashmap::DashMap<String, u32> {
+    static MAP: std::sync::OnceLock<dashmap::DashMap<String, u32>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(dashmap::DashMap::new)
+}
+
+/// Threshold: after this many distinct IPs are banned for the same outpoint, mark it
+/// as contested and reject all future non-V4 claims without doing any UTXO work.
+const CONTESTED_OUTPOINT_THRESHOLD: u32 = 3;
+
 /// Rate-limit a log/action to once per `cooldown_secs` per key.
 /// Returns true and records the current time when the cooldown has elapsed.
 fn should_warn_now(map: &dashmap::DashMap<String, Instant>, key: &str, cooldown_secs: u64) -> bool {
@@ -4033,6 +4047,64 @@ impl MessageHandler {
                 }
             };
 
+            // ── Contested-outpoint fast-rejection (AV-banlist-exhaust) ─────────────────
+            //
+            // After ≥ CONTESTED_OUTPOINT_THRESHOLD unique IPs have been permanently banned
+            // for claiming this outpoint without proof, skip all expensive UTXO / registry
+            // work and immediately reject any new non-V4 claimant.  This prevents an
+            // attacker from exhausting the ban list by spinning up cheap cloud VMs and
+            // having each one force a full collateral check before being banned.
+            //
+            // V4 claimants (collateral_proof non-empty) always proceed normally so the
+            // legitimate owner can still recover via cryptographic proof.
+            let outpoint_key_str =
+                format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
+            {
+                let is_v4_claim = !collateral_proof.is_empty();
+                let contested_count = contested_outpoints()
+                    .get(&outpoint_key_str)
+                    .map(|c| *c)
+                    .unwrap_or(0);
+                if contested_count >= CONTESTED_OUTPOINT_THRESHOLD && !is_v4_claim {
+                    static CONTESTED_WARN: std::sync::OnceLock<
+                        dashmap::DashMap<String, std::time::Instant>,
+                    > = std::sync::OnceLock::new();
+                    let wm = CONTESTED_WARN.get_or_init(dashmap::DashMap::new);
+                    if should_warn_now(wm, &outpoint_key_str, 300) {
+                        warn!(
+                            "🛡️ [{}] Contested outpoint fast-reject: {} claims {} \
+                             ({} prior bans, no V4 proof) — banning without UTXO work",
+                            self.direction, masternode_ip, outpoint_key_str, contested_count
+                        );
+                    }
+                    let bare = masternode_ip.split(':').next().unwrap_or(&masternode_ip);
+                    if let Ok(ban_ip) = bare.parse::<std::net::IpAddr>() {
+                        if let Some(bl) = &context.banlist {
+                            if bl.write().await.is_banned(ban_ip).is_none() {
+                                bl.write().await.add_permanent_ban(
+                                    ban_ip,
+                                    &format!(
+                                        "Collateral hijack attempt for {} (contested outpoint, \
+                                         {} prior bans)",
+                                        outpoint_key_str, contested_count
+                                    ),
+                                );
+                                *contested_outpoints()
+                                    .entry(outpoint_key_str.clone())
+                                    .or_insert(0) += 1;
+                            }
+                        }
+                    }
+                    if is_relayed {
+                        return Ok(None);
+                    }
+                    return Err(format!(
+                        "DISCONNECT: contested-outpoint squatter banned {}",
+                        masternode_ip
+                    ));
+                }
+            }
+
             // During initial sync (height far behind peers), skip collateral verification.
             // The UTXO set is incomplete/empty so verification would reject every staked
             // masternode, preventing us from syncing from the best peers.  Collateral will
@@ -4287,6 +4359,11 @@ impl MessageHandler {
                                                     ban_ip,
                                                     &format!("Collateral hijack attempt for {}:{} (on-chain anchor belongs to different IP)", hex::encode(outpoint.txid), outpoint.vout),
                                                 );
+                                                // Track this outpoint as contested so future
+                                                // non-V4 claimants are rejected immediately.
+                                                *contested_outpoints()
+                                                   .entry(outpoint_key_str.clone())
+                                                   .or_insert(0) += 1;
                                                 if is_relayed {
                                                     let bare_relay = peer_ip
                                                         .split(':')

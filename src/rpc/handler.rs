@@ -446,8 +446,7 @@ impl RpcHandler {
                 .first()
                 .and_then(|v| v.as_u64())
                 .unwrap_or(DEFAULT_BLOCKS)
-                .min(MAX_BLOCKS)
-                .max(1);
+                .clamp(1, MAX_BLOCKS);
             (tip.saturating_sub(n) + 1, tip)
         };
         let blocks_requested = to_height.saturating_sub(from_height) + 1;
