@@ -172,12 +172,31 @@ enum Commands {
         dormant_years: f64,
     },
 
-    /// Masternode reward earnings report over a block window (default: 1008 = 1 week)
+    /// Masternode reward earnings report over a block window or explicit height range
+    ///
+    /// One argument:  getrewardreport 144          (last 144 blocks from tip)
+    /// Two arguments: getrewardreport 3800 4820    (blocks 3800 to 4820)
+    /// No arguments:  getrewardreport              (last week, 1008 blocks)
+    ///
+    /// Use findblockbydate to convert a Unix timestamp to a block height.
     #[command(next_help_heading = "Blockchain")]
     GetRewardReport {
-        /// Number of blocks to scan (default: 1008, max: 10080)
-        #[arg(default_value = "1008")]
-        blocks: u64,
+        /// Start block height, or number of blocks to scan from tip
+        from_or_blocks: Option<u64>,
+        /// End block height (if provided, first arg is treated as start height)
+        to_height: Option<u64>,
+    },
+
+    /// Find the block closest to a given Unix timestamp
+    ///
+    /// Example: findblockbydate 1746921600
+    ///
+    /// Returns the block height, its actual timestamp, and how many seconds
+    /// it differs from the target. Use the heights with getrewardreport.
+    #[command(next_help_heading = "Blockchain")]
+    FindBlockByDate {
+        /// Unix timestamp (seconds since epoch)
+        timestamp: u64,
     },
 
     /// Get information about a specific block
@@ -1348,7 +1367,14 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let (method, params) = match &args.command {
         Commands::GetBlockchainInfo => ("getblockchaininfo", json!([])),
         Commands::GetSupply { dormant_years } => ("getsupply", json!([dormant_years])),
-        Commands::GetRewardReport { blocks } => ("getrewardreport", json!([blocks])),
+        Commands::GetRewardReport { from_or_blocks, to_height } => {
+            match (from_or_blocks, to_height) {
+                (Some(from), Some(to)) => ("getrewardreport", json!([from, to])),
+                (Some(n), None) => ("getrewardreport", json!([n])),
+                (None, _) => ("getrewardreport", json!([])),
+            }
+        }
+        Commands::FindBlockByDate { timestamp } => ("findblockbydate", json!([timestamp])),
         Commands::GetBlock { height } => ("getblock", json!([height])),
         Commands::GetBlockCount => ("getblockcount", json!([])),
         Commands::GetBestBlockHash => ("getbestblockhash", json!([])),

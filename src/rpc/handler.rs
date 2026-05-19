@@ -182,6 +182,7 @@ impl RpcHandler {
             "getblockchaininfo" => self.get_blockchain_info().await,
             "getsupply" => self.get_supply(&params_array).await,
             "getrewardreport" => self.get_reward_report(&params_array).await,
+            "findblockbydate" => self.find_block_by_date(&params_array).await,
             "getblockcount" => self.get_block_count().await,
             "getblock" => self.get_block(&params_array).await,
             "getbestblockhash" => self.get_best_block_hash().await,
@@ -413,15 +414,43 @@ impl RpcHandler {
     async fn get_reward_report(&self, params: &[Value]) -> Result<Value, RpcError> {
         const MAX_BLOCKS: u64 = 10_080; // cap at 10 weeks
         const DEFAULT_BLOCKS: u64 = 1_008; // 1 week
-        let blocks = params
-            .first()
-            .and_then(|v| v.as_u64())
-            .unwrap_or(DEFAULT_BLOCKS)
-            .min(MAX_BLOCKS)
-            .max(1);
-
         let tip = self.blockchain.get_height();
-        let from_height = tip.saturating_sub(blocks) + 1;
+
+        // Two-param form: getrewardreport <from_height> <to_height>
+        // One-param form: getrewardreport <blocks>  (scan last N blocks from tip)
+        // No-param form:  getrewardreport           (last week)
+        let (from_height, to_height) = if params.len() >= 2 {
+            let from = params[0].as_u64().ok_or_else(|| RpcError {
+                code: -32602,
+                message: "from_height must be a number".to_string(),
+            })?;
+            let to = params[1].as_u64().ok_or_else(|| RpcError {
+                code: -32602,
+                message: "to_height must be a number".to_string(),
+            })?;
+            if from > to {
+                return Err(RpcError {
+                    code: -32602,
+                    message: "from_height must be <= to_height".to_string(),
+                });
+            }
+            if to.saturating_sub(from) > MAX_BLOCKS {
+                return Err(RpcError {
+                    code: -32602,
+                    message: format!("Range too large (max {} blocks)", MAX_BLOCKS),
+                });
+            }
+            (from, to.min(tip))
+        } else {
+            let n = params
+                .first()
+                .and_then(|v| v.as_u64())
+                .unwrap_or(DEFAULT_BLOCKS)
+                .min(MAX_BLOCKS)
+                .max(1);
+            (tip.saturating_sub(n) + 1, tip)
+        };
+        let blocks_requested = to_height.saturating_sub(from_height) + 1;
         let sat = crate::constants::blockchain::SATOSHIS_PER_TIME as f64;
 
         // Build reward_address → tier map from current registry snapshot.
@@ -443,7 +472,7 @@ impl RpcHandler {
         let mut total_emitted: u64 = 0;
         let mut blocks_scanned: u64 = 0;
 
-        for height in from_height..=tip {
+        for height in from_height..=to_height {
             let block = match self.blockchain.get_block_by_height(height).await {
                 Ok(b) => b,
                 Err(_) => continue,
@@ -520,13 +549,65 @@ impl RpcHandler {
         by_tier.sort_by_key(|v| tier_order(v["tier"].as_str().unwrap_or("")));
 
         Ok(json!({
-            "blocks_requested": blocks,
+            "blocks_requested": blocks_requested,
             "blocks_scanned": blocks_scanned,
             "from_height": from_height,
-            "to_height": tip,
+            "to_height": to_height,
             "total_emitted": total_emitted as f64 / sat,
             "by_tier": by_tier,
             "by_address": by_address,
+        }))
+    }
+
+    async fn find_block_by_date(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let target_ts = params.first().and_then(|v| v.as_u64()).ok_or_else(|| RpcError {
+            code: -32602,
+            message: "Expected unix timestamp".to_string(),
+        })?;
+
+        let tip = self.blockchain.get_height();
+        if tip == 0 {
+            return Err(RpcError { code: -1, message: "No blocks yet".to_string() });
+        }
+
+        // Binary search by block timestamp.
+        let mut lo: u64 = 1;
+        let mut hi: u64 = tip;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let ts = self.blockchain.get_block_by_height(mid).await
+                .map(|b| b.header.timestamp as u64)
+                .unwrap_or(0u64);
+            if ts < target_ts {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        // lo is the first block at or after target_ts. Check neighbour to find closest.
+        let height = if lo > 1 {
+            let ts_lo = self.blockchain.get_block_by_height(lo).await
+                .map(|b| b.header.timestamp as u64).unwrap_or(u64::MAX);
+            let ts_prev = self.blockchain.get_block_by_height(lo - 1).await
+                .map(|b| b.header.timestamp as u64).unwrap_or(0u64);
+            if target_ts.saturating_sub(ts_prev) <= ts_lo.saturating_sub(target_ts) {
+                lo - 1
+            } else {
+                lo
+            }
+        } else {
+            lo
+        }.min(tip);
+
+        let block = self.blockchain.get_block_by_height(height).await
+            .map_err(|e| RpcError { code: -5, message: e })?;
+
+        Ok(json!({
+            "height": height,
+            "timestamp": block.header.timestamp,
+            "target_timestamp": target_ts,
+            "delta_secs": (block.header.timestamp as i64 - target_ts as i64).abs(),
         }))
     }
 

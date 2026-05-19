@@ -228,6 +228,7 @@ const PUBLIC_METHODS: &[&str] = &[
     "listlockedutxos",
     "listlockedcollaterals",
     "getrewardreport",
+    "findblockbydate",
     // Masternode queries
     "masternodelist",
     "masternodestatus",
