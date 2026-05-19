@@ -3838,21 +3838,38 @@ impl MasternodeRegistry {
     }
 
     /// Update blocks_without_reward counters for all masternodes in a single lock.
-    /// Only the block leader resets to 0; every other node increments by 1.
-    /// This tracks "blocks since last time I was leader", which is the quantity
-    /// used for VRF fairness bonuses — matching what get_verifiable_reward_tracking
-    /// computes from the blockchain. Previously this reset for any pool reward
-    /// (every block for every active node), making the counter always 0.
+    ///
+    /// Resets to 0 for any node that was rewarded this block — either as the block
+    /// leader (30 TIME bonus) or as a tier-pool winner (Bronze/Silver/Gold/Free).
+    /// All other nodes increment by 1.
+    ///
+    /// `reward_recipients` should be the set of payout addresses from
+    /// `block.masternode_rewards`. We match against both `wallet_address` and
+    /// `reward_address` to handle nodes with a separate reward routing address.
+    ///
     /// Called from add_block after a block is committed — O(n) in-memory only, no sled I/O
     /// except for the periodic persist (every 10 blocks) which uses the background writer.
-    pub async fn update_reward_counters(&self, block_height: u64, block_leader: &str) {
+    pub async fn update_reward_counters(
+        &self,
+        block_height: u64,
+        block_leader: &str,
+        reward_recipients: &std::collections::HashSet<String>,
+    ) {
         let persist_now = block_height % 10 == 0;
         let mut masternodes = self.masternodes.write().await;
         for info in masternodes.values_mut() {
-            if info.masternode.address == block_leader {
+            let is_leader = info.masternode.address == block_leader;
+            // Check if this node received a tier-pool reward this block.
+            // Match against wallet_address and reward_address (both may be the payout dest).
+            let is_rewarded = !reward_recipients.is_empty()
+                && (reward_recipients.contains(&info.masternode.wallet_address)
+                    || (!info.reward_address.is_empty()
+                        && reward_recipients.contains(&info.reward_address)));
+
+            if is_leader || is_rewarded {
                 info.last_reward_height = block_height;
                 info.blocks_without_reward = 0;
-                // Always persist leader resets so restart recovery stays accurate
+                // Always persist resets so restart recovery stays accurate.
                 if let Ok(data) = bincode::serialize(info) {
                     self.sled_insert_bg(
                         format!("masternode:{}", info.masternode.address).into_bytes(),

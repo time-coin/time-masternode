@@ -5459,10 +5459,20 @@ impl Blockchain {
         }
 
         // Update the in-memory blocks_without_reward counters so that
-        // get_reward_tracking_from_memory() is accurate for future VRF fairness bonuses.
-        // Only the block leader resets to 0; all others increment.
+        // get_reward_tracking_from_memory() is accurate for future tier-pool
+        // fairness rotation. All reward recipients (leader + tier-pool winners)
+        // reset to 0; all other nodes increment by 1.
+        let reward_recipients: std::collections::HashSet<String> = block
+            .masternode_rewards
+            .iter()
+            .map(|(addr, _)| addr.clone())
+            .collect();
         self.masternode_registry
-            .update_reward_counters(block.header.height, &block.header.leader)
+            .update_reward_counters(
+                block.header.height,
+                &block.header.leader,
+                &reward_recipients,
+            )
             .await;
 
         // Signal any waiters (e.g. block production loop) that a new block was added
