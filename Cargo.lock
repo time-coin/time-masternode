@@ -1965,7 +1965,7 @@ dependencies = [
 
 [[package]]
 name = "timed"
-version = "1.5.7"
+version = "1.5.8"
 dependencies = [
  "aes-gcm",
  "argon2",

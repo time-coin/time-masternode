@@ -11,6 +11,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 >
 > The website does **not** read `Cargo.toml` automatically — it must be updated manually.
 
+## [1.5.8] - 2026-05-17
+
+### Added
+
+- **`getsupply` RPC and CLI command**: Returns circulating supply statistics with dormant
+  coin tracking. Reports `total_minted`, `circulating` (minus locked masternode collateral),
+  `dormant` (coins unmoved past a configurable threshold, default 1 year), and
+  `adjusted_circulating` (circulating minus dormant). Accepts an optional `dormant_years`
+  argument (e.g. `time-cli getsupply 2` for a 2-year dormancy threshold). Dormancy is
+  computed from per-UTXO creation heights rebuilt on every startup via block replay.
+  Locked masternode collateral is excluded from dormancy — intentionally immobile UTXOs
+  are not "lost". (`aac8469`, `828b5ef`)
+
+- **Real TX finality time measurement**: `average_finality_time_ms` in `getblockchaininfo`
+  and the dashboard now reflects actual TimeVote latency — the time from `transition_to_voting`
+  to `transition_to_finalized` — rather than the hardcoded 750 ms default. Rolling window of
+  50 measurements. Fallback-resolved TXs (liveness-stall recovery path) are excluded to avoid
+  skewing the average. (`7a87264`)
+
+- **Paid-tier masternode 3-day inactivity eviction**: Bronze/Silver/Gold masternodes that
+  have been offline for more than 3 days are now automatically evicted from the registry.
+  Collateral is unlocked locally but not spent on-chain — the node re-registers normally on
+  return. Prevents the dashboard count from growing unboundedly with permanently-gone nodes.
+  (`6dcbaee`)
+
+### Fixed
+
+- **Free-tier node cleanup silently skipping gossip-sourced and suspended nodes**: The
+  5-minute Free-tier eviction check required `last_seen_at > 0`, which permanently exempted
+  two categories: nodes registered via gossip (never directly connected, `last_seen_at` stays
+  0) and nodes hit by `suspend_from_consensus()` (which explicitly zeroes `last_seen_at`).
+  Both categories accumulated indefinitely. Fix: fall back to `first_seen_at` when
+  `last_seen_at` is 0 — new nodes are still protected by the 5-minute threshold. (`b70205b`)
+
+- **Sync burst triggering rate-limit violations on reconnect**: A reconnecting node sending
+  a burst of `BlocksResponse`, UTXO chunks, and reconciliation chunks saturated the 100/s
+  "general" rate-limit bucket (shared with all other message types), causing `record_violation`
+  to fire for honest nodes during normal sync. Fix: dedicated "sync" bucket (500/s) for bulk
+  sync responses; `yield_now()` added between chunk sends to prevent burst serialization.
+  (`5a8a7e8`)
+
+- **Archived TX gossip ingress**: Transactions already archived in a confirmed block were
+  being accepted into the gossip relay path, resurrecting them in the mempool and triggering
+  redundant processing. Now rejected at the ingress point via `is_tx_archived()` check.
+  (`73e8c55`, `ca7641f`)
+
+- **Legacy v1 transaction compatibility in block validation**: Blocks containing v1-format
+  transactions (produced by nodes on older builds) were rejected by the validator after
+  the v1 TX format was phased out at the pool-entry level. Fixed by separating the two
+  concerns: v1 TXs are still accepted in blocks (consensus-compatible), but rejected at
+  pool entry for new submissions. (`a6d4499`)
+
+- **Crash-window tombstone gap for confirmed TXs on startup**: A TX that was finalized
+  and archived in a block but whose UTXO tombstone was not yet persisted could be re-accepted
+  into the pool after a crash restart, leading to double-processing. The tombstone is now
+  committed before the TX is removed from the finalized pool on startup replay. (`a59d3e7`)
+
+- **Fairness bonus tracked per block leader instead of per pool winner**: The fairness
+  bonus (used to prevent the same masternode from receiving consecutive rewards) was
+  previously comparing against the pool-level winner rather than the actual block leader.
+  On blocks where the leader differed from the pool winner, the bonus failed to fire.
+  (`a802593`)
+
+- **VRF computation mismatch between producer and validator**: Block producers and
+  validators were using slightly different input encodings for the ECVRF computation,
+  causing occasional valid blocks to be rejected by validators. Both now use a canonical
+  encoding. (`7d9e9e0`)
+
+- **Finalized TX block inclusion regression**: A change in the finalized-pool lookup path
+  caused finalized transactions to be skipped during block proposal assembly, producing
+  empty or partial blocks. (`610b124`)
+
+- **Tombstoned UTXO false-rejection in block proposal validation**: UTXOs that had been
+  spent and tombstoned were being checked against the live UTXO set during block validation,
+  causing valid block proposals to be rejected when their inputs were from already-spent
+  (correctly absent) UTXOs. (`b64cb67`)
+
+- **Vote relay dedup inverted**: The deduplication guard for outgoing vote gossip had its
+  condition inverted — it was relaying duplicates and dropping first occurrences. (`9aa0f91`)
+
+- **`tx_finalized` broadcast storm**: Nodes were re-gossiping `tx_finalized` messages for
+  transactions that were already finalized in their local state, producing exponential
+  broadcast amplification. Now deduplicated before relay; already-finalized TXs are not
+  re-gossiped. (`f4d9d1a`)
+
+- **Vote relay loop**: Votes were being re-relayed to the peer that sent them, and
+  deduplication was running after gossip rather than before. (`faf3b09`)
+
+- **Rate-limit log spam**: A node under sustained traffic was emitting one log line per
+  dropped message, producing thousands of lines per minute. Rate-limit warning logs are
+  now suppressed for 60 seconds after the first occurrence and escalate to a violation
+  only after a sustained streak. (`70cfa30`)
+
+### Internal
+
+- **Message handler unified into `run_message_loop_unified`**: Inbound and outbound
+  post-handshake message routing was consolidated from separate `drive_inbound` and
+  inline handlers into a single `run_message_loop_unified` path via `ConnectionDriver`.
+  No change to protocol behaviour; reduces duplicate logic. (`95de322`–`8798370`)
+
 ## [1.5.7] - 2026-05-15
 
 ### Fixed
