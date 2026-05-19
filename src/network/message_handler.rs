@@ -5119,9 +5119,11 @@ impl MessageHandler {
                     .register_direct(mn, reward_address.clone())
                     .await
             } else {
+                // Gossip relay: store for peer discovery but do NOT activate.
+                // Activation only happens on direct TCP handshake (register_direct).
                 context
                     .masternode_registry
-                    .register(mn, reward_address.clone())
+                    .register_gossip(mn, reward_address.clone())
                     .await
             };
             match reg_result {
@@ -5363,9 +5365,10 @@ impl MessageHandler {
                     .register_direct(mn, reward_address.clone())
                     .await
             } else {
+                // Gossip relay: store for peer discovery but do NOT activate.
                 context
                     .masternode_registry
-                    .register(mn, reward_address.clone())
+                    .register_gossip(mn, reward_address.clone())
                     .await
             };
             match reg_result {

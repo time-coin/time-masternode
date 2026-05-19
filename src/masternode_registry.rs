@@ -744,6 +744,20 @@ impl MasternodeRegistry {
             .await
     }
 
+    /// Register a node learned via gossip relay (peer reported it, but we have no
+    /// direct TCP connection to it).  The node is stored for peer-discovery purposes
+    /// (so PHASE3 can attempt to connect) but is **not** marked active.  It will
+    /// only become active once it completes a direct TCP handshake via
+    /// `register_direct()`.  This prevents gossip from resurrecting stale nodes.
+    pub async fn register_gossip(
+        &self,
+        masternode: Masternode,
+        reward_address: String,
+    ) -> Result<(), RegistryError> {
+        self.register_internal(masternode, reward_address, false, false)
+            .await
+    }
+
     /// Like `register()` but marks the announcement as coming directly from the
     /// masternode itself (not relayed through a third peer).  Used by the message
     /// handler when `peer_ip == masternode_ip`.  Direct self-announcements are
