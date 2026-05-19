@@ -181,6 +181,7 @@ impl RpcHandler {
         let result = match request.method.as_str() {
             "getblockchaininfo" => self.get_blockchain_info().await,
             "getsupply" => self.get_supply(&params_array).await,
+            "getrewardreport" => self.get_reward_report(&params_array).await,
             "getblockcount" => self.get_block_count().await,
             "getblock" => self.get_block(&params_array).await,
             "getbestblockhash" => self.get_best_block_hash().await,
@@ -406,6 +407,126 @@ impl RpcHandler {
             "adjusted_circulating_satoshis": stats.adjusted_circulating_satoshis,
             "unknown_age": stats.unknown_age_satoshis as f64 / sat,
             "unknown_age_satoshis": stats.unknown_age_satoshis,
+        }))
+    }
+
+    async fn get_reward_report(&self, params: &[Value]) -> Result<Value, RpcError> {
+        const MAX_BLOCKS: u64 = 10_080; // cap at 10 weeks
+        const DEFAULT_BLOCKS: u64 = 1_008; // 1 week
+        let blocks = params
+            .first()
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_BLOCKS)
+            .min(MAX_BLOCKS)
+            .max(1);
+
+        let tip = self.blockchain.get_height();
+        let from_height = tip.saturating_sub(blocks) + 1;
+        let sat = crate::constants::blockchain::SATOSHIS_PER_TIME as f64;
+
+        // Build reward_address → tier map from current registry snapshot.
+        let all_masternodes = self.registry.list_all().await;
+        let mut addr_to_tier: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for mn in &all_masternodes {
+            let tier = format!("{:?}", mn.masternode.tier);
+            addr_to_tier.insert(mn.reward_address.clone(), tier.clone());
+            // Also index by node address in case reward_address differs.
+            addr_to_tier
+                .entry(mn.masternode.address.clone())
+                .or_insert(tier);
+        }
+
+        // Accumulate per-address totals by scanning blocks.
+        let mut addr_wins: std::collections::HashMap<String, (u64, u64)> =
+            std::collections::HashMap::new(); // address → (wins, satoshis)
+        let mut total_emitted: u64 = 0;
+        let mut blocks_scanned: u64 = 0;
+
+        for height in from_height..=tip {
+            let block = match self.blockchain.get_block_by_height(height).await {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            blocks_scanned += 1;
+            for (addr, amount) in &block.masternode_rewards {
+                if *amount == 0 {
+                    continue;
+                }
+                let entry = addr_wins.entry(addr.clone()).or_insert((0, 0));
+                entry.0 += 1;
+                entry.1 += amount;
+                total_emitted += amount;
+            }
+        }
+
+        // Build per-address rows, sorted by earnings descending.
+        let mut by_address: Vec<Value> = addr_wins
+            .iter()
+            .map(|(addr, (wins, sats))| {
+                let tier = addr_to_tier
+                    .get(addr)
+                    .cloned()
+                    .unwrap_or_else(|| "Unknown".to_string());
+                json!({
+                    "address": addr,
+                    "tier": tier,
+                    "wins": wins,
+                    "earned": *sats as f64 / sat,
+                    "earned_satoshis": sats,
+                })
+            })
+            .collect();
+        by_address.sort_by(|a, b| {
+            b["earned_satoshis"]
+                .as_u64()
+                .cmp(&a["earned_satoshis"].as_u64())
+        });
+
+        // Aggregate by tier.
+        let mut tier_map: std::collections::HashMap<String, (u64, u64, u64)> =
+            std::collections::HashMap::new(); // tier → (node_count, wins, satoshis)
+        for row in &by_address {
+            let tier = row["tier"].as_str().unwrap_or("Unknown").to_string();
+            let entry = tier_map.entry(tier).or_insert((0, 0, 0));
+            entry.0 += 1;
+            entry.1 += row["wins"].as_u64().unwrap_or(0);
+            entry.2 += row["earned_satoshis"].as_u64().unwrap_or(0);
+        }
+        let tier_order = |t: &str| match t {
+            "Gold" => 0u8,
+            "Silver" => 1,
+            "Bronze" => 2,
+            "Free" => 3,
+            _ => 4,
+        };
+        let mut by_tier: Vec<Value> = tier_map
+            .iter()
+            .map(|(tier, (nodes, wins, sats))| {
+                let avg = if *nodes > 0 {
+                    *sats as f64 / *nodes as f64 / sat
+                } else {
+                    0.0
+                };
+                json!({
+                    "tier": tier,
+                    "nodes": nodes,
+                    "total_wins": wins,
+                    "total_earned": *sats as f64 / sat,
+                    "avg_per_node": avg,
+                })
+            })
+            .collect();
+        by_tier.sort_by_key(|v| tier_order(v["tier"].as_str().unwrap_or("")));
+
+        Ok(json!({
+            "blocks_requested": blocks,
+            "blocks_scanned": blocks_scanned,
+            "from_height": from_height,
+            "to_height": tip,
+            "total_emitted": total_emitted as f64 / sat,
+            "by_tier": by_tier,
+            "by_address": by_address,
         }))
     }
 

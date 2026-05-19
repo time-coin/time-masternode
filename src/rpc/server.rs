@@ -227,6 +227,7 @@ const PUBLIC_METHODS: &[&str] = &[
     "gettxindexstatus",
     "listlockedutxos",
     "listlockedcollaterals",
+    "getrewardreport",
     // Masternode queries
     "masternodelist",
     "masternodestatus",

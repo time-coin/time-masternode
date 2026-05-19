@@ -172,6 +172,14 @@ enum Commands {
         dormant_years: f64,
     },
 
+    /// Masternode reward earnings report over a block window (default: 1008 = 1 week)
+    #[command(next_help_heading = "Blockchain")]
+    GetRewardReport {
+        /// Number of blocks to scan (default: 1008, max: 10080)
+        #[arg(default_value = "1008")]
+        blocks: u64,
+    },
+
     /// Get information about a specific block
     #[command(next_help_heading = "Blockchain")]
     GetBlock {
@@ -1340,6 +1348,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let (method, params) = match &args.command {
         Commands::GetBlockchainInfo => ("getblockchaininfo", json!([])),
         Commands::GetSupply { dormant_years } => ("getsupply", json!([dormant_years])),
+        Commands::GetRewardReport { blocks } => ("getrewardreport", json!([blocks])),
         Commands::GetBlock { height } => ("getblock", json!([height])),
         Commands::GetBlockCount => ("getblockcount", json!([])),
         Commands::GetBestBlockHash => ("getbestblockhash", json!([])),
