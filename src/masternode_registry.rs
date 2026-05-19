@@ -2028,13 +2028,15 @@ impl MasternodeRegistry {
 
         if is_handshake && !has_collateral {
             // Free-tier nodes: keep in registry with last_seen_at set so the
-            // ELIGIBILITY_GRACE_SECS window and clean_stale_free_tier_nodes() work correctly.
+            // ELIGIBILITY_GRACE_SECS window and cleanup_stale_reports() work correctly.
             // Previously we removed them immediately, but that causes reward gaps when a
             // legitimate node briefly disconnects (e.g., under a targeted disconnect attack).
             {
                 let info = masternodes.get_mut(address).expect("checked above");
                 info.is_active = false;
                 info.last_seen_at = now;
+                info.is_publicly_reachable = false;
+                info.reachability_checked_at = 0;
                 if info.uptime_start > 0 {
                     info.total_uptime += now - info.uptime_start;
                 }
@@ -2073,6 +2075,8 @@ impl MasternodeRegistry {
                 let info = masternodes.get_mut(address).expect("checked above");
                 info.is_active = false;
                 info.last_seen_at = now;
+                info.is_publicly_reachable = false;
+                info.reachability_checked_at = 0;
                 if info.uptime_start > 0 {
                     info.total_uptime += now - info.uptime_start;
                 }
@@ -3529,26 +3533,8 @@ impl MasternodeRegistry {
         let mut status_changes = 0;
         let mut total_active = 0;
 
-        // Calculate dynamic threshold once before the loop
-        let total_masternodes = masternodes.len();
-        let min_reports = if total_masternodes <= 4 {
-            // Very small network: require at least half
-            (total_masternodes / 2).max(1)
-        } else if total_masternodes <= 12 {
-            // Small-to-mid network (testnet range): require 2 reporters.
-            // Pyramid leaf nodes connect to 5-6 upward peers; each direct peer
-            // self-records its own gossip, so a leaf reachable from 2+ nodes
-            // will have ≥ 2 reporters in every node's registry.
-            2
-        } else {
-            // Large network: use standard threshold
-            MIN_PEER_REPORTS
-        };
-
         for (addr, info) in masternodes.iter_mut() {
-            // Never deactivate the local masternode via gossip — it is always
-            // running and doesn't report on itself, so it would always have
-            // zero peer reports and be incorrectly deactivated.
+            // Never deactivate the local masternode.
             let addr_ip = addr.split(':').next().unwrap_or(addr);
             if local_ip.as_deref() == Some(addr_ip) {
                 if info.is_active {
@@ -3557,130 +3543,42 @@ impl MasternodeRegistry {
                 continue;
             }
 
-            // Handshake nodes' lifecycle is owned by TCP connect/disconnect events.
-            // Their presence in the registry already means they ARE directly connected —
-            // never let gossip-based report counts flip them inactive.
+            // Drain stale gossip reports (memory hygiene only — not used for liveness).
+            info.peer_reports
+                .retain(|_, ts| now.saturating_sub(*ts) < REPORT_EXPIRY_SECS);
+
+            // Handshake nodes' lifecycle is fully owned by TCP connect/disconnect events;
+            // their is_active flag is already accurate — just count and move on.
             if info.registration_source == RegistrationSource::Handshake {
-                info.peer_reports
-                    .retain(|_, ts| now.saturating_sub(*ts) < REPORT_EXPIRY_SECS);
                 if info.is_active {
                     total_active += 1;
                 }
                 continue;
             }
 
-            // Remove expired reports
-            let before_count = info.peer_reports.len();
-            info.peer_reports
-                .retain(|_, timestamp| now.saturating_sub(*timestamp) < REPORT_EXPIRY_SECS);
-            let after_count = info.peer_reports.len();
-
-            if before_count != after_count {
-                tracing::debug!(
-                    "Masternode {}: expired {} reports, {} remain",
-                    addr,
-                    before_count - after_count,
-                    after_count
-                );
-            }
-
-            // last_seen_at is intentionally NOT refreshed from gossip here.
-            // Only direct TCP connection events update last_seen_at, so the
-            // 1-hour eviction clock is not reset by gossip from other peers.
-
-            // Update is_active based on number of recent reports
-            // DYNAMIC THRESHOLD: Lower requirement for small networks to prevent deadlock
-            let report_count = info.peer_reports.len();
-
             let was_active = info.is_active;
 
-            // Require sufficient report count AND subnet diversity (if network is large enough)
+            // Single liveness pathway: a node is active only when there is a live TCP
+            // connection to it, or within the brief grace window immediately after a
+            // disconnect (avoids flapping during momentary reconnects).
             //
-            // Cap the required reporter count at the number of peers we are actually
-            // connected to.  With N live connections the maximum possible reporters
-            // is N; requiring MIN_PEER_REPORTS > N makes the threshold permanently
-            // unsatisfiable regardless of whether the remote masternode is genuinely
-            // online, trapping the network in a "2 active / 242 total" deadlock.
-            let effective_min = min_reports.min(connected_peers.len().max(1));
-            let meets_count = report_count >= effective_min;
-            // Only enforce /16 subnet diversity when we have enough connections that
-            // multi-subnet witnesses are actually achievable (≥3 connected peers).
-            // With <3 connections reporters may all share a subnet even for a fully
-            // healthy masternode.
-            // /16 subnet diversity check — only required when there is no
-            // independent TCP-level proof of reachability.
-            //
-            // Rationale: the diversity check prevents Sybil reporters (an attacker
-            // running many nodes on the same /16 and reporting each other as active).
-            // But it incorrectly penalises legitimate deployments where many nodes
-            // share the same hosting provider's /16 allocation (e.g. 50.28.x.x).
-            // When we have confirmed TCP reachability for a node — via the
-            // reachability prober or an outbound connection — that probe is
-            // independent of peer-report gossip and cannot be faked by co-located
-            // peers, so diversity is redundant and is skipped.
-            let meets_diversity = if info.is_publicly_reachable {
-                // Independently verified via TCP probe — diversity not required.
-                true
-            } else if total_masternodes > 12 && connected_peers.len() >= 3 && report_count >= 2 {
-                // Require witnesses from at least 2 distinct /16 subnets to prevent
-                // targeted DDoS against a node's witnesses on the same subnet.
-                // Only enforce for larger networks (>12 nodes) — small networks with
-                // co-located infrastructure (shared /16 subnets) would otherwise have
-                // nodes stuck inactive despite being fully online and reachable.
-                let mut subnets = std::collections::HashSet::new();
-                for entry in info.peer_reports.iter() {
-                    let peer_addr: &String = entry.key();
-                    // Extract /16 prefix from IP address (e.g., "192.168" from "192.168.1.1:24000")
-                    if let Some(ip_part) = peer_addr.split(':').next() {
-                        let octets: Vec<&str> = ip_part.split('.').collect();
-                        if octets.len() >= 2 {
-                            subnets.insert(format!("{}.{}", octets[0], octets[1]));
-                        }
-                    }
-                }
-                subnets.len() >= 2
-            } else {
-                true // Small networks or under-connected state exempt from diversity requirement
-            };
-            // A direct TCP connection is authoritative proof of liveness —
-            // gossip counts are a secondary signal for nodes we aren't directly
-            // connected to. Never flip is_active to false while we have a live
-            // connection, regardless of how many gossip reporters we have.
-            //
-            // Grace window: paid-tier masternodes that were recently connected
-            // (last_seen_at within 120 s) keep is_active=true even when gossip
-            // counts are temporarily insufficient.  This prevents a cascading
-            // deactivation storm when connections cycle rapidly (e.g. the
-            // network has more masternodes than any single node's old peer limit).
             // Use the bare IP (no port) for the connected-peers lookup — the
             // peer_connection_registry keys on IP only, but masternode addresses
-            // may include a port suffix (e.g. "50.28.107.33:24000"). Without
-            // stripping the port, addr.as_str() never matches and
-            // is_directly_connected is always false for port-suffixed addresses,
-            // causing Connected-but-Inactive on the dashboard.
+            // may include a port suffix (e.g. "50.28.107.33:24000").
             let is_directly_connected = connected_peers.contains(addr_ip);
             const ACTIVE_GRACE_SECS: u64 = 120;
             let within_grace = !matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
                 && info.last_seen_at > 0
                 && now.saturating_sub(info.last_seen_at) < ACTIVE_GRACE_SECS;
-            // A TCP-reachability probe is an independent, unforgeable confirmation that
-            // the node is online — treat it as equivalent to a direct connection for
-            // liveness purposes.  Without this, a node confirmed reachable still needs
-            // ≥3 gossip reporters, making the reachability probe useless for activation.
-            let consensus_active = is_directly_connected
-                || within_grace
-                || info.is_publicly_reachable
-                || (meets_count && meets_diversity);
-            info.is_active = !info.consensus_suspended && consensus_active;
+            info.is_active =
+                !info.consensus_suspended && (is_directly_connected || within_grace);
 
             if was_active != info.is_active {
                 status_changes += 1;
                 tracing::debug!(
-                    "Masternode {} status changed: {} ({} peer reports, {} required, direct={})",
+                    "Masternode {} status changed: {} (direct={})",
                     addr,
                     if info.is_active { "ACTIVE" } else { "INACTIVE" },
-                    report_count,
-                    min_reports,
                     is_directly_connected
                 );
             }
@@ -3690,35 +3588,48 @@ impl MasternodeRegistry {
             }
         }
 
-        // Auto-remove masternodes with no peer reports for extended period
+        // Auto-remove inactive masternodes that have been offline past their tier timeout.
+        // Free-tier nodes are cheap to re-register so they are evicted quickly (5 min).
+        // Paid-tier nodes retain their entry for AUTO_REMOVE_AFTER_SECS (1 hour) to
+        // survive momentary connectivity issues and give them time to reconnect.
+        //
         // Skip during startup grace period — peers haven't connected yet so
         // masternodes loaded from disk still have stale timestamps.
         let uptime = now.saturating_sub(self.started_at);
         let mut to_remove = Vec::new();
         if uptime >= STARTUP_GRACE_PERIOD_SECS {
             for (address, info) in masternodes.iter() {
-                // Handshake nodes are removed immediately on TCP disconnect — never auto-remove.
-                if info.registration_source == RegistrationSource::Handshake {
-                    continue;
-                }
                 // Never auto-remove the local masternode.
                 let addr_ip = address.split(':').next().unwrap_or(address);
                 if local_ip.as_deref() == Some(addr_ip) {
                     continue;
                 }
-                if info.peer_reports.is_empty() {
-                    // Check when last seen
-                    let last_seen = info.uptime_start;
-                    let time_since_last_seen = now.saturating_sub(last_seen);
-
-                    if time_since_last_seen > AUTO_REMOVE_AFTER_SECS {
-                        warn!(
-                            "🗑️  Scheduling auto-removal of masternode {} (inactive for {} minutes)",
-                            address,
-                            time_since_last_seen / 60
-                        );
-                        to_remove.push(address.clone());
-                    }
+                // Only remove nodes that are currently inactive.
+                if info.is_active {
+                    continue;
+                }
+                let tier_timeout =
+                    if matches!(info.masternode.tier, crate::types::MasternodeTier::Free) {
+                        300 // Free tier: evict after 5 minutes offline
+                    } else {
+                        AUTO_REMOVE_AFTER_SECS // Paid tier: evict after 1 hour offline
+                    };
+                // Use last_seen_at as the eviction clock; fall back to uptime_start
+                // for nodes that never had a confirmed connection (e.g. loaded from
+                // a stale sled snapshot before this field was introduced).
+                let last_seen = if info.last_seen_at > 0 {
+                    info.last_seen_at
+                } else {
+                    info.uptime_start
+                };
+                if last_seen > 0 && now.saturating_sub(last_seen) > tier_timeout {
+                    warn!(
+                        "🗑️  Scheduling auto-removal of masternode {} (inactive for {} minutes, tier: {:?})",
+                        address,
+                        now.saturating_sub(last_seen) / 60,
+                        info.masternode.tier
+                    );
+                    to_remove.push(address.clone());
                 }
             }
         }

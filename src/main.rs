@@ -1926,23 +1926,6 @@ async fn main() {
                             }
                         }
 
-                        // Remove Free-tier nodes that have been offline for >300 s.
-                        // They are kept in the registry after disconnect for a grace
-                        // window; this call prunes the ones that never came back.
-                        health_registry.clean_stale_free_tier_nodes(300).await;
-
-                        // Evict paid-tier masternodes offline for more than 1 hour.
-                        // Collateral is not spent — the node re-registers on return.
-                        let evicted = health_registry
-                            .cleanup_inactive_paid_nodes(3600)
-                            .await;
-                        if evicted > 0 {
-                            tracing::info!(
-                                "🗑️ Evicted {} paid-tier masternode(s) offline for >1 hour",
-                                evicted
-                            );
-                        }
-
                         // If unhealthy, ensure inactive masternodes are in the peer
                         // discovery list. Actual reconnection is handled by Phase 3-MN
                         // in NetworkClient (runs every 30s, iterates all registered
