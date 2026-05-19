@@ -3584,17 +3584,9 @@ impl MasternodeRegistry {
                 );
             }
 
-            // Refresh last_seen_at from the most recent non-expired gossip report.
-            // This extends the 120s grace window to gossip-active nodes, not just
-            // nodes we have a direct TCP connection to.  Without this, a node that
-            // only appears via gossip always has last_seen_at=0 (set only on TCP
-            // connect) and never gets the grace buffer, causing it to flip
-            // inactive the moment its reporter count drops below effective_min.
-            if let Some(most_recent) = info.peer_reports.iter().map(|e| *e.value()).max() {
-                if most_recent > info.last_seen_at {
-                    info.last_seen_at = most_recent;
-                }
-            }
+            // last_seen_at is intentionally NOT refreshed from gossip here.
+            // Only direct TCP connection events update last_seen_at, so the
+            // 1-hour eviction clock is not reset by gossip from other peers.
 
             // Update is_active based on number of recent reports
             // DYNAMIC THRESHOLD: Lower requirement for small networks to prevent deadlock
