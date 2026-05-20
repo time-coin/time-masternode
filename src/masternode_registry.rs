@@ -241,6 +241,13 @@ pub struct MasternodeRegistry {
     /// FREE_TIER_RECONNECT_COOLDOWN_SECS before re-registering after a disconnect.
     /// Also functions as a dedup guard so concurrent disconnect tasks skip duplicate removals.
     free_tier_reconnect_cooldown: Arc<DashMap<String, u64>>,
+    /// Per-IP guard that prevents gossip/peer-exchange from immediately resurrecting a node
+    /// that was just auto-removed by cleanup_stale_reports.
+    /// Key: IP string, Value: Unix timestamp of auto-removal.
+    /// Direct TCP connections bypass this guard (is_direct=true); only relayed peer exchange
+    /// is blocked, preventing the tight prune→resurrect loop seen when many peers flood
+    /// PeerExchange messages referencing the same offline node.
+    gossip_removal_cooldown: Arc<DashMap<String, u64>>,
     /// Wakeup signal for the PHASE3 reconnection loop.  Fired when a paid-tier node
     /// disconnects so PHASE3 reconnects in milliseconds instead of waiting up to 30s.
     priority_reconnect_notify: Arc<tokio::sync::Notify>,
@@ -426,6 +433,7 @@ impl MasternodeRegistry {
             collateral_migration_counts: Arc::new(DashMap::new()),
             free_tier_subnet_counts: Arc::new(free_tier_subnet_counts),
             free_tier_reconnect_cooldown: Arc::new(DashMap::new()),
+            gossip_removal_cooldown: Arc::new(DashMap::new()),
             priority_reconnect_notify: Arc::new(tokio::sync::Notify::new()),
             utxo_manager: Arc::new(RwLock::new(None)),
             cached_active: parking_lot::RwLock::new(init_active),
@@ -742,6 +750,7 @@ impl MasternodeRegistry {
     ) -> Result<(), RegistryError> {
         self.register_internal(masternode, reward_address, true, false)
             .await
+            .map(|_| ())
     }
 
     /// Register a node learned via gossip relay (peer reported it, but we have no
@@ -756,6 +765,7 @@ impl MasternodeRegistry {
     ) -> Result<(), RegistryError> {
         self.register_internal(masternode, reward_address, false, false)
             .await
+            .map(|_| ())
     }
 
     /// Like `register()` but marks the announcement as coming directly from the
@@ -771,6 +781,7 @@ impl MasternodeRegistry {
     ) -> Result<(), RegistryError> {
         self.register_internal(masternode, reward_address, true, true)
             .await
+            .map(|_| ())
     }
 
     /// Register a masternode with control over activation
@@ -780,13 +791,17 @@ impl MasternodeRegistry {
     ///                    (used for peer exchange to avoid marking offline nodes as active)
     /// `is_direct`: if true, the announcement came directly from the masternode's own
     ///              connection (peer_ip == masternode_ip), not relayed via a third party.
+    ///
+    /// Returns `Ok(true)` when a **new** entry was inserted, `Ok(false)` when an existing
+    /// entry was updated (or was a no-op).  Callers that only care about success can use
+    /// `.map(|_| ())`.
     pub async fn register_internal(
         &self,
         masternode: Masternode,
         reward_address: String,
         should_activate: bool,
         is_direct: bool,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<bool, RegistryError> {
         // Filter out invalid addresses
         if masternode.address == "0.0.0.0"
             || masternode.address == "127.0.0.1"
@@ -859,6 +874,35 @@ impl MasternodeRegistry {
                         elapsed
                     );
                     return Err(RegistryError::IpCyclingRejected);
+                }
+            }
+        }
+
+        // Gossip resurrection guard: when cleanup_stale_reports auto-removes a node,
+        // it stamps the address here.  Non-direct (peer exchange / relay) registrations
+        // are blocked for the tier's eviction window so that a flood of PeerExchange
+        // messages can't immediately resurrect a node we just pruned, resetting its
+        // eviction clock.  Direct TCP connections bypass this guard — if the node is
+        // actually online and connecting to us, we want it back.
+        if !is_direct {
+            let guard_now = Self::now();
+            if let Some(removed_at) = self.gossip_removal_cooldown.get(&masternode.address) {
+                let tier_cooldown = if masternode.tier == crate::types::MasternodeTier::Free {
+                    300u64 // matches Free-tier eviction timeout
+                } else {
+                    AUTO_REMOVE_AFTER_SECS // matches paid-tier eviction timeout (1 hour)
+                };
+                let elapsed = guard_now.saturating_sub(*removed_at);
+                if elapsed < tier_cooldown {
+                    tracing::debug!(
+                        "⏳ [gossip-guard] Skipping peer-exchange re-registration for {} \
+                         (removed {}s ago, cooldown {}s)",
+                        masternode.address, elapsed, tier_cooldown
+                    );
+                    return Err(RegistryError::IpCyclingRejected);
+                } else {
+                    // Cooldown expired — allow and clear the entry.
+                    self.gossip_removal_cooldown.remove(&masternode.address);
                 }
             }
         }
@@ -1723,7 +1767,7 @@ impl MasternodeRegistry {
             self.store_masternode(&masternode.address, existing)?;
 
             self.rebuild_node_caches(&nodes);
-            return Ok(());
+            return Ok(false); // existing node updated, not newly inserted
         }
 
         // Free-tier nodes are allowed from any subnet in any quantity.
@@ -1818,7 +1862,7 @@ impl MasternodeRegistry {
             now
         );
         self.rebuild_node_caches(&nodes);
-        Ok(())
+        Ok(true) // newly inserted
     }
 
     /// Get masternodes that are currently active (regardless of when they joined this period)
@@ -3654,6 +3698,16 @@ impl MasternodeRegistry {
                 // Remove from disk
                 self.sled_remove_bg(format!("masternode:{}", address).into_bytes());
 
+                // Block gossip/peer-exchange from immediately resurrecting this node.
+                // Direct TCP connections bypass the guard — if the node is genuinely
+                // back online we want it to reconnect.
+                let ip_only = address
+                    .split(':')
+                    .next()
+                    .unwrap_or(address)
+                    .to_string();
+                self.gossip_removal_cooldown.insert(ip_only, now);
+
                 // Queue collateral unlock and remove on-chain anchor
                 if let Some(outpoint) = &info.masternode.collateral_outpoint {
                     self.pending_collateral_unlocks
@@ -5395,6 +5449,7 @@ impl Clone for MasternodeRegistry {
             collateral_migration_counts: self.collateral_migration_counts.clone(),
             free_tier_subnet_counts: self.free_tier_subnet_counts.clone(),
             free_tier_reconnect_cooldown: self.free_tier_reconnect_cooldown.clone(),
+            gossip_removal_cooldown: self.gossip_removal_cooldown.clone(),
             priority_reconnect_notify: self.priority_reconnect_notify.clone(),
             utxo_manager: self.utxo_manager.clone(),
             cached_active: parking_lot::RwLock::new(self.cached_active.read().clone()),

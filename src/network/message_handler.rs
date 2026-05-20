@@ -5825,13 +5825,14 @@ impl MessageHandler {
             // NORMAL: Register as inactive (will become active via direct P2P connection)
             let should_activate = is_bootstrap;
 
-            if context
+            match context
                 .masternode_registry
-                .register_internal(masternode, mn_data.reward_address, should_activate, true)
+                .register_internal(masternode, mn_data.reward_address, should_activate, false)
                 .await
-                .is_ok()
             {
-                registered += 1;
+                Ok(true) => registered += 1, // truly new masternode discovered
+                Ok(false) => {}              // already known, no-op
+                Err(_) => {}                 // rejected (cooldown, collateral conflict, etc.)
             }
         }
 
@@ -5843,11 +5844,11 @@ impl MessageHandler {
                 );
             } else {
                 info!(
-                    "✓ [{}] Registered {} masternode(s) from peer exchange — waking PHASE3",
+                    "✓ [{}] Discovered {} new masternode(s) from peer exchange — waking PHASE3",
                     self.direction, registered
                 );
-                // Wake PHASE3 immediately so it dials newly discovered masternodes instead
-                // of waiting up to 30 s for the next scheduled tick.
+                // Wake PHASE3 only when genuinely new masternodes were discovered,
+                // so it dials them instead of waiting up to 30s for the next scheduled tick.
                 context
                     .masternode_registry
                     .priority_reconnect_notify()
