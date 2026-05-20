@@ -303,9 +303,6 @@ impl MasternodeRegistry {
                     let mut updated_info = info;
                     updated_info.masternode.address = ip_only.clone();
                     updated_info.peer_reports = Arc::new(DashMap::new());
-                    // Set first_seen_at to now so nodes loaded from disk get a grace period
-                    // before the reachability check is enforced (probe runs after 5 min warm-up).
-                    updated_info.first_seen_at = now;
                     // Accumulate outstanding uptime from the previous session before marking inactive
                     if updated_info.is_active
                         && updated_info.uptime_start > 0
@@ -314,6 +311,21 @@ impl MasternodeRegistry {
                         updated_info.total_uptime += now - updated_info.uptime_start;
                     }
                     updated_info.is_active = false; // Force inactive on load - only active on connection
+                    // Reset the eviction clock to daemon startup.  The on-disk timestamps
+                    // are from the previous session; if the daemon was stopped for longer than
+                    // the tier timeout, cleanup_stale_reports would evict every loaded node
+                    // immediately after the 120s grace period — before PHASE3 has had time to
+                    // reconnect to any of them.  Resetting to `now` gives each node the full
+                    // tier window (5 min Free, 1 hour paid) to prove it is still reachable.
+                    // Nodes that reconnect update last_seen_at via their TCP handshake;
+                    // nodes that don't will be evicted normally after the tier timeout.
+                    updated_info.last_seen_at = now;
+                    updated_info.uptime_start = now;
+                    // Reuse first_seen_at from disk if valid; otherwise stamp now for the
+                    // reachability-probe grace period (probe enforced after 5 min warm-up).
+                    if updated_info.first_seen_at == 0 {
+                        updated_info.first_seen_at = now;
+                    }
                     nodes.insert(ip_only, updated_info);
                 }
             }
