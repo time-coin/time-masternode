@@ -899,11 +899,12 @@ impl MasternodeRegistry {
         if !is_direct {
             let guard_now = Self::now();
             if let Some(removed_at) = self.gossip_removal_cooldown.get(&masternode.address) {
-                let tier_cooldown = if masternode.tier == crate::types::MasternodeTier::Free {
-                    300u64 // matches Free-tier eviction timeout
-                } else {
-                    AUTO_REMOVE_AFTER_SECS // matches paid-tier eviction timeout (1 hour)
-                };
+                // Use the same 1-hour cooldown for all tiers.  The Free-tier eviction
+                // window (300s) is much shorter than the cooldown so that a dead node
+                // pruned after 5 min of failed connections can't return via gossip for
+                // a full hour.  This stops the prune→resurrect→prune cycle that caused
+                // stale node counts to stay artificially high.
+                let tier_cooldown = AUTO_REMOVE_AFTER_SECS; // 1 hour for all tiers
                 let elapsed = guard_now.saturating_sub(*removed_at);
                 if elapsed < tier_cooldown {
                     tracing::debug!(

@@ -1867,6 +1867,19 @@ impl MessageHandler {
         let mn_data: Vec<crate::network::message::MasternodeAnnouncementData> = all_masternodes
             .iter()
             .filter(|mn_info| {
+                // Only relay masternodes that have been verified via a direct TCP
+                // connection at least once (last_seen_at > 0), or are registered on-chain.
+                // Gossip-only entries with last_seen_at == 0 have never successfully
+                // connected to us — propagating them spreads stale/dead node addresses
+                // across the network, causing every peer to repeatedly attempt and fail
+                // connections to nodes that have been offline for a long time.
+                let is_on_chain = matches!(
+                    mn_info.registration_source,
+                    crate::masternode_registry::RegistrationSource::OnChain(_)
+                );
+                if !is_on_chain && mn_info.last_seen_at == 0 {
+                    return false;
+                }
                 // Never relay peers that have sent oversized frames — even whitelisted
                 // friendly nodes running old code should not be propagated to the network
                 // while they are frame-bombing. They will re-appear once they upgrade.
