@@ -23,7 +23,7 @@ required-features = ["dashboard"]
 
 [features]
 default = []
-dashboard = ["ratatui", "crossterm"]
+dashboard = ["ratatui", "crossterm", "sysinfo"]
 
 [dependencies]
 tokio = { version = "1.38", features = [
@@ -91,6 +91,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # TUI dashboard dependencies (optional — only needed for time-dashboard binary)
 ratatui = { version = "0.26", optional = true }
 crossterm = { version = "0.27", optional = true }
+sysinfo = { version = "0.30", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile = "3.8"

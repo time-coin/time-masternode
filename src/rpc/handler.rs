@@ -286,6 +286,8 @@ impl RpcHandler {
             "lockunspent" => self.lock_unspent(&params_array).await,
             "listlockunspent" => self.list_lock_unspent().await,
             "submitcollateralproof" => self.submit_collateral_proof(&params_array).await,
+            "getoperatormessages" => self.get_operator_messages().await,
+            "sendoperatormessage" => self.send_operator_message(&params_array).await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -8251,6 +8253,84 @@ impl RpcHandler {
         Ok(
             json!({ "success": true, "message": "Proof stored. Daemon will include it in the next MasternodeAnnouncementV4." }),
         )
+    }
+
+    async fn get_operator_messages(&self) -> Result<Value, RpcError> {
+        let registry = self.blockchain.get_peer_registry().await.ok_or_else(|| RpcError {
+            code: -32603,
+            message: "Peer registry not available".to_string(),
+        })?;
+
+        let messages: Vec<Value> = match registry.operator_messages.lock() {
+            Ok(q) => q
+                .iter()
+                .map(|(ts, from, msg)| {
+                    json!({ "timestamp": ts, "from": from, "message": msg })
+                })
+                .collect(),
+            Err(_) => vec![],
+        };
+
+        Ok(json!(messages))
+    }
+
+    async fn send_operator_message(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let to_addr = params
+            .first()
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected [\"ip:port\", \"message\"]".to_string(),
+            })?;
+        let message = params
+            .get(1)
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected [\"ip:port\", \"message\"]".to_string(),
+            })?;
+
+        if message.len() > 500 {
+            return Err(RpcError {
+                code: -32602,
+                message: "Message exceeds 500 character limit".to_string(),
+            });
+        }
+
+        let from = self
+            .registry
+            .get_local_address()
+            .await
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let msg = crate::network::message::NetworkMessage::OperatorMessage {
+            from,
+            message: message.to_string(),
+            timestamp: now,
+        };
+
+        let registry = self.blockchain.get_peer_registry().await.ok_or_else(|| RpcError {
+            code: -32603,
+            message: "Peer registry not available".to_string(),
+        })?;
+
+        // Extract IP (strip port if target contains one different from P2P default)
+        let ip_only = to_addr.split(':').next().unwrap_or(to_addr);
+
+        registry
+            .send_to_peer(ip_only, msg)
+            .await
+            .map_err(|e| RpcError {
+                code: -32603,
+                message: format!("Failed to send to {}: {}", to_addr, e),
+            })?;
+
+        Ok(json!({ "success": true, "to": to_addr }))
     }
 } // end impl RpcHandler
 

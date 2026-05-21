@@ -377,6 +377,16 @@ pub enum NetworkMessage {
         total: u32,
         utxos: Vec<crate::types::UTXO>,
     },
+    /// Operator-to-operator informational notification (non-consensus, informational only).
+    /// Used for upgrade reminders, connectivity warnings, and other human-readable alerts.
+    OperatorMessage {
+        /// Sender's masternode IP:port or wallet address
+        from: String,
+        /// Human-readable notification text (max 500 chars enforced by sender)
+        message: String,
+        /// Unix timestamp (seconds since epoch)
+        timestamp: u64,
+    },
     /// Placeholder for messages from newer protocol versions that we can't parse
     UnknownMessage,
 }
@@ -565,6 +575,7 @@ impl NetworkMessage {
             NetworkMessage::UtxoReconciliationResponse { .. } => "UtxoReconciliationResponse",
             NetworkMessage::UTXOSetChunk { .. } => "UTXOSetChunk",
             NetworkMessage::UtxoReconciliationChunk { .. } => "UtxoReconciliationChunk",
+            NetworkMessage::OperatorMessage { .. } => "OperatorMessage",
         }
     }
 

@@ -326,6 +326,8 @@ pub struct MessageContext {
     pub tx_event_sender: Option<broadcast::Sender<crate::rpc::websocket::TransactionEvent>>,
     // Per-peer clock drift tracker
     pub drift_tracker: Option<Arc<tokio::sync::Mutex<crate::time_sync::PeerDriftTracker>>>,
+    // Shared operator message inbox (timestamp, from, message). Capped at 50 entries.
+    pub operator_messages: Option<Arc<std::sync::Mutex<std::collections::VecDeque<(u64, String, String)>>>>,
 }
 
 impl MessageContext {
@@ -354,6 +356,7 @@ impl MessageContext {
             ai_system: None,
             tx_event_sender: None,
             drift_tracker: None,
+            operator_messages: None,
         }
     }
 
@@ -386,6 +389,7 @@ impl MessageContext {
             ai_system: None,
             tx_event_sender: None,
             drift_tracker: None,
+            operator_messages: None,
         }
     }
 
@@ -411,6 +415,7 @@ impl MessageContext {
         let tx_event_sender = peer_registry.get_tx_event_sender().await;
         let seen_votes = Arc::clone(&peer_registry.seen_votes);
         let seen_tx_finalized = Arc::clone(&peer_registry.seen_tx_finalized);
+        let operator_messages = Arc::clone(&peer_registry.operator_messages);
 
         Self {
             blockchain,
@@ -431,6 +436,7 @@ impl MessageContext {
             ai_system,
             tx_event_sender,
             drift_tracker: None,
+            operator_messages: Some(operator_messages),
         }
     }
 
@@ -1482,6 +1488,33 @@ impl MessageHandler {
                 warn!("   and an open P2P port (mainnet: 24000, testnet: 24100).");
                 warn!("   Home connections with NAT/firewall that block inbound connections are");
                 warn!("   not eligible for rewards — only outbound-only nodes see this message.");
+                // Also store as an operator message so the dashboard can display it
+                if let Some(ref inbox) = context.operator_messages {
+                    if let Ok(mut q) = inbox.lock() {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        q.push_front((now, self.peer_ip.clone(), format!("Connectivity warning: {}", message)));
+                        q.truncate(50);
+                    }
+                }
+                Ok(None)
+            }
+
+            NetworkMessage::OperatorMessage { from, message, timestamp } => {
+                // Enforce a 500-character limit and strip control chars to prevent terminal injection.
+                let safe_msg: String = message.chars()
+                    .filter(|c| !c.is_control() || *c == '\n')
+                    .take(500)
+                    .collect();
+                info!("📨 Operator message from {}: {}", from, safe_msg);
+                if let Some(ref inbox) = context.operator_messages {
+                    if let Ok(mut q) = inbox.lock() {
+                        q.push_front((*timestamp, from.clone(), safe_msg));
+                        q.truncate(50);
+                    }
+                }
                 Ok(None)
             }
 

@@ -123,6 +123,10 @@ pub struct PeerConnectionRegistry {
     // exactly once per rotation window regardless of how many peers send it.
     // Without this, the already-finalized re-gossip path creates the same O(N²) storm.
     pub seen_tx_finalized: Arc<crate::network::dedup_filter::DeduplicationFilter>,
+    /// Operator messages received from peers: (timestamp_secs, from_addr, message_text).
+    /// Capped at 50 entries (oldest dropped when full). Shared with the RPC handler so
+    /// the dashboard can poll `getoperatormessages` without a separate storage system.
+    pub operator_messages: Arc<std::sync::Mutex<std::collections::VecDeque<(u64, String, String)>>>,
 }
 
 fn extract_ip(addr: &str) -> &str {
@@ -171,6 +175,7 @@ impl PeerConnectionRegistry {
             seen_tx_finalized: Arc::new(crate::network::dedup_filter::DeduplicationFilter::new(
                 std::time::Duration::from_secs(300), // same 5-min window as votes
             )),
+            operator_messages: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         }
     }
 

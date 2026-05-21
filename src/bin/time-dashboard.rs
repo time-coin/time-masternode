@@ -18,6 +18,7 @@ use std::{
     io,
     time::{Duration, Instant},
 };
+use sysinfo::{Disks, System};
 use timed::http_client::HttpClient;
 
 const DASHBOARD_VERSION: &str = "1.5.8";
@@ -289,6 +290,20 @@ struct GovernanceProposal {
     total_weight: u64,
 }
 
+struct SystemResources {
+    ram_used_mb: u64,
+    ram_total_mb: u64,
+    disk_used_gb: u64,
+    disk_total_gb: u64,
+}
+
+#[derive(Debug, Clone)]
+struct OperatorMsg {
+    timestamp: u64,
+    from: String,
+    message: String,
+}
+
 struct DashboardData {
     blockchain: Option<BlockchainInfo>,
     wallet: Option<WalletInfo>,
@@ -301,6 +316,8 @@ struct DashboardData {
     mempool_txs: Vec<MempoolTx>,
     recent_blocks: Vec<BlockDetail>,
     proposals: Vec<GovernanceProposal>,
+    operator_messages: Vec<OperatorMsg>,
+    system: Option<SystemResources>,
     last_update: DateTime<Utc>,
     update_count: u64,
 }
@@ -319,10 +336,24 @@ impl Default for DashboardData {
             mempool_txs: Vec::new(),
             recent_blocks: Vec::new(),
             proposals: Vec::new(),
+            operator_messages: Vec::new(),
+            system: None,
             last_update: Utc::now(),
             update_count: 0,
         }
     }
+}
+
+enum ComposeStage {
+    EnteringIp,
+    EnteringMessage,
+}
+
+struct ComposeState {
+    stage: ComposeStage,
+    ip_input: String,
+    message_input: String,
+    status: Option<(bool, String)>,
 }
 
 struct App {
@@ -347,7 +378,9 @@ struct App {
     block_tx_detail: Option<TxDetail>,
     governance_scroll: usize,
     masternode_scroll: usize,
+    messages_scroll: usize,
     vote_status: Option<(bool, String)>, // (success, message)
+    compose: Option<ComposeState>,
 }
 
 impl App {
@@ -376,7 +409,9 @@ impl App {
             block_tx_detail: None,
             governance_scroll: 0,
             masternode_scroll: 0,
+            messages_scroll: 0,
             vote_status: None,
+            compose: None,
         }
     }
 
@@ -569,6 +604,36 @@ impl App {
             self.data.peers.insert(0, local_peer);
         }
 
+        // Fetch operator messages
+        if let Ok(msgs) = self
+            .rpc_call::<Vec<serde_json::Value>>("getoperatormessages", vec![])
+            .await
+        {
+            self.data.operator_messages = msgs
+                .into_iter()
+                .filter_map(|v| {
+                    Some(OperatorMsg {
+                        timestamp: v.get("timestamp")?.as_u64()?,
+                        from: v.get("from")?.as_str()?.to_string(),
+                        message: v.get("message")?.as_str()?.to_string(),
+                    })
+                })
+                .collect();
+        }
+
+        // Collect local system resources (RAM + disk) — read directly from OS
+        let mut sys = System::new();
+        sys.refresh_memory();
+        let disks = Disks::new_with_refreshed_list();
+        let disk_total: u64 = disks.iter().map(|d| d.total_space()).sum();
+        let disk_avail: u64 = disks.iter().map(|d| d.available_space()).sum();
+        self.data.system = Some(SystemResources {
+            ram_used_mb: sys.used_memory() / 1_048_576,
+            ram_total_mb: sys.total_memory() / 1_048_576,
+            disk_used_gb: disk_total.saturating_sub(disk_avail) / 1_073_741_824,
+            disk_total_gb: disk_total / 1_073_741_824,
+        });
+
         self.data.last_update = Utc::now();
         self.data.update_count += 1;
     }
@@ -648,14 +713,25 @@ impl App {
     }
 
     fn next_tab(&mut self) {
-        self.current_tab = (self.current_tab + 1) % 6;
+        self.current_tab = (self.current_tab + 1) % 7;
     }
 
     fn previous_tab(&mut self) {
         if self.current_tab > 0 {
             self.current_tab -= 1;
         } else {
-            self.current_tab = 5;
+            self.current_tab = 6;
+        }
+    }
+
+    async fn send_operator_message(&self, ip: &str, message: &str) -> Result<String, String> {
+        let params = vec![serde_json::json!(ip), serde_json::json!(message)];
+        match self
+            .rpc_call::<serde_json::Value>("sendoperatormessage", params)
+            .await
+        {
+            Ok(_) => Ok(format!("Message sent to {}", ip)),
+            Err(e) => Err(e.to_string()),
         }
     }
 
@@ -698,6 +774,7 @@ fn ui(f: &mut Frame, app: &App) {
         3 => render_mempool(f, chunks[2], app),
         4 => render_blocks(f, chunks[2], app),
         5 => render_governance(f, chunks[2], app),
+        6 => render_messages(f, chunks[2], app),
         _ => {}
     }
 
@@ -800,6 +877,7 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
         "Mempool",
         "Blocks",
         "Governance",
+        "Messages",
     ];
     let tabs = Tabs::new(titles)
         .block(Block::default().borders(Borders::ALL).title("Navigation"))
@@ -820,6 +898,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         .constraints([
             Constraint::Length(9), // Blockchain info (5 lines + border)
             Constraint::Length(7), // Wallet info
+            Constraint::Length(6), // System resources
             Constraint::Min(0),    // Consensus info
         ])
         .split(area);
@@ -897,6 +976,49 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(block, chunks[1]);
     }
 
+    // System resources
+    {
+        let (ram_line, disk_line) = if let Some(ref sys) = app.data.system {
+            let ram_pct = if sys.ram_total_mb > 0 {
+                sys.ram_used_mb * 100 / sys.ram_total_mb
+            } else {
+                0
+            };
+            let disk_pct = if sys.disk_total_gb > 0 {
+                sys.disk_used_gb * 100 / sys.disk_total_gb
+            } else {
+                0
+            };
+            let ram_color = if ram_pct > 90 { Color::Red } else if ram_pct > 70 { Color::Yellow } else { Color::Green };
+            let disk_color = if disk_pct > 90 { Color::Red } else if disk_pct > 70 { Color::Yellow } else { Color::Green };
+            (
+                Line::from(vec![
+                    Span::raw("RAM:  "),
+                    Span::styled(
+                        format!("{} MB / {} MB  ({}%)", sys.ram_used_mb, sys.ram_total_mb, ram_pct),
+                        Style::default().fg(ram_color),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::raw("Disk: "),
+                    Span::styled(
+                        format!("{} GB / {} GB  ({}%)", sys.disk_used_gb, sys.disk_total_gb, disk_pct),
+                        Style::default().fg(disk_color),
+                    ),
+                ]),
+            )
+        } else {
+            (
+                Line::from(vec![Span::raw("RAM:  ---")]),
+                Line::from(vec![Span::raw("Disk: ---")]),
+            )
+        };
+        let block = Paragraph::new(vec![ram_line, disk_line])
+            .block(Block::default().borders(Borders::ALL).title("System Resources"))
+            .style(Style::default().fg(Color::White));
+        f.render_widget(block, chunks[2]);
+    }
+
     // Consensus info
     if let Some(consensus) = &app.data.consensus {
         let info = vec![
@@ -938,7 +1060,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         let block = Paragraph::new(info)
             .block(Block::default().borders(Borders::ALL).title("Consensus"))
             .style(Style::default().fg(Color::White));
-        f.render_widget(block, chunks[2]);
+        f.render_widget(block, chunks[3]);
     }
 }
 
@@ -2335,6 +2457,108 @@ fn render_governance(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(table, chunks[2], &mut table_state);
 }
 
+fn render_messages(f: &mut Frame, area: Rect, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5), // Hint / compose area
+            Constraint::Min(0),    // Message list
+        ])
+        .split(area);
+
+    // --- Top pane: compose input or hint bar ---
+    if let Some(ref compose) = app.compose {
+        let (label, value, title_suffix) = match compose.stage {
+            ComposeStage::EnteringIp => ("Target IP:port › ", &compose.ip_input, "Enter IP"),
+            ComposeStage::EnteringMessage => ("Message › ", &compose.message_input, "Enter Message"),
+        };
+        let input_line = Line::from(vec![
+            Span::styled(label, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(value.as_str(), Style::default().fg(Color::White)),
+            Span::styled("█", Style::default().fg(Color::Yellow)), // cursor
+        ]);
+        let status_line = if let Some((ok, ref msg)) = compose.status {
+            let color = if ok { Color::Green } else { Color::Red };
+            Line::from(vec![Span::styled(msg.as_str(), Style::default().fg(color))])
+        } else {
+            Line::from(vec![Span::styled("[Enter] Confirm  [Esc] Cancel", Style::default().fg(Color::DarkGray))])
+        };
+        let compose_box = Paragraph::new(vec![input_line, status_line])
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Send Operator Message — {}", title_suffix))
+                    .border_style(Style::default().fg(Color::Yellow)),
+            );
+        f.render_widget(compose_box, chunks[0]);
+    } else {
+        let hint = Paragraph::new(Line::from(vec![
+            Span::styled("[m] ", Style::default().fg(Color::Green)),
+            Span::raw("Send message to peer  "),
+            Span::styled("[↑↓] ", Style::default().fg(Color::Yellow)),
+            Span::raw("Scroll  "),
+            Span::styled("[r] ", Style::default().fg(Color::Yellow)),
+            Span::raw("Refresh"),
+        ]))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Operator Messages")
+                .border_style(Style::default().fg(Color::Cyan)),
+        );
+        f.render_widget(hint, chunks[0]);
+    }
+
+    // --- Message list ---
+    let messages = &app.data.operator_messages;
+    let scroll = app.messages_scroll.min(messages.len().saturating_sub(1));
+
+    let rows: Vec<Row> = messages
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .map(|(i, msg)| {
+            let ts = chrono::DateTime::from_timestamp(msg.timestamp as i64, 0)
+                .map(|dt: chrono::DateTime<Utc>| dt.format("%H:%M:%S").to_string())
+                .unwrap_or_else(|| "??:??:??".to_string());
+            Row::new(vec![
+                Cell::from(format!("{}", i + 1)),
+                Cell::from(ts).style(Style::default().fg(Color::DarkGray)),
+                Cell::from(msg.from.clone()).style(Style::default().fg(Color::Cyan)),
+                Cell::from(msg.message.clone()).style(Style::default().fg(Color::White)),
+            ])
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(4),
+        Constraint::Length(10),
+        Constraint::Length(22),
+        Constraint::Min(0),
+    ];
+
+    let header = Row::new(vec![
+        Cell::from("#").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Cell::from("Time").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Cell::from("From").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Cell::from("Message").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    ])
+    .height(1);
+
+    let title = format!("Inbox ({} messages)  [↑↓ scroll]", messages.len());
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .highlight_style(Style::default().bg(Color::DarkGray));
+
+    f.render_widget(table, chunks[1]);
+}
+
 fn format_age(secs: u64) -> String {
     if secs < 60 {
         format!("{}s", secs)
@@ -2366,6 +2590,8 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
             Span::raw("Switch tabs  |  "),
             Span::styled("[r] ", Style::default().fg(Color::Yellow)),
             Span::raw("Refresh  |  "),
+            Span::styled("[m] ", Style::default().fg(Color::Yellow)),
+            Span::raw("Message (Messages tab)  |  "),
             Span::styled("[q] ", Style::default().fg(Color::Yellow)),
             Span::raw("Quit"),
         ])]
@@ -2499,242 +2725,329 @@ async fn run_app<B: ratatui::backend::Backend>(
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Char('Q') => {
-                            if app.mempool_detail.is_some() {
-                                app.mempool_detail = None;
-                            } else if app.block_tx_detail.is_some() {
-                                app.block_tx_detail = None;
-                            } else if app.block_detail.is_some() {
-                                app.block_detail = None;
-                                app.block_tx_scroll = 0;
-                                app.block_tx_cursor = 0;
-                            } else if app.current_tab == 5 && app.vote_status.is_some() {
-                                app.vote_status = None;
-                            } else {
-                                app.should_quit = true;
+                    // Compose mode intercepts all keys
+                    if app.compose.is_some() {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.compose = None;
                             }
-                        }
-                        KeyCode::Char('c')
-                            if key
-                                .modifiers
-                                .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                        {
-                            app.should_quit = true;
-                        }
-                        KeyCode::Char('r') => {
-                            app.update_data().await;
-                            last_update = Instant::now();
-                        }
-                        KeyCode::Tab | KeyCode::Right
-                            if app.mempool_detail.is_none()
-                                && app.block_detail.is_none()
-                                && app.block_tx_detail.is_none() =>
-                        {
-                            app.next_tab();
-                            app.mempool_scroll = 0;
-                            app.mempool_cursor = 0;
-                            app.vote_status = None;
-                        }
-                        KeyCode::Left
-                            if app.mempool_detail.is_none()
-                                && app.block_detail.is_none()
-                                && app.block_tx_detail.is_none() =>
-                        {
-                            app.previous_tab();
-                            app.mempool_scroll = 0;
-                            app.mempool_cursor = 0;
-                            app.vote_status = None;
-                        }
-                        KeyCode::Up => {
-                            if app.current_tab == 3 && app.mempool_detail.is_none() {
-                                if app.mempool_cursor > 0 {
-                                    app.mempool_cursor -= 1;
-                                    // Scroll viewport up if cursor moved above it
-                                    if app.mempool_cursor < app.mempool_scroll {
-                                        app.mempool_scroll = app.mempool_cursor;
+                            KeyCode::Backspace => {
+                                if let Some(ref mut c) = app.compose {
+                                    match c.stage {
+                                        ComposeStage::EnteringIp => { c.ip_input.pop(); }
+                                        ComposeStage::EnteringMessage => { c.message_input.pop(); }
                                     }
                                 }
-                            } else if app.current_tab == 1 {
-                                app.peer_scroll = app.peer_scroll.saturating_sub(1);
-                            } else if app.current_tab == 2 {
-                                app.masternode_scroll = app.masternode_scroll.saturating_sub(1);
-                            } else if app.current_tab == 4 {
-                                if app.block_tx_detail.is_some() {
-                                    // nothing — no scrolling in TX detail yet
-                                } else if app.block_detail.is_some() {
-                                    if app.block_tx_cursor > 0 {
-                                        app.block_tx_cursor -= 1;
-                                        if app.block_tx_cursor < app.block_tx_scroll {
-                                            app.block_tx_scroll = app.block_tx_cursor;
+                            }
+                            KeyCode::Enter => {
+                                let done = if let Some(ref mut c) = app.compose {
+                                    match c.stage {
+                                        ComposeStage::EnteringIp => {
+                                            if !c.ip_input.is_empty() {
+                                                c.stage = ComposeStage::EnteringMessage;
+                                                c.status = None;
+                                            }
+                                            false
+                                        }
+                                        ComposeStage::EnteringMessage => {
+                                            !c.message_input.is_empty()
                                         }
                                     }
                                 } else {
-                                    if app.block_cursor > 0 {
-                                        app.block_cursor -= 1;
-                                        if app.block_cursor < app.block_scroll {
-                                            app.block_scroll = app.block_cursor;
+                                    false
+                                };
+                                if done {
+                                    let (ip, msg) = if let Some(ref c) = app.compose {
+                                        (c.ip_input.clone(), c.message_input.clone())
+                                    } else {
+                                        (String::new(), String::new())
+                                    };
+                                    match app.send_operator_message(&ip, &msg).await {
+                                        Ok(ok_msg) => {
+                                            if let Some(ref mut c) = app.compose {
+                                                c.status = Some((true, ok_msg));
+                                                c.message_input.clear();
+                                                c.ip_input.clear();
+                                                c.stage = ComposeStage::EnteringIp;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            if let Some(ref mut c) = app.compose {
+                                                c.status = Some((false, e));
+                                            }
                                         }
                                     }
                                 }
-                            } else if app.current_tab == 5 {
-                                app.governance_scroll = app.governance_scroll.saturating_sub(1);
-                                app.vote_status = None;
                             }
-                        }
-                        KeyCode::Down => {
-                            if app.current_tab == 3 && app.mempool_detail.is_none() {
-                                let max = app.data.mempool_txs.len().saturating_sub(1);
-                                if app.mempool_cursor < max {
-                                    app.mempool_cursor += 1;
-                                    // Scroll viewport down if cursor moved below visible area
-                                    // We don't have exact height here, so use a reasonable page size
-                                    let page = 20usize;
-                                    if app.mempool_cursor >= app.mempool_scroll + page {
-                                        app.mempool_scroll =
-                                            app.mempool_cursor.saturating_sub(page - 1);
-                                    }
-                                }
-                            } else if app.current_tab == 1 {
-                                let max = app.data.peers.len().saturating_sub(1);
-                                if app.peer_scroll < max {
-                                    app.peer_scroll += 1;
-                                }
-                            } else if app.current_tab == 2 {
-                                let max = app
-                                    .data
-                                    .masternode_list
-                                    .as_ref()
-                                    .map(|l| l.masternodes.len())
-                                    .unwrap_or(0)
-                                    .saturating_sub(1);
-                                if app.masternode_scroll < max {
-                                    app.masternode_scroll += 1;
-                                }
-                            } else if app.current_tab == 4 {
-                                if app.block_tx_detail.is_some() {
-                                    // nothing
-                                } else if let Some(detail_idx) = app.block_detail {
-                                    let max_tx = app
-                                        .data
-                                        .recent_blocks
-                                        .get(detail_idx)
-                                        .map(|b| b.tx.len())
-                                        .unwrap_or(0)
-                                        .saturating_sub(1);
-                                    if app.block_tx_cursor < max_tx {
-                                        app.block_tx_cursor += 1;
-                                        let page = 20usize;
-                                        if app.block_tx_cursor >= app.block_tx_scroll + page {
-                                            app.block_tx_scroll =
-                                                app.block_tx_cursor.saturating_sub(page - 1);
+                            KeyCode::Char(ch) => {
+                                if let Some(ref mut c) = app.compose {
+                                    match c.stage {
+                                        ComposeStage::EnteringIp => {
+                                            if c.ip_input.len() < 50 {
+                                                c.ip_input.push(ch);
+                                            }
+                                        }
+                                        ComposeStage::EnteringMessage => {
+                                            if c.message_input.len() < 500 {
+                                                c.message_input.push(ch);
+                                            }
                                         }
                                     }
-                                } else {
-                                    let max = app.data.recent_blocks.len().saturating_sub(1);
-                                    if app.block_cursor < max {
-                                        app.block_cursor += 1;
-                                        let page = 20usize;
-                                        if app.block_cursor >= app.block_scroll + page {
-                                            app.block_scroll =
-                                                app.block_cursor.saturating_sub(page - 1);
-                                        }
-                                    }
+                                    c.status = None;
                                 }
-                            } else if app.current_tab == 5 {
-                                let max = app.data.proposals.len().saturating_sub(1);
-                                if app.governance_scroll < max {
-                                    app.governance_scroll += 1;
-                                }
-                                app.vote_status = None;
                             }
+                            _ => {}
                         }
-                        KeyCode::Enter => {
-                            if app.current_tab == 3 {
+                    } else {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Char('Q') => {
                                 if app.mempool_detail.is_some() {
                                     app.mempool_detail = None;
-                                } else if !app.data.mempool_txs.is_empty() {
-                                    app.mempool_detail = Some(app.mempool_cursor);
-                                }
-                            } else if app.current_tab == 4 {
-                                if app.block_tx_detail.is_some() {
+                                } else if app.block_tx_detail.is_some() {
                                     app.block_tx_detail = None;
-                                } else if let Some(blk_idx) = app.block_detail {
-                                    // Drill into TX detail
-                                    if let Some(txid) = app
-                                        .data
-                                        .recent_blocks
-                                        .get(blk_idx)
-                                        .and_then(|b| b.tx.get(app.block_tx_cursor))
-                                        .cloned()
-                                    {
-                                        match app
-                                            .rpc_call::<TxDetail>(
-                                                "gettransaction",
-                                                vec![serde_json::json!(txid)],
-                                            )
-                                            .await
-                                        {
-                                            Ok(mut detail) => {
-                                                detail.txid = txid;
-                                                app.block_tx_detail = Some(detail);
+                                } else if app.block_detail.is_some() {
+                                    app.block_detail = None;
+                                    app.block_tx_scroll = 0;
+                                    app.block_tx_cursor = 0;
+                                } else if app.current_tab == 5 && app.vote_status.is_some() {
+                                    app.vote_status = None;
+                                } else {
+                                    app.should_quit = true;
+                                }
+                            }
+                            KeyCode::Char('c')
+                                if key
+                                    .modifiers
+                                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                            {
+                                app.should_quit = true;
+                            }
+                            KeyCode::Char('r') => {
+                                app.update_data().await;
+                                last_update = Instant::now();
+                            }
+                            KeyCode::Char('m') | KeyCode::Char('M') if app.current_tab == 6 => {
+                                app.compose = Some(ComposeState {
+                                    stage: ComposeStage::EnteringIp,
+                                    ip_input: String::new(),
+                                    message_input: String::new(),
+                                    status: None,
+                                });
+                            }
+                            KeyCode::Tab | KeyCode::Right
+                                if app.mempool_detail.is_none()
+                                    && app.block_detail.is_none()
+                                    && app.block_tx_detail.is_none() =>
+                            {
+                                app.next_tab();
+                                app.mempool_scroll = 0;
+                                app.mempool_cursor = 0;
+                                app.vote_status = None;
+                            }
+                            KeyCode::Left
+                                if app.mempool_detail.is_none()
+                                    && app.block_detail.is_none()
+                                    && app.block_tx_detail.is_none() =>
+                            {
+                                app.previous_tab();
+                                app.mempool_scroll = 0;
+                                app.mempool_cursor = 0;
+                                app.vote_status = None;
+                            }
+                            KeyCode::Up => {
+                                if app.current_tab == 3 && app.mempool_detail.is_none() {
+                                    if app.mempool_cursor > 0 {
+                                        app.mempool_cursor -= 1;
+                                        if app.mempool_cursor < app.mempool_scroll {
+                                            app.mempool_scroll = app.mempool_cursor;
+                                        }
+                                    }
+                                } else if app.current_tab == 1 {
+                                    app.peer_scroll = app.peer_scroll.saturating_sub(1);
+                                } else if app.current_tab == 2 {
+                                    app.masternode_scroll = app.masternode_scroll.saturating_sub(1);
+                                } else if app.current_tab == 4 {
+                                    if app.block_tx_detail.is_some() {
+                                        // nothing
+                                    } else if app.block_detail.is_some() {
+                                        if app.block_tx_cursor > 0 {
+                                            app.block_tx_cursor -= 1;
+                                            if app.block_tx_cursor < app.block_tx_scroll {
+                                                app.block_tx_scroll = app.block_tx_cursor;
                                             }
-                                            Err(_) => {
-                                                // Show a minimal placeholder so user sees something
-                                                app.block_tx_detail = Some(TxDetail {
-                                                    txid: txid.clone(),
-                                                    ..Default::default()
-                                                });
+                                        }
+                                    } else {
+                                        if app.block_cursor > 0 {
+                                            app.block_cursor -= 1;
+                                            if app.block_cursor < app.block_scroll {
+                                                app.block_scroll = app.block_cursor;
                                             }
                                         }
                                     }
-                                } else if !app.data.recent_blocks.is_empty() {
-                                    app.block_detail = Some(app.block_cursor);
+                                } else if app.current_tab == 5 {
+                                    app.governance_scroll = app.governance_scroll.saturating_sub(1);
+                                    app.vote_status = None;
+                                } else if app.current_tab == 6 {
+                                    app.messages_scroll = app.messages_scroll.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Down => {
+                                if app.current_tab == 3 && app.mempool_detail.is_none() {
+                                    let max = app.data.mempool_txs.len().saturating_sub(1);
+                                    if app.mempool_cursor < max {
+                                        app.mempool_cursor += 1;
+                                        let page = 20usize;
+                                        if app.mempool_cursor >= app.mempool_scroll + page {
+                                            app.mempool_scroll =
+                                                app.mempool_cursor.saturating_sub(page - 1);
+                                        }
+                                    }
+                                } else if app.current_tab == 1 {
+                                    let max = app.data.peers.len().saturating_sub(1);
+                                    if app.peer_scroll < max {
+                                        app.peer_scroll += 1;
+                                    }
+                                } else if app.current_tab == 2 {
+                                    let max = app
+                                        .data
+                                        .masternode_list
+                                        .as_ref()
+                                        .map(|l| l.masternodes.len())
+                                        .unwrap_or(0)
+                                        .saturating_sub(1);
+                                    if app.masternode_scroll < max {
+                                        app.masternode_scroll += 1;
+                                    }
+                                } else if app.current_tab == 4 {
+                                    if app.block_tx_detail.is_some() {
+                                        // nothing
+                                    } else if let Some(detail_idx) = app.block_detail {
+                                        let max_tx = app
+                                            .data
+                                            .recent_blocks
+                                            .get(detail_idx)
+                                            .map(|b| b.tx.len())
+                                            .unwrap_or(0)
+                                            .saturating_sub(1);
+                                        if app.block_tx_cursor < max_tx {
+                                            app.block_tx_cursor += 1;
+                                            let page = 20usize;
+                                            if app.block_tx_cursor >= app.block_tx_scroll + page {
+                                                app.block_tx_scroll =
+                                                    app.block_tx_cursor.saturating_sub(page - 1);
+                                            }
+                                        }
+                                    } else {
+                                        let max = app.data.recent_blocks.len().saturating_sub(1);
+                                        if app.block_cursor < max {
+                                            app.block_cursor += 1;
+                                            let page = 20usize;
+                                            if app.block_cursor >= app.block_scroll + page {
+                                                app.block_scroll =
+                                                    app.block_cursor.saturating_sub(page - 1);
+                                            }
+                                        }
+                                    }
+                                } else if app.current_tab == 5 {
+                                    let max = app.data.proposals.len().saturating_sub(1);
+                                    if app.governance_scroll < max {
+                                        app.governance_scroll += 1;
+                                    }
+                                    app.vote_status = None;
+                                } else if app.current_tab == 6 {
+                                    let max = app.data.operator_messages.len().saturating_sub(1);
+                                    if app.messages_scroll < max {
+                                        app.messages_scroll += 1;
+                                    }
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if app.current_tab == 3 {
+                                    if app.mempool_detail.is_some() {
+                                        app.mempool_detail = None;
+                                    } else if !app.data.mempool_txs.is_empty() {
+                                        app.mempool_detail = Some(app.mempool_cursor);
+                                    }
+                                } else if app.current_tab == 4 {
+                                    if app.block_tx_detail.is_some() {
+                                        app.block_tx_detail = None;
+                                    } else if let Some(blk_idx) = app.block_detail {
+                                        if let Some(txid) = app
+                                            .data
+                                            .recent_blocks
+                                            .get(blk_idx)
+                                            .and_then(|b| b.tx.get(app.block_tx_cursor))
+                                            .cloned()
+                                        {
+                                            match app
+                                                .rpc_call::<TxDetail>(
+                                                    "gettransaction",
+                                                    vec![serde_json::json!(txid)],
+                                                )
+                                                .await
+                                            {
+                                                Ok(mut detail) => {
+                                                    detail.txid = txid;
+                                                    app.block_tx_detail = Some(detail);
+                                                }
+                                                Err(_) => {
+                                                    app.block_tx_detail = Some(TxDetail {
+                                                        txid: txid.clone(),
+                                                        ..Default::default()
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    } else if !app.data.recent_blocks.is_empty() {
+                                        app.block_detail = Some(app.block_cursor);
+                                        app.block_tx_scroll = 0;
+                                        app.block_tx_cursor = 0;
+                                    }
+                                }
+                            }
+                            KeyCode::Esc => {
+                                if app.mempool_detail.is_some() {
+                                    app.mempool_detail = None;
+                                } else if app.block_tx_detail.is_some() {
+                                    app.block_tx_detail = None;
+                                } else if app.block_detail.is_some() {
+                                    app.block_detail = None;
                                     app.block_tx_scroll = 0;
                                     app.block_tx_cursor = 0;
+                                } else if app.current_tab == 5 {
+                                    app.vote_status = None;
+                                } else if app.current_tab == 6 {
+                                    app.compose = None;
                                 }
                             }
-                        }
-                        KeyCode::Esc => {
-                            if app.mempool_detail.is_some() {
-                                app.mempool_detail = None;
-                            } else if app.block_tx_detail.is_some() {
-                                app.block_tx_detail = None;
-                            } else if app.block_detail.is_some() {
-                                app.block_detail = None;
-                                app.block_tx_scroll = 0;
-                                app.block_tx_cursor = 0;
-                            } else if app.current_tab == 5 {
-                                app.vote_status = None;
-                            }
-                        }
-                        KeyCode::Char('v') | KeyCode::Char('V') if app.current_tab == 5 => {
-                            if !app.can_govern() {
-                                // ignore — not eligible
-                            } else if let Some(proposal) =
-                                app.data.proposals.get(app.governance_scroll)
-                            {
-                                let id = proposal.id.clone();
-                                match app.cast_vote(&id, true).await {
-                                    Ok(msg) => app.vote_status = Some((true, msg)),
-                                    Err(e) => app.vote_status = Some((false, e)),
+                            KeyCode::Char('v') | KeyCode::Char('V') if app.current_tab == 5 => {
+                                if !app.can_govern() {
+                                    // ignore
+                                } else if let Some(proposal) =
+                                    app.data.proposals.get(app.governance_scroll)
+                                {
+                                    let id = proposal.id.clone();
+                                    match app.cast_vote(&id, true).await {
+                                        Ok(msg) => app.vote_status = Some((true, msg)),
+                                        Err(e) => app.vote_status = Some((false, e)),
+                                    }
                                 }
                             }
-                        }
-                        KeyCode::Char('x') | KeyCode::Char('X') if app.current_tab == 5 => {
-                            if !app.can_govern() {
-                                // ignore — not eligible
-                            } else if let Some(proposal) =
-                                app.data.proposals.get(app.governance_scroll)
-                            {
-                                let id = proposal.id.clone();
-                                match app.cast_vote(&id, false).await {
-                                    Ok(msg) => app.vote_status = Some((true, msg)),
-                                    Err(e) => app.vote_status = Some((false, e)),
+                            KeyCode::Char('x') | KeyCode::Char('X') if app.current_tab == 5 => {
+                                if !app.can_govern() {
+                                    // ignore
+                                } else if let Some(proposal) =
+                                    app.data.proposals.get(app.governance_scroll)
+                                {
+                                    let id = proposal.id.clone();
+                                    match app.cast_vote(&id, false).await {
+                                        Ok(msg) => app.vote_status = Some((true, msg)),
+                                        Err(e) => app.vote_status = Some((false, e)),
+                                    }
                                 }
                             }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
             }
