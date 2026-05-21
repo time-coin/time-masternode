@@ -896,10 +896,10 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(9), // Blockchain info (5 lines + border)
-            Constraint::Length(7), // Wallet info
-            Constraint::Length(6), // System resources
-            Constraint::Min(0),    // Consensus info
+            Constraint::Length(7), // Blockchain info: 5 lines + 2 borders
+            Constraint::Length(5), // Wallet info: 3 lines + 2 borders
+            Constraint::Length(4), // System resources: 2 lines + 2 borders
+            Constraint::Length(6), // Consensus info: 4 lines + 2 borders
         ])
         .split(area);
 
