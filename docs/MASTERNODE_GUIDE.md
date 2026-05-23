@@ -1,6 +1,6 @@
 # TIME Coin Masternode Guide
 
-> Last updated: 2026-03-24
+> Last updated: 2026-05-23
 
 ## Overview
 
@@ -437,17 +437,19 @@ REM Windows
 scripts\dashboard.bat
 ```
 
-**Tabs** (switch with `1`–`5` or arrow keys):
+**Tabs** (switch with `1`–`7` or arrow keys):
 
 | Tab | Shows |
 |-----|-------|
-| **Overview** | Chain height, sync progress, wallet balance, peer count, masternode info |
+| **Overview** | Chain height, wallet balance, system resources (CPU/Mem/Swp/Dsk), consensus info |
+| **Network** | Connected peers with IP, tier, latency, and sync status |
 | **Masternode** | Your node's tier/uptime, full network masternode list with status |
 | **Mempool** | Pending and finalized transactions, fee details, transaction inspector |
 | **Blocks** | Recent blocks with height, hash, timestamp, tx count, reward |
 | **Governance** | Active proposals — vote directly from the dashboard |
+| **Messages** | Operator messaging — broadcast or receive messages from other nodes |
 
-**Keys:** `q` quit · `↑↓` scroll · `Enter` expand detail · `1`–`5` jump to tab
+**Keys:** `q` quit · `↑↓` scroll · `Enter` expand detail · `1`–`7` jump to tab · `m` compose message
 
 The dashboard auto-detects which network is running (by checking `.cookie`
 files) and reads RPC credentials from `time.conf` automatically.

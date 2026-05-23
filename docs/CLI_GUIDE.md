@@ -102,6 +102,19 @@ time-cli getblock 1
 ```
 Returns information about a specific block by height.
 
+#### Find Block by Date
+```bash
+time-cli findblockbydate <unix_timestamp>
+```
+Binary-searches the chain for the block closest to the given Unix timestamp.
+Returns the block `height`, its actual `timestamp`, and `delta_secs` — how far
+it is from the requested time.
+
+```bash
+# Example: find the block produced closest to 2026-01-01 00:00 UTC
+time-cli findblockbydate 1735689600
+```
+
 ---
 
 ### Network Information
@@ -264,6 +277,27 @@ Releases every collateral lock on this node without touching transaction UTXO
 locks. Active masternodes re-lock their collateral within 30 seconds via their
 next gossip announcement. Use as a last resort when multiple collaterals are
 stuck or a squatter has locked UTXOs belonging to legitimate nodes.
+
+#### Reward Report
+```bash
+time-cli getrewardreport                           # last week (~1,008 blocks)
+time-cli getrewardreport <N>                       # last N blocks (max 10,080)
+time-cli getrewardreport <from_height> <to_height> # specific block range
+```
+Scans blocks and returns reward totals broken down by address and by tier.
+Useful for auditing earnings or verifying fair distribution across the network.
+
+Output includes `by_tier` (node count, total wins, total earned, avg per node)
+and `by_address` (individual earnings sorted by amount descending), plus
+`blocks_scanned` and `total_emitted`.
+
+```bash
+# Audit the last 2 weeks
+time-cli getrewardreport 2016
+
+# Check a specific block range
+time-cli getrewardreport 1000 2000
+```
 
 ---
 
