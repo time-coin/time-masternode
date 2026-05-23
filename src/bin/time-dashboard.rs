@@ -366,6 +366,7 @@ struct App {
     rpc_pass: String,
     client: HttpClient,
     sysinfo: System,
+    disks: Disks,
     current_tab: usize,
     should_quit: bool,
     rpc_connected: bool,
@@ -391,6 +392,8 @@ impl App {
     fn new(rpc_url: String, rpc_user: String, rpc_pass: String) -> Self {
         let mut sysinfo = System::new();
         sysinfo.refresh_all();
+        let mut disks = Disks::new_with_refreshed_list();
+        disks.refresh();
         Self {
             data: DashboardData::default(),
             rpc_url,
@@ -400,6 +403,7 @@ impl App {
                 .with_timeout(Duration::from_secs(3))
                 .with_accept_invalid_certs(true),
             sysinfo,
+            disks,
             current_tab: 0,
             should_quit: false,
             rpc_connected: false,
@@ -631,9 +635,10 @@ impl App {
         // Collect local system resources — use persistent System for accurate CPU delta
         self.sysinfo.refresh_all();
         let cpu_pct = self.sysinfo.global_cpu_info().cpu_usage();
-        let disks = Disks::new_with_refreshed_list();
-        let disk_total: u64 = disks.iter().map(|d| d.total_space()).sum();
-        let disk_avail: u64 = disks.iter().map(|d| d.available_space()).sum();
+        self.disks.refresh_list(); // re-queries total + available from OS
+        self.disks.refresh(); // belt-and-suspenders: update available_space via mount point
+        let disk_total: u64 = self.disks.iter().map(|d| d.total_space()).sum();
+        let disk_avail: u64 = self.disks.iter().map(|d| d.available_space()).sum();
         self.data.system = Some(SystemResources {
             cpu_pct,
             ram_used_mb: self.sysinfo.used_memory() / 1_048_576,
