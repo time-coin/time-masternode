@@ -183,8 +183,7 @@ async fn check_sliding_window(
 /// immediately — before the expensive UTXO lookup — preventing ban-list exhaustion DoS.
 /// Key = "<txid_hex>:<vout>", value = count of distinct IPs banned for this outpoint.
 fn contested_outpoints() -> &'static dashmap::DashMap<String, u32> {
-    static MAP: std::sync::OnceLock<dashmap::DashMap<String, u32>> =
-        std::sync::OnceLock::new();
+    static MAP: std::sync::OnceLock<dashmap::DashMap<String, u32>> = std::sync::OnceLock::new();
     MAP.get_or_init(dashmap::DashMap::new)
 }
 
@@ -327,7 +326,8 @@ pub struct MessageContext {
     // Per-peer clock drift tracker
     pub drift_tracker: Option<Arc<tokio::sync::Mutex<crate::time_sync::PeerDriftTracker>>>,
     // Shared operator message inbox (timestamp, from, message). Capped at 50 entries.
-    pub operator_messages: Option<Arc<std::sync::Mutex<std::collections::VecDeque<(u64, String, String)>>>>,
+    pub operator_messages:
+        Option<Arc<std::sync::Mutex<std::collections::VecDeque<(u64, String, String)>>>>,
 }
 
 impl MessageContext {
@@ -1495,16 +1495,25 @@ impl MessageHandler {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs();
-                        q.push_front((now, self.peer_ip.clone(), format!("Connectivity warning: {}", message)));
+                        q.push_front((
+                            now,
+                            self.peer_ip.clone(),
+                            format!("Connectivity warning: {}", message),
+                        ));
                         q.truncate(50);
                     }
                 }
                 Ok(None)
             }
 
-            NetworkMessage::OperatorMessage { from, message, timestamp } => {
+            NetworkMessage::OperatorMessage {
+                from,
+                message,
+                timestamp,
+            } => {
                 // Enforce a 500-character limit and strip control chars to prevent terminal injection.
-                let safe_msg: String = message.chars()
+                let safe_msg: String = message
+                    .chars()
                     .filter(|c| !c.is_control() || *c == '\n')
                     .take(500)
                     .collect();
@@ -4103,8 +4112,7 @@ impl MessageHandler {
             //
             // V4 claimants (collateral_proof non-empty) always proceed normally so the
             // legitimate owner can still recover via cryptographic proof.
-            let outpoint_key_str =
-                format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
+            let outpoint_key_str = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
             {
                 let is_v4_claim = !collateral_proof.is_empty();
                 let contested_count = contested_outpoints()
@@ -4408,8 +4416,8 @@ impl MessageHandler {
                                                 // Track this outpoint as contested so future
                                                 // non-V4 claimants are rejected immediately.
                                                 *contested_outpoints()
-                                                   .entry(outpoint_key_str.clone())
-                                                   .or_insert(0) += 1;
+                                                    .entry(outpoint_key_str.clone())
+                                                    .or_insert(0) += 1;
                                                 if is_relayed {
                                                     let bare_relay = peer_ip
                                                         .split(':')

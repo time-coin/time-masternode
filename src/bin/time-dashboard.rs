@@ -989,20 +989,38 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 0
             };
-            let ram_color = if ram_pct > 90 { Color::Red } else if ram_pct > 70 { Color::Yellow } else { Color::Green };
-            let disk_color = if disk_pct > 90 { Color::Red } else if disk_pct > 70 { Color::Yellow } else { Color::Green };
+            let ram_color = if ram_pct > 90 {
+                Color::Red
+            } else if ram_pct > 70 {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
+            let disk_color = if disk_pct > 90 {
+                Color::Red
+            } else if disk_pct > 70 {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
             (
                 Line::from(vec![
                     Span::raw("RAM:  "),
                     Span::styled(
-                        format!("{} MB / {} MB  ({}%)", sys.ram_used_mb, sys.ram_total_mb, ram_pct),
+                        format!(
+                            "{} MB / {} MB  ({}%)",
+                            sys.ram_used_mb, sys.ram_total_mb, ram_pct
+                        ),
                         Style::default().fg(ram_color),
                     ),
                 ]),
                 Line::from(vec![
                     Span::raw("Disk: "),
                     Span::styled(
-                        format!("{} GB / {} GB  ({}%)", sys.disk_used_gb, sys.disk_total_gb, disk_pct),
+                        format!(
+                            "{} GB / {} GB  ({}%)",
+                            sys.disk_used_gb, sys.disk_total_gb, disk_pct
+                        ),
                         Style::default().fg(disk_color),
                     ),
                 ]),
@@ -1014,7 +1032,11 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             )
         };
         let block = Paragraph::new(vec![ram_line, disk_line])
-            .block(Block::default().borders(Borders::ALL).title("System Resources"))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("System Resources"),
+            )
             .style(Style::default().fg(Color::White));
         f.render_widget(block, chunks[2]);
     }
@@ -2470,10 +2492,17 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
     if let Some(ref compose) = app.compose {
         let (label, value, title_suffix) = match compose.stage {
             ComposeStage::EnteringIp => ("Target IP:port › ", &compose.ip_input, "Enter IP"),
-            ComposeStage::EnteringMessage => ("Message › ", &compose.message_input, "Enter Message"),
+            ComposeStage::EnteringMessage => {
+                ("Message › ", &compose.message_input, "Enter Message")
+            }
         };
         let input_line = Line::from(vec![
-            Span::styled(label, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(value.as_str(), Style::default().fg(Color::White)),
             Span::styled("█", Style::default().fg(Color::Yellow)), // cursor
         ]);
@@ -2481,15 +2510,17 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
             let color = if ok { Color::Green } else { Color::Red };
             Line::from(vec![Span::styled(msg.as_str(), Style::default().fg(color))])
         } else {
-            Line::from(vec![Span::styled("[Enter] Confirm  [Esc] Cancel", Style::default().fg(Color::DarkGray))])
+            Line::from(vec![Span::styled(
+                "[Enter] Confirm  [Esc] Cancel",
+                Style::default().fg(Color::DarkGray),
+            )])
         };
-        let compose_box = Paragraph::new(vec![input_line, status_line])
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!("Send Operator Message — {}", title_suffix))
-                    .border_style(Style::default().fg(Color::Yellow)),
-            );
+        let compose_box = Paragraph::new(vec![input_line, status_line]).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Send Operator Message — {}", title_suffix))
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
         f.render_widget(compose_box, chunks[0]);
     } else {
         let hint = Paragraph::new(Line::from(vec![
@@ -2538,10 +2569,26 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
     ];
 
     let header = Row::new(vec![
-        Cell::from("#").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Cell::from("Time").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Cell::from("From").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Cell::from("Message").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Cell::from("#").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Time").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("From").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Message").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
     ])
     .height(1);
 
@@ -2734,8 +2781,12 @@ async fn run_app<B: ratatui::backend::Backend>(
                             KeyCode::Backspace => {
                                 if let Some(ref mut c) = app.compose {
                                     match c.stage {
-                                        ComposeStage::EnteringIp => { c.ip_input.pop(); }
-                                        ComposeStage::EnteringMessage => { c.message_input.pop(); }
+                                        ComposeStage::EnteringIp => {
+                                            c.ip_input.pop();
+                                        }
+                                        ComposeStage::EnteringMessage => {
+                                            c.message_input.pop();
+                                        }
                                     }
                                 }
                             }

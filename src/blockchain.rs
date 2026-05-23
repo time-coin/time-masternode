@@ -6125,7 +6125,10 @@ impl Blockchain {
                     address: address.clone(),
                     masternode_key: None,
                 };
-                let op = OutPoint { txid: block_hash, vout: vout as u32 };
+                let op = OutPoint {
+                    txid: block_hash,
+                    vout: vout as u32,
+                };
                 if let Err(e) = self.utxo_manager.add_utxo(utxo).await {
                     tracing::warn!(
                         "⚠️  Could not add genesis reward UTXO for {} in genesis block: {:?}",
@@ -6133,7 +6136,8 @@ impl Blockchain {
                         e
                     );
                 } else {
-                    self.utxo_manager.record_utxo_height(&op, block.header.height);
+                    self.utxo_manager
+                        .record_utxo_height(&op, block.header.height);
                     utxos_created += 1;
                     tracing::info!(
                         "💰 Genesis UTXO created: {} TIME → {}",
@@ -6226,7 +6230,8 @@ impl Blockchain {
                         e
                     );
                 } else {
-                    self.utxo_manager.record_utxo_height(&outpoint, block.header.height);
+                    self.utxo_manager
+                        .record_utxo_height(&outpoint, block.header.height);
                     utxos_created += 1;
                 }
             }
@@ -7838,7 +7843,28 @@ impl Blockchain {
         // idempotent — it silently skips TXs already present.
         let mut repooled = 0usize;
         for tx in &transactions_to_repool {
-            self.consensus.tx_pool.add_finalized_direct(tx.clone(), 0);
+            // Compute the fee from the tx_index: sum input values (archived in earlier
+            // blocks) minus output values.  Falls back to 0 if inputs can't be resolved,
+            // which is safe — the TX will be re-validated before block inclusion.
+            let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+            let mut input_sum: u64 = 0;
+            if let Some(ref txi) = self.tx_index {
+                for inp in &tx.inputs {
+                    if let Some(loc) = txi.get_location(&inp.previous_output.txid) {
+                        if let Ok(src_block) = self.get_block(loc.block_height) {
+                            if let Some(src_tx) = src_block.transactions.get(loc.tx_index) {
+                                if let Some(src_out) =
+                                    src_tx.outputs.get(inp.previous_output.vout as usize)
+                                {
+                                    input_sum += src_out.value;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let fee = input_sum.saturating_sub(output_sum);
+            self.consensus.tx_pool.add_finalized_direct(tx.clone(), fee);
             repooled += 1;
         }
         if repooled > 0 {

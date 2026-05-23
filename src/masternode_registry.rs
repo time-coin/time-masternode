@@ -311,14 +311,14 @@ impl MasternodeRegistry {
                         updated_info.total_uptime += now - updated_info.uptime_start;
                     }
                     updated_info.is_active = false; // Force inactive on load - only active on connection
-                    // Reset the eviction clock to daemon startup.  The on-disk timestamps
-                    // are from the previous session; if the daemon was stopped for longer than
-                    // the tier timeout, cleanup_stale_reports would evict every loaded node
-                    // immediately after the 120s grace period — before PHASE3 has had time to
-                    // reconnect to any of them.  Resetting to `now` gives each node the full
-                    // tier window (5 min Free, 1 hour paid) to prove it is still reachable.
-                    // Nodes that reconnect update last_seen_at via their TCP handshake;
-                    // nodes that don't will be evicted normally after the tier timeout.
+                                                    // Reset the eviction clock to daemon startup.  The on-disk timestamps
+                                                    // are from the previous session; if the daemon was stopped for longer than
+                                                    // the tier timeout, cleanup_stale_reports would evict every loaded node
+                                                    // immediately after the 120s grace period — before PHASE3 has had time to
+                                                    // reconnect to any of them.  Resetting to `now` gives each node the full
+                                                    // tier window (5 min Free, 1 hour paid) to prove it is still reachable.
+                                                    // Nodes that reconnect update last_seen_at via their TCP handshake;
+                                                    // nodes that don't will be evicted normally after the tier timeout.
                     updated_info.last_seen_at = now;
                     updated_info.uptime_start = now;
                     // Reuse first_seen_at from disk if valid; otherwise stamp now for the
@@ -474,9 +474,7 @@ impl MasternodeRegistry {
         {
             let nodes = self.masternodes.read().await;
             for (addr, info) in nodes.iter() {
-                if info.masternode.tier == crate::types::MasternodeTier::Free
-                    && !info.is_active
-                {
+                if info.masternode.tier == crate::types::MasternodeTier::Free && !info.is_active {
                     // Gossip-sourced and suspended nodes have last_seen_at == 0.
                     // Fall back to first_seen_at so they are not exempt from cleanup.
                     let reference = if info.last_seen_at > 0 {
@@ -910,7 +908,9 @@ impl MasternodeRegistry {
                     tracing::debug!(
                         "⏳ [gossip-guard] Skipping peer-exchange re-registration for {} \
                          (removed {}s ago, cooldown {}s)",
-                        masternode.address, elapsed, tier_cooldown
+                        masternode.address,
+                        elapsed,
+                        tier_cooldown
                     );
                     return Err(RegistryError::IpCyclingRejected);
                 } else {
@@ -3641,8 +3641,7 @@ impl MasternodeRegistry {
             let within_grace = !matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
                 && info.last_seen_at > 0
                 && now.saturating_sub(info.last_seen_at) < ACTIVE_GRACE_SECS;
-            info.is_active =
-                !info.consensus_suspended && (is_directly_connected || within_grace);
+            info.is_active = !info.consensus_suspended && (is_directly_connected || within_grace);
 
             if was_active != info.is_active {
                 status_changes += 1;
@@ -3714,11 +3713,7 @@ impl MasternodeRegistry {
                 // Block gossip/peer-exchange from immediately resurrecting this node.
                 // Direct TCP connections bypass the guard — if the node is genuinely
                 // back online we want it to reconnect.
-                let ip_only = address
-                    .split(':')
-                    .next()
-                    .unwrap_or(address)
-                    .to_string();
+                let ip_only = address.split(':').next().unwrap_or(address).to_string();
                 self.gossip_removal_cooldown.insert(ip_only, now);
 
                 // Queue collateral unlock and remove on-chain anchor

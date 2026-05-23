@@ -1367,13 +1367,14 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let (method, params) = match &args.command {
         Commands::GetBlockchainInfo => ("getblockchaininfo", json!([])),
         Commands::GetSupply { dormant_years } => ("getsupply", json!([dormant_years])),
-        Commands::GetRewardReport { from_or_blocks, to_height } => {
-            match (from_or_blocks, to_height) {
-                (Some(from), Some(to)) => ("getrewardreport", json!([from, to])),
-                (Some(n), None) => ("getrewardreport", json!([n])),
-                (None, _) => ("getrewardreport", json!([])),
-            }
-        }
+        Commands::GetRewardReport {
+            from_or_blocks,
+            to_height,
+        } => match (from_or_blocks, to_height) {
+            (Some(from), Some(to)) => ("getrewardreport", json!([from, to])),
+            (Some(n), None) => ("getrewardreport", json!([n])),
+            (None, _) => ("getrewardreport", json!([])),
+        },
         Commands::FindBlockByDate { timestamp } => ("findblockbydate", json!([timestamp])),
         Commands::GetBlock { height } => ("getblock", json!([height])),
         Commands::GetBlockCount => ("getblockcount", json!([])),

@@ -561,14 +561,20 @@ impl RpcHandler {
     }
 
     async fn find_block_by_date(&self, params: &[Value]) -> Result<Value, RpcError> {
-        let target_ts = params.first().and_then(|v| v.as_u64()).ok_or_else(|| RpcError {
-            code: -32602,
-            message: "Expected unix timestamp".to_string(),
-        })?;
+        let target_ts = params
+            .first()
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected unix timestamp".to_string(),
+            })?;
 
         let tip = self.blockchain.get_height();
         if tip == 0 {
-            return Err(RpcError { code: -1, message: "No blocks yet".to_string() });
+            return Err(RpcError {
+                code: -1,
+                message: "No blocks yet".to_string(),
+            });
         }
 
         // Binary search by block timestamp.
@@ -576,7 +582,10 @@ impl RpcHandler {
         let mut hi: u64 = tip;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let ts = self.blockchain.get_block_by_height(mid).await
+            let ts = self
+                .blockchain
+                .get_block_by_height(mid)
+                .await
                 .map(|b| b.header.timestamp as u64)
                 .unwrap_or(0u64);
             if ts < target_ts {
@@ -588,10 +597,18 @@ impl RpcHandler {
 
         // lo is the first block at or after target_ts. Check neighbour to find closest.
         let height = if lo > 1 {
-            let ts_lo = self.blockchain.get_block_by_height(lo).await
-                .map(|b| b.header.timestamp as u64).unwrap_or(u64::MAX);
-            let ts_prev = self.blockchain.get_block_by_height(lo - 1).await
-                .map(|b| b.header.timestamp as u64).unwrap_or(0u64);
+            let ts_lo = self
+                .blockchain
+                .get_block_by_height(lo)
+                .await
+                .map(|b| b.header.timestamp as u64)
+                .unwrap_or(u64::MAX);
+            let ts_prev = self
+                .blockchain
+                .get_block_by_height(lo - 1)
+                .await
+                .map(|b| b.header.timestamp as u64)
+                .unwrap_or(0u64);
             if target_ts.saturating_sub(ts_prev) <= ts_lo.saturating_sub(target_ts) {
                 lo - 1
             } else {
@@ -599,10 +616,17 @@ impl RpcHandler {
             }
         } else {
             lo
-        }.min(tip);
+        }
+        .min(tip);
 
-        let block = self.blockchain.get_block_by_height(height).await
-            .map_err(|e| RpcError { code: -5, message: e })?;
+        let block = self
+            .blockchain
+            .get_block_by_height(height)
+            .await
+            .map_err(|e| RpcError {
+                code: -5,
+                message: e,
+            })?;
 
         Ok(json!({
             "height": height,
@@ -8256,17 +8280,19 @@ impl RpcHandler {
     }
 
     async fn get_operator_messages(&self) -> Result<Value, RpcError> {
-        let registry = self.blockchain.get_peer_registry().await.ok_or_else(|| RpcError {
-            code: -32603,
-            message: "Peer registry not available".to_string(),
-        })?;
+        let registry = self
+            .blockchain
+            .get_peer_registry()
+            .await
+            .ok_or_else(|| RpcError {
+                code: -32603,
+                message: "Peer registry not available".to_string(),
+            })?;
 
         let messages: Vec<Value> = match registry.operator_messages.lock() {
             Ok(q) => q
                 .iter()
-                .map(|(ts, from, msg)| {
-                    json!({ "timestamp": ts, "from": from, "message": msg })
-                })
+                .map(|(ts, from, msg)| json!({ "timestamp": ts, "from": from, "message": msg }))
                 .collect(),
             Err(_) => vec![],
         };
@@ -8314,10 +8340,14 @@ impl RpcHandler {
             timestamp: now,
         };
 
-        let registry = self.blockchain.get_peer_registry().await.ok_or_else(|| RpcError {
-            code: -32603,
-            message: "Peer registry not available".to_string(),
-        })?;
+        let registry = self
+            .blockchain
+            .get_peer_registry()
+            .await
+            .ok_or_else(|| RpcError {
+                code: -32603,
+                message: "Peer registry not available".to_string(),
+            })?;
 
         // Extract IP (strip port if target contains one different from P2P default)
         let ip_only = to_addr.split(':').next().unwrap_or(to_addr);

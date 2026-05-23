@@ -3112,7 +3112,15 @@ impl ConsensusEngine {
                 sum
             };
             let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
-            input_sum.saturating_sub(output_sum)
+            let computed = input_sum.saturating_sub(output_sum);
+            // If all UTXOs were tombstoned (inputs spent before this peer received the
+            // broadcast), fall back to the fee already recorded in the pool — the TX
+            // was validated with the correct fee on an earlier pass or via mempool sync.
+            if computed == 0 && input_sum == 0 && !tx.inputs.is_empty() {
+                self.tx_pool.get_fee(&txid).unwrap_or(0)
+            } else {
+                computed
+            }
         };
 
         // Check mempool limits before adding
@@ -3991,7 +3999,11 @@ impl ConsensusEngine {
         if let Some(entry) = self.timevote.tx_status.get(&txid) {
             if let TransactionStatus::Voting { started_at, .. } = entry.value() {
                 let finality_ms = (finalized_at_ms - started_at).max(0) as f64;
-                tracing::debug!("⚡ TX {} finalized in {:.0}ms", hex::encode(txid), finality_ms);
+                tracing::debug!(
+                    "⚡ TX {} finalized in {:.0}ms",
+                    hex::encode(txid),
+                    finality_ms
+                );
                 let mut avg = self.avg_finality_ms.write();
                 avg.push(finality_ms);
                 if avg.len() > 50 {
