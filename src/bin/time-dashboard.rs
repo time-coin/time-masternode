@@ -291,8 +291,11 @@ struct GovernanceProposal {
 }
 
 struct SystemResources {
+    cpu_pct: f32,
     ram_used_mb: u64,
     ram_total_mb: u64,
+    swap_used_mb: u64,
+    swap_total_mb: u64,
     disk_used_gb: u64,
     disk_total_gb: u64,
 }
@@ -362,6 +365,7 @@ struct App {
     rpc_user: String,
     rpc_pass: String,
     client: HttpClient,
+    sysinfo: System,
     current_tab: usize,
     should_quit: bool,
     rpc_connected: bool,
@@ -385,6 +389,8 @@ struct App {
 
 impl App {
     fn new(rpc_url: String, rpc_user: String, rpc_pass: String) -> Self {
+        let mut sysinfo = System::new();
+        sysinfo.refresh_all();
         Self {
             data: DashboardData::default(),
             rpc_url,
@@ -393,6 +399,7 @@ impl App {
             client: HttpClient::new()
                 .with_timeout(Duration::from_secs(3))
                 .with_accept_invalid_certs(true),
+            sysinfo,
             current_tab: 0,
             should_quit: false,
             rpc_connected: false,
@@ -621,15 +628,18 @@ impl App {
                 .collect();
         }
 
-        // Collect local system resources (RAM + disk) — read directly from OS
-        let mut sys = System::new();
-        sys.refresh_memory();
+        // Collect local system resources — use persistent System for accurate CPU delta
+        self.sysinfo.refresh_all();
+        let cpu_pct = self.sysinfo.global_cpu_info().cpu_usage();
         let disks = Disks::new_with_refreshed_list();
         let disk_total: u64 = disks.iter().map(|d| d.total_space()).sum();
         let disk_avail: u64 = disks.iter().map(|d| d.available_space()).sum();
         self.data.system = Some(SystemResources {
-            ram_used_mb: sys.used_memory() / 1_048_576,
-            ram_total_mb: sys.total_memory() / 1_048_576,
+            cpu_pct,
+            ram_used_mb: self.sysinfo.used_memory() / 1_048_576,
+            ram_total_mb: self.sysinfo.total_memory() / 1_048_576,
+            swap_used_mb: self.sysinfo.used_swap() / 1_048_576,
+            swap_total_mb: self.sysinfo.total_swap() / 1_048_576,
             disk_used_gb: disk_total.saturating_sub(disk_avail) / 1_073_741_824,
             disk_total_gb: disk_total / 1_073_741_824,
         });
@@ -898,7 +908,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         .constraints([
             Constraint::Length(7), // Blockchain info: 5 lines + 2 borders
             Constraint::Length(5), // Wallet info: 3 lines + 2 borders
-            Constraint::Length(4), // System resources: 2 lines + 2 borders
+            Constraint::Length(6), // System resources: 4 lines + 2 borders
             Constraint::Length(6), // Consensus info: 4 lines + 2 borders
         ])
         .split(area);
@@ -976,67 +986,59 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(block, chunks[1]);
     }
 
-    // System resources
+    // System resources — htop-style bars
     {
-        let (ram_line, disk_line) = if let Some(ref sys) = app.data.system {
-            let ram_pct = if sys.ram_total_mb > 0 {
-                sys.ram_used_mb * 100 / sys.ram_total_mb
-            } else {
-                0
-            };
-            let disk_pct = if sys.disk_total_gb > 0 {
-                sys.disk_used_gb * 100 / sys.disk_total_gb
-            } else {
-                0
-            };
-            let ram_color = if ram_pct > 90 {
-                Color::Red
-            } else if ram_pct > 70 {
-                Color::Yellow
-            } else {
-                Color::Green
-            };
-            let disk_color = if disk_pct > 90 {
-                Color::Red
-            } else if disk_pct > 70 {
-                Color::Yellow
-            } else {
-                Color::Green
-            };
-            (
-                Line::from(vec![
-                    Span::raw("RAM:  "),
-                    Span::styled(
-                        format!(
-                            "{} MB / {} MB  ({}%)",
-                            sys.ram_used_mb, sys.ram_total_mb, ram_pct
-                        ),
-                        Style::default().fg(ram_color),
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::raw("Disk: "),
-                    Span::styled(
-                        format!(
-                            "{} GB / {} GB  ({}%)",
-                            sys.disk_used_gb, sys.disk_total_gb, disk_pct
-                        ),
-                        Style::default().fg(disk_color),
-                    ),
-                ]),
-            )
-        } else {
-            (
-                Line::from(vec![Span::raw("RAM:  ---")]),
-                Line::from(vec![Span::raw("Disk: ---")]),
-            )
+        let inner_width = chunks[2].width.saturating_sub(2); // subtract borders
+
+        let pct_color = |pct: u64| -> Color {
+            if pct > 90 { Color::Red } else if pct > 70 { Color::Yellow } else { Color::Green }
         };
-        let block = Paragraph::new(vec![ram_line, disk_line])
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("System Resources"),
-            )
+
+        let fmt_mem = |mb: u64| -> String {
+            if mb >= 10_240 { format!("{:.1}G", mb as f64 / 1024.0) }
+            else if mb >= 1_024 { format!("{:.2}G", mb as f64 / 1024.0) }
+            else { format!("{}M", mb) }
+        };
+
+        // Build one htop-style bar line: "LBL[||||   value]"
+        let make_bar = |label: &str, pct: u64, value: String, color: Color| -> Line<'static> {
+            let prefix = format!("{}[", label);
+            let suffix = format!(" {}]", value);
+            let bar_w = (inner_width as usize)
+                .saturating_sub(prefix.len() + suffix.len())
+                .max(1);
+            let filled = (bar_w * pct as usize / 100).min(bar_w);
+            Line::from(vec![
+                Span::raw(prefix),
+                Span::styled("|".repeat(filled), Style::default().fg(color)),
+                Span::raw(" ".repeat(bar_w - filled)),
+                Span::raw(suffix),
+            ])
+        };
+
+        let lines: Vec<Line> = if let Some(ref sys) = app.data.system {
+            let cpu_pct = sys.cpu_pct.clamp(0.0, 100.0) as u64;
+            let ram_pct = if sys.ram_total_mb > 0 { sys.ram_used_mb * 100 / sys.ram_total_mb } else { 0 };
+            let swp_pct = if sys.swap_total_mb > 0 { sys.swap_used_mb * 100 / sys.swap_total_mb } else { 0 };
+            let dsk_pct = if sys.disk_total_gb > 0 { sys.disk_used_gb * 100 / sys.disk_total_gb } else { 0 };
+
+            vec![
+                make_bar("CPU", cpu_pct, format!("{:.1}%", sys.cpu_pct), pct_color(cpu_pct)),
+                make_bar("Mem", ram_pct, format!("{}/{}", fmt_mem(sys.ram_used_mb), fmt_mem(sys.ram_total_mb)), pct_color(ram_pct)),
+                make_bar("Swp", swp_pct, format!("{}/{}", fmt_mem(sys.swap_used_mb), fmt_mem(sys.swap_total_mb)), if swp_pct > 0 { Color::Red } else { Color::Green }),
+                make_bar("Dsk", dsk_pct, format!("{}G/{}G", sys.disk_used_gb, sys.disk_total_gb), pct_color(dsk_pct)),
+            ]
+        } else {
+            vec![
+                Line::from("CPU[---]"),
+                Line::from("Mem[---]"),
+                Line::from("Swp[---]"),
+                Line::from("Dsk[---]"),
+            ]
+        };
+
+        let block = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("System Resources"))
             .style(Style::default().fg(Color::White));
         f.render_widget(block, chunks[2]);
     }
