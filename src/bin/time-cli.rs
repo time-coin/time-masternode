@@ -39,6 +39,7 @@ Commands:
   Wallet
     getbalance             Get wallet balance [address]
     getwalletinfo          Get wallet information
+    getlocalwallet         Get local wallet address (not the forwarded reward address)
     getnewaddress          Get this node's reward address
     getaddressinfo         Get info about an address (ismine, pubkey, etc.)
     getaddresspubkey       Get the public key for an address
@@ -348,6 +349,10 @@ enum Commands {
     /// Get wallet information
     #[command(next_help_heading = "Wallet")]
     GetWalletInfo,
+
+    /// Get the local node wallet address (not the forwarded reward address)
+    #[command(next_help_heading = "Wallet")]
+    GetLocalWallet,
 
     /// Get a new receiving address
     #[command(next_help_heading = "Wallet")]
@@ -1430,6 +1435,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         } => ("listunspent", json!([minconf, maxconf, null, limit])),
         Commands::GetNewAddress => ("getnewaddress", json!([])),
         Commands::GetWalletInfo => ("getwalletinfo", json!([])),
+        Commands::GetLocalWallet => ("getlocalwallet", json!([])),
         Commands::ListTransactions { count } => ("listtransactions", json!([count])),
         Commands::GetAddressInfo { address } => ("getaddressinfo", json!([address])),
         Commands::ListUnspentMulti { addresses } => {
@@ -1793,6 +1799,23 @@ fn print_human_readable(
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0)
             );
+        }
+        Commands::GetLocalWallet => {
+            println!(
+                "  Wallet Address:   {}",
+                result.get("wallet_address").and_then(|v| v.as_str()).unwrap_or("N/A")
+            );
+            println!(
+                "  Reward Address:   {}",
+                result.get("reward_address").and_then(|v| v.as_str()).unwrap_or("N/A")
+            );
+            let forwards = result.get("forwards_rewards").and_then(|v| v.as_bool()).unwrap_or(false);
+            if forwards {
+                println!("  Rewards forwarded to external address");
+            }
+            if !result.get("is_masternode").and_then(|v| v.as_bool()).unwrap_or(false) {
+                println!("  (non-masternode wallet)");
+            }
         }
         Commands::ListTransactions { .. } => {
             if let Some(txs) = result.as_array() {

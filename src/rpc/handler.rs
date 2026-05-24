@@ -200,6 +200,7 @@ impl RpcHandler {
             "listunspent" => self.list_unspent(&params_array).await,
             "getnewaddress" => self.get_new_address(&params_array).await,
             "getwalletinfo" => self.get_wallet_info().await,
+            "getlocalwallet" => self.get_local_wallet().await,
             "masternodelist" => self.masternode_list(&params_array).await,
             "masternoderemove" => self.masternode_remove(&params_array).await,
             "masternodestatus" => self.masternode_status().await,
@@ -5407,6 +5408,31 @@ impl RpcHandler {
                 message: "Node is not configured as a masternode".to_string(),
             })
         }
+    }
+
+    async fn get_local_wallet(&self) -> Result<Value, RpcError> {
+        let (wallet_address, reward_address, is_masternode) =
+            if let Some(local_mn) = self.registry.get_local_masternode().await {
+                (
+                    local_mn.masternode.wallet_address.clone(),
+                    local_mn.reward_address.clone(),
+                    true,
+                )
+            } else if let Some(addr) = self.registry.get_local_wallet_address().await {
+                (addr.clone(), addr, false)
+            } else {
+                return Err(RpcError {
+                    code: -4,
+                    message: "No local wallet found".to_string(),
+                });
+            };
+
+        Ok(json!({
+            "wallet_address": wallet_address,
+            "reward_address": reward_address,
+            "is_masternode": is_masternode,
+            "forwards_rewards": wallet_address != reward_address,
+        }))
     }
 
     /// List all locked collaterals
