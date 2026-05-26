@@ -26,7 +26,6 @@
 use crate::constants::blockchain::{MAX_FREE_TIER_RECIPIENTS, PRODUCER_REWARD_SATOSHIS};
 use crate::masternode_registry::MasternodeInfo;
 use crate::types::MasternodeTier;
-use crate::utxo_manager::UTXOStateManager;
 use std::collections::{HashMap, HashSet};
 
 /// Returns the effective payout address for a masternode
@@ -66,13 +65,13 @@ pub struct RewardInput<'a> {
 /// Returns `(payout_address, satoshis)` pairs.  The producer entry is first.
 /// Returns an empty vec only if `active_nodes` is empty (no masternodes at all).
 ///
-/// This function is intentionally async because paid-tier rewards are always
-/// redirected to the collateral UTXO owner's address, which requires a UTXO
-/// lookup to resolve (eliminates the economic incentive for collateral squatting).
-pub async fn compute(
-    input: &RewardInput<'_>,
-    utxo_manager: &UTXOStateManager,
-) -> Vec<(String, u64)> {
+/// Paid-tier payout addresses are sourced directly from the masternode registry
+/// (`reward_address` → `wallet_address`).  These addresses are validated at
+/// registration time by `verify_collateral_claim_proof` (enforces
+/// `reward_address == utxo_address`), so they are already the collateral owner's
+/// address — a live UTXO lookup is redundant and introduces UTXO-state divergence
+/// between nodes that can cause spurious reward validation failures.
+pub fn compute(input: &RewardInput<'_>) -> Vec<(String, u64)> {
     let producer_wallet = input.producer_wallet;
     let active_nodes = input.active_nodes;
     let fairness_map = input.fairness_map;
@@ -281,21 +280,11 @@ pub async fn compute(
         let mut distributed = 0u64;
 
         for (mn, _) in tier_nodes.iter().take(recipient_count) {
-            // Paid-tier rewards always flow to the collateral UTXO owner's address,
-            // not the registered wallet.  This eliminates the economic incentive for
-            // collateral squatting (AV4): whoever owns the UTXO key receives the reward.
-            let dest = if !is_free {
-                if let Some(ref outpoint) = mn.masternode.collateral_outpoint {
-                    match utxo_manager.get_utxo(outpoint).await {
-                        Ok(utxo) if !utxo.address.is_empty() => utxo.address,
-                        _ => payout_addr(mn).to_string(),
-                    }
-                } else {
-                    payout_addr(mn).to_string()
-                }
-            } else {
-                payout_addr(mn).to_string()
-            };
+            // Payout address comes from the registry (reward_address → wallet_address).
+            // This is already the collateral owner's address — enforced at registration
+            // time by verify_collateral_claim_proof.  A live UTXO lookup here would
+            // introduce UTXO-state divergence between nodes and break determinism.
+            let dest = payout_addr(mn).to_string();
 
             push_reward(&mut rewards, dest, per_node);
             distributed += per_node;

@@ -4237,9 +4237,7 @@ impl Blockchain {
                 total_reward,
                 free_tier_registered: &free_tier_registered,
             },
-            &self.utxo_manager,
-        )
-        .await;
+        );
         tracing::info!(
             "💰 Block {}: {} TIME → {} recipient(s) [{} bitmap nodes]",
             next_height,
@@ -6807,29 +6805,17 @@ impl Blockchain {
         }
 
         // ═══ CONSENSUS-VERIFIED POOL DISTRIBUTION ═══
-        // Re-derive the expected per-tier pool allocation from chain data.
-        // Every validating node independently computes the same result, closing the gap
-        // where a dishonest producer could manipulate pool distributions.
+        // Validate the reward distribution for every block height > 10.
         //
-        // Skip for very early blocks (no meaningful fairness history yet).
-        // Skip for any block that is not truly "live" (produced in the last 30 minutes).
-        //
-        // During initial sync, the local registry is incomplete: masternodes whose
-        // collateral UTXOs haven't been indexed yet get rejected from the registry.
-        // By the time we sync to those heights, the gossip may not have re-arrived yet,
-        // leaving the registry in an inconsistent state vs. the block's production-time
-        // registry. A 30-minute window ensures only blocks that arrived in real-time
-        // (while the node is already synced and the registry is accurate) are validated.
-        {
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            let block_age_secs = now_secs.saturating_sub(block.header.timestamp);
-            if block.header.height > 10 && block_age_secs < 1800 {
-                self.validate_pool_distribution(block, calculated_fees)
-                    .await?;
-            }
+        // reward_calculator::compute() is now fully deterministic — it derives all payout
+        // addresses from the on-chain masternode registry (validated at registration time)
+        // rather than from live UTXO state.  The 30-minute recency window that previously
+        // guarded against UTXO-state divergence between nodes is no longer needed and has
+        // been removed.  All blocks, including those replayed during initial sync, are now
+        // subject to full reward validation.
+        if block.header.height > 10 {
+            self.validate_pool_distribution(block, calculated_fees)
+                .await?;
         }
 
         Ok(())
@@ -6978,7 +6964,7 @@ impl Blockchain {
             free_tier_registered: &free_tier_registered,
         };
 
-        let expected = crate::reward_calculator::compute(&calc_input, &self.utxo_manager).await;
+        let expected = crate::reward_calculator::compute(&calc_input);
 
         let expected_norm = crate::reward_calculator::normalize(&expected);
         let actual_norm = crate::reward_calculator::normalize(&block.masternode_rewards);
