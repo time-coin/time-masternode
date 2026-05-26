@@ -530,6 +530,73 @@ impl IPBanlist {
         }
     }
 
+    /// Record a pre-handshake protocol violation (wrong message order, or no handshake within 10s).
+    ///
+    /// These are often configuration mismatches or slow/incompatible free nodes — not attacks.
+    /// Uses higher thresholds than `record_violation` and **never** escalates to a permanent ban,
+    /// so a misconfigured free node can recover after reconnecting.
+    ///
+    /// Returns true if the IP should be disconnected (a ban was just applied).
+    pub fn record_handshake_violation(&mut self, ip: IpAddr, reason: &str) -> bool {
+        if self.is_whitelisted(ip) {
+            return false;
+        }
+
+        let now = Instant::now();
+        let (count, last_time) = self.violations.entry(ip).or_insert((0, now));
+
+        if now.duration_since(*last_time) > Duration::from_secs(3600) {
+            *count = 0;
+        }
+
+        *count += 1;
+        *last_time = now;
+
+        let count_snap = *count;
+        self.persist_violation(ip, count_snap);
+
+        // Thresholds are lenient — handshake failures are often benign timing/config issues.
+        // Never escalates to permanent; cap at repeated 1-hour temp bans.
+        match count_snap {
+            10 => {
+                self.add_temp_ban(ip, Duration::from_secs(300), reason);
+                tracing::warn!(
+                    "🚫 Handshake: temp-banned {} for 5 minutes (10 failures: {})",
+                    ip,
+                    reason
+                );
+                true
+            }
+            30 => {
+                self.add_temp_ban(ip, Duration::from_secs(3600), reason);
+                tracing::warn!(
+                    "🚫 Handshake: temp-banned {} for 1 hour (30 failures: {})",
+                    ip,
+                    reason
+                );
+                true
+            }
+            1..=9 | 11..=29 => {
+                tracing::debug!("⚠️  Handshake failure #{} from {}: {}", count_snap, ip, reason);
+                false
+            }
+            _ => {
+                // Beyond 30: renew the 1-hour ban each 30 occurrences — never permanent.
+                if count_snap % 30 == 0 {
+                    self.add_temp_ban(ip, Duration::from_secs(3600), reason);
+                    tracing::warn!(
+                        "🚫 Handshake: renewed 1-hour ban for {} ({} total failures)",
+                        ip,
+                        count_snap
+                    );
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     /// Record a TLS-layer connection failure.
     ///
     /// TLS mode mismatches (e.g., a node configured for TLS connecting to a plaintext

@@ -894,7 +894,7 @@ impl ConnectionDriver {
                                             // if they disconnect before the 30s AI enforcement loop.
                                             {
                                                 let mut bl = resources.banlist.write().await;
-                                                bl.record_violation(ip, "Sent message before completing handshake");
+                                                bl.record_handshake_violation(ip, "Sent message before completing handshake");
                                             }
                                             break;
                                         }
@@ -934,7 +934,7 @@ impl ConnectionDriver {
                         "ΓÅ░ Pre-handshake timeout from {} ΓÇö no handshake received within 10s, closing",
                         peer_addr
                     );
-                    resources.banlist.write().await.record_violation(
+                    resources.banlist.write().await.record_handshake_violation(
                         ip,
                         "Pre-handshake timeout: no handshake message within 10s",
                     );
