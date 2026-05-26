@@ -6871,6 +6871,37 @@ impl Blockchain {
             None => return Ok(()),
         };
 
+        // ── Hard address whitelist ────────────────────────────────────────────
+        // Every legitimate reward recipient must be a registered masternode payout
+        // address (or the producer).  Check this before any grace path so a
+        // fraudulent block cannot slip through via divergence or lag exemptions.
+        {
+            let known: std::collections::HashSet<String> = all_infos
+                .iter()
+                .map(|info| {
+                    if !info.reward_address.is_empty() {
+                        info.reward_address.clone()
+                    } else {
+                        info.masternode.wallet_address.clone()
+                    }
+                })
+                .filter(|a| !a.is_empty())
+                .collect();
+            for (addr, _) in &block.masternode_rewards {
+                if addr.is_empty() || addr == &producer_wallet {
+                    continue;
+                }
+                if !known.contains(addr) {
+                    return Err(format!(
+                        "Block {} paid reward to unregistered address {} — \
+                         not a known masternode payout address",
+                        block.header.height,
+                        &addr[..addr.len().min(20)],
+                    ));
+                }
+            }
+        }
+
         // Decode the bitmap to find which masternodes were active (slot_id keyed, no drift).
         let active_bitmap_nodes: Vec<crate::masternode_registry::MasternodeInfo> =
             if !block.header.active_masternodes_bitmap.is_empty() {
@@ -6991,10 +7022,11 @@ impl Blockchain {
                     ));
                 }
             }
-            // ── Disagreement investigation ─────────────────────────────────────
-            // Before rejecting: diagnose WHY we disagree with the producer. The
-            // common causes are: (a) registry divergence, (b) we are behind on
-            // height, (c) our UTXO set differs, (d) wrong version / stale node.
+            // ── Disagreement diagnosis ────────────────────────────────────────
+            // We reached this point because we decoded ALL active bitmap nodes
+            // (the incomplete-bitmap case is handled and returned above).
+            // With UTXO-state divergence eliminated, the only remaining legitimate
+            // excuse for a mismatch is height lag (stale fairness counters).
             let our_registry_size = self.masternode_registry.all_masternodes_cached().len();
             let bitmap_capacity = block.header.active_masternodes_bitmap.len() * 8;
             let our_height = self.get_height();
@@ -7004,27 +7036,31 @@ impl Blockchain {
                 .filter(|n| n.masternode.tier == crate::types::MasternodeTier::Free)
                 .count();
 
-            // Registry divergence: producer knew more nodes than we do.
+            // Registry divergence (bitmap_capacity > registry_size) does NOT excuse
+            // a mismatch here.  We already handled the case where bitmap nodes could
+            // not be decoded (above).  Reaching this point means all active bitmap
+            // nodes were decoded — spare bitmap capacity has no effect on compute().
             if bitmap_capacity > our_registry_size {
                 tracing::warn!(
-                    "⚠️ Block {} reward mismatch — registry divergence \
-                     (our registry: {}, producer bitmap capacity: {}). \
-                     Discrepancies: {}. Accepting — will normalize once registry syncs.",
+                    "⚠️ Block {} reward mismatch — bitmap capacity {} > registry {} \
+                     but all active nodes decoded; divergence does not explain mismatch. \
+                     Discrepancies: {}",
                     block_height,
-                    our_registry_size,
                     bitmap_capacity,
+                    our_registry_size,
                     diff.join("; "),
                 );
-                return Ok(());
+                // fall through — do not accept
             }
 
-            // Height lag: we may be behind and have a stale registry/UTXO set.
+            // Height lag: fairness counters may be stale if we haven't processed
+            // the immediately preceding block yet (e.g. out-of-order arrival).
             let height_lag = block_height.saturating_sub(our_height);
             if height_lag > 0 {
                 tracing::warn!(
                     "⚠️ Block {} reward disagreement — local node is {} block(s) behind \
                      (our height: {}). Registry: {}, bitmap capacity: {}, \
-                     free-in-bitmap: {}. Node needs to sync before voting.",
+                     free-in-bitmap: {}. Accepting; node must sync before voting.",
                     block_height,
                     height_lag,
                     our_height,
@@ -7032,73 +7068,19 @@ impl Blockchain {
                     bitmap_capacity,
                     our_free_in_bitmap,
                 );
-                // Behind-height node should not vote until caught up; accept the block
-                // so sync can continue rather than stalling on a reward check.
                 return Ok(());
             }
 
-            // Same height, same registry size — UTXO state divergence or version
-            // mismatch. Trigger a reconciliation request so we can re-sync, then
-            // accept the block. This node will not appear in the next bitmap (no
-            // rewards) until it can produce matching results after reconciliation.
-            tracing::warn!(
-                "⚠️ Block {} reward disagreement — requesting UTXO reconciliation. \
-                 Our height: {}, registry: {}, bitmap capacity: {}, \
-                 free-in-bitmap: {}. \
-                 Expected {} recipients, block has {}. Discrepancies: {}. \
-                 This node will re-enter voting after reconciling its UTXO state.",
+            // All active nodes decoded, at expected height, addresses whitelisted —
+            // any remaining mismatch is a fraudulent reward distribution.
+            return Err(format!(
+                "Block {} fraudulent reward distribution \
+                 (expected {} recipients, block has {}): {}",
                 block_height,
-                our_height,
-                our_registry_size,
-                bitmap_capacity,
-                our_free_in_bitmap,
                 expected_norm.len(),
                 actual_norm.len(),
                 diff.join("; "),
-            );
-            // Request a full UTXO snapshot from the producer so we can reconcile.
-            if let Some(registry) = self.get_peer_registry().await {
-                let block_hash = block.hash();
-                let msg = crate::network::message::NetworkMessage::RequestUtxoReconciliation {
-                    at_height: block_height,
-                    block_hash,
-                };
-                let producer_ip = producer_addr
-                    .split(':')
-                    .next()
-                    .unwrap_or(producer_addr)
-                    .to_string();
-                // Only request from peers that support chunked UTXO transfer.
-                // Old-code peers respond with one massive frame that exceeds MAX_FRAME_SIZE.
-                let producer_commit = registry
-                    .get_peer_commit_count(&producer_ip)
-                    .await
-                    .unwrap_or(0);
-                if producer_commit < crate::constants::MIN_UTXO_CHUNK_COMMIT {
-                    tracing::warn!(
-                        "⚠️ Skipping RequestUtxoReconciliation to producer {} — \
-                        pre-chunking code (commit {}, need ≥{}). Will reconcile \
-                        when a chunk-capable peer provides the block.",
-                        producer_ip,
-                        producer_commit,
-                        crate::constants::MIN_UTXO_CHUNK_COMMIT
-                    );
-                } else {
-                    let registry_clone = registry.clone();
-                    tokio::spawn(async move {
-                        if registry_clone
-                            .send_to_peer(&producer_ip, msg.clone())
-                            .await
-                            .is_err()
-                        {
-                            registry_clone.broadcast(msg).await;
-                        }
-                    });
-                }
-            }
-            // Accept the block — this node simply won't be in the next bitmap
-            // until UTXO reconciliation completes and it can vote correctly.
-            return Ok(());
+            ));
         }
 
         tracing::debug!(
