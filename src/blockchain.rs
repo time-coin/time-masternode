@@ -6870,36 +6870,6 @@ impl Blockchain {
             None => return Ok(()),
         };
 
-        // ── Hard address whitelist ────────────────────────────────────────────
-        // Every legitimate reward recipient must be a registered masternode payout
-        // address (or the producer).  Check this before any grace path so a
-        // fraudulent block cannot slip through via divergence or lag exemptions.
-        {
-            let known: std::collections::HashSet<String> = all_infos
-                .iter()
-                .map(|info| {
-                    if !info.reward_address.is_empty() {
-                        info.reward_address.clone()
-                    } else {
-                        info.masternode.wallet_address.clone()
-                    }
-                })
-                .filter(|a| !a.is_empty())
-                .collect();
-            for (addr, _) in &block.masternode_rewards {
-                if addr.is_empty() || addr == &producer_wallet {
-                    continue;
-                }
-                if !known.contains(addr) {
-                    return Err(format!(
-                        "Block {} paid reward to unregistered address {} — \
-                         not a known masternode payout address",
-                        block.header.height,
-                        &addr[..addr.len().min(20)],
-                    ));
-                }
-            }
-        }
 
         // Decode the bitmap to find which masternodes were active (slot_id keyed, no drift).
         let active_bitmap_nodes: Vec<crate::masternode_registry::MasternodeInfo> =
