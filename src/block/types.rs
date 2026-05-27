@@ -211,7 +211,12 @@ impl Block {
         hasher.update(&self.header.vrf_score.to_le_bytes());
         hasher.update(&self.header.active_masternodes_bitmap);
         hasher.update(&self.header.treasury_balance.to_le_bytes());
-        hasher.update(&self.header.fairness_root);
+        // Only include fairness_root at heights where it is actually committed.
+        // Old blocks default to [0u8; 32] but old nodes never hashed that field —
+        // including it unconditionally would break every pre-6100 hash link.
+        if self.header.height >= crate::constants::fork_heights::FAIRNESS_COMMIT_HEIGHT {
+            hasher.update(&self.header.fairness_root);
+        }
         *hasher.finalize().as_bytes()
     }
 
