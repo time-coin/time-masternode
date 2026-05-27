@@ -160,7 +160,6 @@ impl GenesisBlock {
                 vrf_score: 0,
                 producer_signature: vec![],
                 treasury_balance: 500_000_000, // 5 TIME first deposit
-                fairness_root: [0u8; 32],
             },
             transactions: vec![],
             masternode_rewards: vec![
@@ -174,7 +173,6 @@ impl GenesisBlock {
             time_attestations: vec![],
             consensus_participants_bitmap: vec![],
             liveness_recovery: Some(false),
-            fairness_snapshot: vec![],
         }
     }
 
@@ -211,14 +209,12 @@ impl GenesisBlock {
                 vrf_score: 0,
                 producer_signature: vec![],
                 treasury_balance: 10_000_000_000, // 100 TIME first deposit
-                fairness_root: [0u8; 32],
             },
             transactions: vec![],
             masternode_rewards: vec![], // full reward to treasury pool; no masternode distribution
             time_attestations: vec![],
             consensus_participants_bitmap: vec![],
             liveness_recovery: Some(false),
-            fairness_snapshot: vec![],
         }
     }
 

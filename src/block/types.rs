@@ -98,13 +98,6 @@ pub struct Block {
     /// §7.6 Liveness Fallback: Flag indicating this block resolved stalled transactions
     #[serde(default)]
     pub liveness_recovery: Option<bool>,
-    /// Committed fairness counters for active bitmap nodes at this block's height.
-    /// Non-empty only for blocks at height >= FAIRNESS_COMMIT_HEIGHT.
-    /// Each entry is (masternode_address, blocks_without_reward), sorted by address.
-    /// Validators at height >= FAIRNESS_COMMIT_HEIGHT use this instead of in-memory
-    /// counters, making reward validation fully deterministic.
-    #[serde(default)]
-    pub fairness_snapshot: Vec<(String, u64)>,
 }
 
 /// Masternode counts by tier at time of block production
@@ -178,11 +171,6 @@ pub struct BlockHeader {
     /// `TREASURY_POOL_SATOSHIS` (the first block's deposit).
     #[serde(default)]
     pub treasury_balance: u64,
-    /// BLAKE3 hash of the sorted fairness snapshot committed in the block body.
-    /// Zero for blocks below FAIRNESS_COMMIT_HEIGHT; non-zero from that height onward.
-    /// Included in block_hash() so any tampering with the snapshot is detectable.
-    #[serde(default)]
-    pub fairness_root: Hash256,
 }
 
 impl Block {
@@ -211,12 +199,6 @@ impl Block {
         hasher.update(&self.header.vrf_score.to_le_bytes());
         hasher.update(&self.header.active_masternodes_bitmap);
         hasher.update(&self.header.treasury_balance.to_le_bytes());
-        // Only include fairness_root at heights where it is actually committed.
-        // Old blocks default to [0u8; 32] but old nodes never hashed that field —
-        // including it unconditionally would break every pre-6100 hash link.
-        if self.header.height >= crate::constants::fork_heights::FAIRNESS_COMMIT_HEIGHT {
-            hasher.update(&self.header.fairness_root);
-        }
         *hasher.finalize().as_bytes()
     }
 

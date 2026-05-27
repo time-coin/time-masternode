@@ -218,20 +218,6 @@ pub mod fork_heights {
     /// height.  All operators must upgrade to v1.5.0 before the chain reaches
     /// this block.
     pub const REPLAY_PROTECTION_ACTIVATION_HEIGHT: u64 = 1000;
-
-    /// Height at which fairness-counter commitment activates.
-    ///
-    /// From this height onward the block producer commits the `blocks_without_reward`
-    /// counter for every active bitmap node into the block body (`fairness_snapshot`)
-    /// and a BLAKE3 hash of that snapshot into the block header (`fairness_root`).
-    ///
-    /// Validators use the committed snapshot directly instead of their own in-memory
-    /// counters, making reward validation fully deterministic across all nodes and
-    /// enabling hard rejection of fraudulent reward distributions (wrong tier winner,
-    /// inflated amounts) without false-positive stalls from counter drift.
-    ///
-    /// All operators must upgrade before the chain reaches this height.
-    pub const FAIRNESS_COMMIT_HEIGHT: u64 = 6_100;
 }
 
 /// Performance tuning constants

@@ -154,7 +154,6 @@ impl DeterministicBlockGenerator {
             time_attestations: vec![],
             consensus_participants_bitmap: vec![], // Set by consensus engine
             liveness_recovery: Some(false),        // Will be set by consensus engine if needed
-            fairness_snapshot: vec![],
         }
     }
 

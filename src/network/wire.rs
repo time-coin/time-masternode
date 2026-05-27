@@ -130,7 +130,6 @@ impl From<LegacyBlockHeader> for BlockHeader {
             producer_signature: h.producer_signature,
             total_fees: 0,
             treasury_balance: 0,
-            fairness_root: [0u8; 32],
         }
     }
 }
@@ -145,7 +144,6 @@ impl From<LegacyBlock> for Block {
             time_attestations: b.time_attestations,
             consensus_participants_bitmap: b.consensus_participants_bitmap,
             liveness_recovery: b.liveness_recovery,
-            fairness_snapshot: vec![],
         }
     }
 }
