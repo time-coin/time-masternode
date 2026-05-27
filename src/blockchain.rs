@@ -1269,6 +1269,7 @@ impl Blockchain {
             vrf_score: 0,
             producer_signature: vec![], // Genesis has no producer signature
             treasury_balance: crate::constants::blockchain::TREASURY_POOL_SATOSHIS,
+            fairness_root: [0u8; 32],
         };
 
         // Create genesis block
@@ -1279,6 +1280,7 @@ impl Blockchain {
             time_attestations: vec![],
             consensus_participants_bitmap: vec![], // No consensus voting in genesis
             liveness_recovery: Some(false),
+            fairness_snapshot: vec![],
         };
 
         let genesis_hash = genesis.hash();
@@ -4362,6 +4364,33 @@ impl Blockchain {
             .saturating_add(constants::blockchain::TREASURY_POOL_SATOSHIS)
             .saturating_sub(governance_deduction);
 
+        // At FAIRNESS_COMMIT_HEIGHT+, commit the fairness counters used for this
+        // block's reward computation.  Validators read these from the block instead
+        // of their own in-memory counters, making reward validation fully deterministic.
+        let (fairness_snapshot, fairness_root) =
+            if next_height >= crate::constants::fork_heights::FAIRNESS_COMMIT_HEIGHT {
+                let mut snapshot: Vec<(String, u64)> = active_bitmap_nodes
+                    .iter()
+                    .map(|mn| {
+                        let count = fairness_map
+                            .get(&mn.masternode.address)
+                            .copied()
+                            .unwrap_or(0);
+                        (mn.masternode.address.clone(), count)
+                    })
+                    .collect();
+                snapshot.sort_by(|a, b| a.0.cmp(&b.0));
+                let mut hasher = blake3::Hasher::new();
+                for (addr, count) in &snapshot {
+                    hasher.update(addr.as_bytes());
+                    hasher.update(&count.to_le_bytes());
+                }
+                let root = *hasher.finalize().as_bytes();
+                (snapshot, root)
+            } else {
+                (vec![], [0u8; 32])
+            };
+
         let mut block = Block {
             header: BlockHeader {
                 version: 1,
@@ -4377,14 +4406,15 @@ impl Blockchain {
                 active_masternodes_bitmap: active_bitmap.clone(),
                 liveness_recovery: Some(false), // Will be set below if needed
                 treasury_balance: new_treasury_balance,
+                fairness_root,
                 ..Default::default()
             },
             transactions: all_txs,
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
             time_attestations: vec![],
-            // Record masternodes that voted on previous block (active participants)
-            consensus_participants_bitmap: active_bitmap, // Compact representation
+            consensus_participants_bitmap: active_bitmap,
             liveness_recovery: Some(false), // Will be set if fallback resolution occurred
+            fairness_snapshot,
         };
 
         // §7.6 Liveness Fallback: Check if we need to resolve stalled transactions
@@ -6936,15 +6966,34 @@ impl Blockchain {
             }
         }
 
-        // Fairness tracking for reward_calculator (O(n) in-memory, no sled I/O).
-        let fairness_map: std::collections::HashMap<String, u64> =
-            if !active_bitmap_nodes.is_empty() {
-                self.masternode_registry
-                    .get_reward_tracking_from_memory()
-                    .await
-            } else {
-                std::collections::HashMap::new()
-            };
+        // Fairness tracking for reward_calculator.
+        // At height >= FAIRNESS_COMMIT_HEIGHT: read from the block's committed snapshot
+        // (deterministic, tamper-evident via fairness_root in block hash).
+        // Before that height: fall back to in-memory counters (may drift by 1-2).
+        let committed_fairness =
+            block.header.height >= crate::constants::fork_heights::FAIRNESS_COMMIT_HEIGHT;
+        let fairness_map: std::collections::HashMap<String, u64> = if committed_fairness {
+            // Verify snapshot integrity before using it.
+            let mut hasher = blake3::Hasher::new();
+            for (addr, count) in &block.fairness_snapshot {
+                hasher.update(addr.as_bytes());
+                hasher.update(&count.to_le_bytes());
+            }
+            let computed_root = *hasher.finalize().as_bytes();
+            if computed_root != block.header.fairness_root {
+                return Err(format!(
+                    "Block {} fairness_root mismatch — snapshot tampered",
+                    block.header.height
+                ));
+            }
+            block.fairness_snapshot.iter().cloned().collect()
+        } else if !active_bitmap_nodes.is_empty() {
+            self.masternode_registry
+                .get_reward_tracking_from_memory()
+                .await
+        } else {
+            std::collections::HashMap::new()
+        };
 
         // Reject if the bitmap encodes nodes our registry doesn't know.
         // The set of valid masternodes is fully on-chain — an unknown node in the
@@ -7071,12 +7120,22 @@ impl Blockchain {
                 return Ok(());
             }
 
-            // Fairness counter drift: in-memory blocks_without_reward counters
-            // are persisted every 10 blocks and can diverge by 1-2 between nodes
-            // after a restart or missed flush.  A drifted counter selects a
-            // different tier winner — a mismatch that is not fraud, just normal
-            // in-memory state divergence.  All addresses passed the whitelist
-            // check above, so the recipients are legitimately registered nodes.
+            // At height >= FAIRNESS_COMMIT_HEIGHT fairness counters are committed in the
+            // block and verified above — any mismatch here is unambiguously fraudulent.
+            if committed_fairness {
+                return Err(format!(
+                    "Block {} fraudulent reward distribution \
+                     (expected {} recipients, block has {}): {}",
+                    block_height,
+                    expected_norm.len(),
+                    actual_norm.len(),
+                    diff.join("; "),
+                ));
+            }
+
+            // Below FAIRNESS_COMMIT_HEIGHT: fairness counters are in-memory and can
+            // drift by 1-2 between nodes after a restart.  All addresses passed the
+            // whitelist check above, so recipients are legitimately registered nodes.
             // Accept the block and log for monitoring.
             tracing::warn!(
                 "⚠️ Block {} reward disagreement (fairness counter drift) — \

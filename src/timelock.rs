@@ -577,6 +577,7 @@ impl TSCDConsensus {
             time_attestations: vec![],
             consensus_participants_bitmap: vec![],
             liveness_recovery: Some(false), // TimeLock blocks don't trigger liveness recovery by default
+            fairness_snapshot: vec![],
         })
     }
 
