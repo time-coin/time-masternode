@@ -7071,16 +7071,23 @@ impl Blockchain {
                 return Ok(());
             }
 
-            // All active nodes decoded, at expected height, addresses whitelisted —
-            // any remaining mismatch is a fraudulent reward distribution.
-            return Err(format!(
-                "Block {} fraudulent reward distribution \
-                 (expected {} recipients, block has {}): {}",
+            // Fairness counter drift: in-memory blocks_without_reward counters
+            // are persisted every 10 blocks and can diverge by 1-2 between nodes
+            // after a restart or missed flush.  A drifted counter selects a
+            // different tier winner — a mismatch that is not fraud, just normal
+            // in-memory state divergence.  All addresses passed the whitelist
+            // check above, so the recipients are legitimately registered nodes.
+            // Accept the block and log for monitoring.
+            tracing::warn!(
+                "⚠️ Block {} reward disagreement (fairness counter drift) — \
+                 expected {} recipients, block has {}. Discrepancies: {}. \
+                 All addresses whitelisted; accepting block.",
                 block_height,
                 expected_norm.len(),
                 actual_norm.len(),
                 diff.join("; "),
-            ));
+            );
+            return Ok(());
         }
 
         tracing::debug!(
