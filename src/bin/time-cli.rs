@@ -1803,17 +1803,30 @@ fn print_human_readable(
         Commands::GetLocalWallet => {
             println!(
                 "  Wallet Address:   {}",
-                result.get("wallet_address").and_then(|v| v.as_str()).unwrap_or("N/A")
+                result
+                    .get("wallet_address")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
             );
             println!(
                 "  Reward Address:   {}",
-                result.get("reward_address").and_then(|v| v.as_str()).unwrap_or("N/A")
+                result
+                    .get("reward_address")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
             );
-            let forwards = result.get("forwards_rewards").and_then(|v| v.as_bool()).unwrap_or(false);
+            let forwards = result
+                .get("forwards_rewards")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if forwards {
                 println!("  Rewards forwarded to external address");
             }
-            if !result.get("is_masternode").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if !result
+                .get("is_masternode")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 println!("  (non-masternode wallet)");
             }
         }

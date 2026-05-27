@@ -996,13 +996,23 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         let inner_width = chunks[2].width.saturating_sub(2); // subtract borders
 
         let pct_color = |pct: u64| -> Color {
-            if pct > 90 { Color::Red } else if pct > 70 { Color::Yellow } else { Color::Green }
+            if pct > 90 {
+                Color::Red
+            } else if pct > 70 {
+                Color::Yellow
+            } else {
+                Color::Green
+            }
         };
 
         let fmt_mem = |mb: u64| -> String {
-            if mb >= 10_240 { format!("{:.1}G", mb as f64 / 1024.0) }
-            else if mb >= 1_024 { format!("{:.2}G", mb as f64 / 1024.0) }
-            else { format!("{}M", mb) }
+            if mb >= 10_240 {
+                format!("{:.1}G", mb as f64 / 1024.0)
+            } else if mb >= 1_024 {
+                format!("{:.2}G", mb as f64 / 1024.0)
+            } else {
+                format!("{}M", mb)
+            }
         };
 
         // Build one htop-style bar line: "LBL[||||   value]"
@@ -1023,15 +1033,55 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
 
         let lines: Vec<Line> = if let Some(ref sys) = app.data.system {
             let cpu_pct = sys.cpu_pct.clamp(0.0, 100.0) as u64;
-            let ram_pct = if sys.ram_total_mb > 0 { sys.ram_used_mb * 100 / sys.ram_total_mb } else { 0 };
-            let swp_pct = if sys.swap_total_mb > 0 { sys.swap_used_mb * 100 / sys.swap_total_mb } else { 0 };
-            let dsk_pct = if sys.disk_total_gb > 0 { sys.disk_used_gb * 100 / sys.disk_total_gb } else { 0 };
+            let ram_pct = if sys.ram_total_mb > 0 {
+                sys.ram_used_mb * 100 / sys.ram_total_mb
+            } else {
+                0
+            };
+            let swp_pct = if sys.swap_total_mb > 0 {
+                sys.swap_used_mb * 100 / sys.swap_total_mb
+            } else {
+                0
+            };
+            let dsk_pct = if sys.disk_total_gb > 0 {
+                sys.disk_used_gb * 100 / sys.disk_total_gb
+            } else {
+                0
+            };
 
             vec![
-                make_bar("CPU", cpu_pct, format!("{:.1}%", sys.cpu_pct), pct_color(cpu_pct)),
-                make_bar("Mem", ram_pct, format!("{}/{}", fmt_mem(sys.ram_used_mb), fmt_mem(sys.ram_total_mb)), pct_color(ram_pct)),
-                make_bar("Swp", swp_pct, format!("{}/{}", fmt_mem(sys.swap_used_mb), fmt_mem(sys.swap_total_mb)), if swp_pct > 0 { Color::Red } else { Color::Green }),
-                make_bar("Dsk", dsk_pct, format!("{}G/{}G", sys.disk_used_gb, sys.disk_total_gb), pct_color(dsk_pct)),
+                make_bar(
+                    "CPU",
+                    cpu_pct,
+                    format!("{:.1}%", sys.cpu_pct),
+                    pct_color(cpu_pct),
+                ),
+                make_bar(
+                    "Mem",
+                    ram_pct,
+                    format!("{}/{}", fmt_mem(sys.ram_used_mb), fmt_mem(sys.ram_total_mb)),
+                    pct_color(ram_pct),
+                ),
+                make_bar(
+                    "Swp",
+                    swp_pct,
+                    format!(
+                        "{}/{}",
+                        fmt_mem(sys.swap_used_mb),
+                        fmt_mem(sys.swap_total_mb)
+                    ),
+                    if swp_pct > 0 {
+                        Color::Red
+                    } else {
+                        Color::Green
+                    },
+                ),
+                make_bar(
+                    "Dsk",
+                    dsk_pct,
+                    format!("{}G/{}G", sys.disk_used_gb, sys.disk_total_gb),
+                    pct_color(dsk_pct),
+                ),
             ]
         } else {
             vec![
@@ -1043,7 +1093,11 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         };
 
         let block = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title("System Resources"))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("System Resources"),
+            )
             .style(Style::default().fg(Color::White));
         f.render_widget(block, chunks[2]);
     }

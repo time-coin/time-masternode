@@ -18,6 +18,9 @@ use crate::types::{OutPoint, UTXOState}; // Add explicit imports
 use crate::utxo_manager::UTXOStateManager;
 use std::net::IpAddr;
 use std::sync::Arc;
+
+type OperatorMessages =
+    Option<Arc<std::sync::Mutex<std::collections::VecDeque<(u64, String, String)>>>>;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
@@ -326,8 +329,7 @@ pub struct MessageContext {
     // Per-peer clock drift tracker
     pub drift_tracker: Option<Arc<tokio::sync::Mutex<crate::time_sync::PeerDriftTracker>>>,
     // Shared operator message inbox (timestamp, from, message). Capped at 50 entries.
-    pub operator_messages:
-        Option<Arc<std::sync::Mutex<std::collections::VecDeque<(u64, String, String)>>>>,
+    pub operator_messages: OperatorMessages,
 }
 
 impl MessageContext {
