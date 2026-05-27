@@ -2346,7 +2346,8 @@ impl Blockchain {
                 if !wl.is_empty() {
                     tracing::info!(
                         "🔒 Syncing from {} whitelisted peer(s) — excluding {} untrusted peer(s)",
-                        wl.len(), regular.len()
+                        wl.len(),
+                        regular.len()
                     );
                     sync_peers = wl;
                 } else {
@@ -4228,8 +4229,8 @@ impl Blockchain {
 
         // Single source of truth for reward computation.  Identical call to what
         // validate_pool_distribution makes on the receiving side.
-        let rewards: Vec<(String, u64)> = crate::reward_calculator::compute(
-            &crate::reward_calculator::RewardInput {
+        let rewards: Vec<(String, u64)> =
+            crate::reward_calculator::compute(&crate::reward_calculator::RewardInput {
                 height: next_height,
                 producer_wallet: producer_wallet.as_deref().unwrap_or(""),
                 active_nodes: &active_bitmap_nodes,
@@ -4237,8 +4238,7 @@ impl Blockchain {
                 fees: finalized_txs_fees,
                 total_reward,
                 free_tier_registered: &free_tier_registered,
-            },
-        );
+            });
         tracing::info!(
             "💰 Block {}: {} TIME → {} recipient(s) [{} bitmap nodes]",
             next_height,
@@ -6870,7 +6870,6 @@ impl Blockchain {
             Some(w) => w,
             None => return Ok(()),
         };
-
 
         // Decode the bitmap to find which masternodes were active (slot_id keyed, no drift).
         let active_bitmap_nodes: Vec<crate::masternode_registry::MasternodeInfo> =

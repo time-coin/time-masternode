@@ -577,7 +577,12 @@ impl IPBanlist {
                 true
             }
             1..=9 | 11..=29 => {
-                tracing::debug!("⚠️  Handshake failure #{} from {}: {}", count_snap, ip, reason);
+                tracing::debug!(
+                    "⚠️  Handshake failure #{} from {}: {}",
+                    count_snap,
+                    ip,
+                    reason
+                );
                 false
             }
             _ => {
