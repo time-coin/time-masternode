@@ -2330,9 +2330,9 @@ impl Blockchain {
                 return Err("No peers with blocks above our height".to_string());
             }
 
-            // Prefer whitelisted (operator-trusted) peers for block download.
-            // When significantly behind, restrict to whitelisted peers exclusively — this
-            // prevents a node that connected to fork peers from adopting the wrong chain.
+            // Sync exclusively from whitelisted (operator-trusted) peers.
+            // Falls back to all connected peers only when no whitelisted peers are available,
+            // which can happen transiently before peer discovery completes.
             {
                 let mut wl: Vec<String> = Vec::new();
                 let mut regular: Vec<String> = Vec::new();
@@ -2343,19 +2343,20 @@ impl Blockchain {
                         regular.push(peer.clone());
                     }
                 }
-                let behind = target.saturating_sub(current);
-                if !wl.is_empty() && behind > 10 {
-                    // Significantly behind and trusted peers available — use ONLY them.
-                    // Prevents fork-peer blocks from polluting the sync pool.
+                if !wl.is_empty() {
                     tracing::info!(
-                        "🔒 Restricting sync to {} whitelisted peer(s) only ({} blocks behind) — excluding {} untrusted peer(s)",
-                        wl.len(), behind, regular.len()
+                        "🔒 Syncing from {} whitelisted peer(s) — excluding {} untrusted peer(s)",
+                        wl.len(), regular.len()
                     );
                     sync_peers = wl;
                 } else {
-                    // Within 10 blocks or no whitelisted peers: allow all, trusted first.
-                    wl.extend(regular);
-                    sync_peers = wl;
+                    // No whitelisted peers connected yet — use all available peers.
+                    // This is a transient state; peer discovery should whitelist trusted nodes shortly.
+                    tracing::warn!(
+                        "⚠️  No whitelisted peers connected — syncing from {} untrusted peer(s) (peer discovery may still be in progress)",
+                        regular.len()
+                    );
+                    sync_peers = regular;
                 }
             }
 
