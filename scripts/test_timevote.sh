@@ -3,7 +3,7 @@
 # Comprehensive testing of Phase 2 implementation:
 # - TimeVote request/response with cryptographic signatures
 # - Stake-weighted vote accumulation
-# - Automatic finalization at 51% threshold
+# - Automatic finalization at 67% threshold (51% fallback after 30s liveness stall)
 # - TimeProof certificate assembly
 # - TimeProof broadcasting and peer synchronization
 
@@ -75,10 +75,10 @@ if [ "$CONNECTED_MN" -eq 0 ]; then
     exit 1
 fi
 
-# Calculate if we can reach 51% threshold
-THRESHOLD_WEIGHT=$((TOTAL_STAKE * 51 / 100))
+# Calculate if we can reach 67% threshold (51% fallback applies after 30s stall)
+THRESHOLD_WEIGHT=$((TOTAL_STAKE * 67 / 100))
 if [ "$CONNECTED_STAKE" -lt "$THRESHOLD_WEIGHT" ]; then
-    log_warning "Connected weight ($CONNECTED_STAKE) < 51% threshold ($THRESHOLD_WEIGHT)"
+    log_warning "Connected weight ($CONNECTED_STAKE) < 67% threshold ($THRESHOLD_WEIGHT)"
     log_warning "Finalization may not be possible - need more masternodes online"
 else
     log_success "Sufficient stake connected for finalization (${CONNECTED_STAKE}/${THRESHOLD_WEIGHT})"
@@ -175,7 +175,7 @@ while [ $(($(date +%s) - START_TIME)) -lt $FINALITY_TIMEOUT ]; do
                 log_info "  • Votes: $VOTES masternodes"
                 log_info "  • Accumulated Weight: $WEIGHT"
                 log_info "  • Slot Index: $SLOT"
-                log_info "  • Threshold Met: ≥51%"
+                log_info "  • Threshold Met: ≥67% (or ≥51% fallback after 30s stall)"
             fi
             
             FINALIZED=true
@@ -227,7 +227,7 @@ else
     log_error "❌ Finalization timeout (${FINALITY_TIMEOUT}s)"
     echo ""
     log_warning "Possible causes:"
-    log_warning "  • Not enough masternodes connected (need ≥51% AVS weight)"
+    log_warning "  • Not enough masternodes connected (need ≥67% AVS weight, or ≥51% after 30s stall)"
     log_warning "  • Vote collection in progress (increase timeout)"
     log_warning "  • Network latency or connectivity issues"
     log_warning "  • Phase 2 implementation not running"
@@ -236,7 +236,7 @@ else
     log_info "Current network state:"
     log_info "  • Connected MN: $CONNECTED_MN/$TOTAL_MN"
     log_info "  • Connected weight: $CONNECTED_STAKE/$TOTAL_STAKE ($(($CONNECTED_STAKE * 100 / $TOTAL_STAKE))%)"
-    log_info "  • Required weight: $THRESHOLD_WEIGHT (51%)"
+    log_info "  • Required weight: $THRESHOLD_WEIGHT (67%)"
 fi
 
 echo ""
@@ -251,7 +251,7 @@ echo ""
 if [ "$FINALIZED" = true ]; then
     echo -e "${GREEN}STATUS:      ✅ FINALIZED${NC}"
     echo "MECHANISM:   TimeVote Protocol (Phase 2)"
-    echo "THRESHOLD:   ≥51% AVS weight"
+    echo "THRESHOLD:   ≥67% AVS weight (≥51% fallback after 30s stall)"
     echo "VOTES:       $VOTE_COUNT masternodes"
     echo ""
     log_success "🎊 Phase 2 Implementation VALIDATED"

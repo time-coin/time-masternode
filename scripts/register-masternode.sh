@@ -58,7 +58,7 @@ fi
 
 echo "=== Step 1: Export private key from wallet ==="
 echo "   wallet: $WALLET"
-DUMP=$(time-cli dumpprivkey --walletpath "$WALLET")
+DUMP=$(time-cli dumpprivkey --wallet-path "$WALLET")
 echo "$DUMP"
 
 ADDRESS=$(echo "$DUMP" | awk '/^address:/ { print $2 }')
@@ -78,7 +78,7 @@ echo "   owner:      $ADDRESS"
 echo ""
 
 time-cli --rpc-url "$RPC_URL" masternodereg \
-    --collateral    "$COLLATERAL" \
-    --masternodeip  "$IP" \
-    --payoutaddress "$PAYOUT" \
-    --privkey       "$PRIVKEY"
+    --collateral      "$COLLATERAL" \
+    --masternode-ip   "$IP" \
+    --payout-address  "$PAYOUT" \
+    --privkey         "$PRIVKEY"

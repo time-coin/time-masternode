@@ -358,7 +358,7 @@ else
         echo "1. Send exactly ${REQUIRED_AMOUNT} TIME to your wallet address"
         echo "2. Find the collateral UTXO:  time-cli listunspent"
         echo "3. Edit $MN_CONF_FILE:"
-        echo "   mn1 <your_ip>:$([ "$NETWORK" = "testnet" ] && echo 24100 || echo 24000) <txid> <vout>"
+        echo "   mn1 <txid> <vout>"
         echo "4. Restart:  systemctl restart timed"
     else
         echo "1. Restart your node:  systemctl restart timed"

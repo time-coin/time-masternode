@@ -73,13 +73,18 @@ Available tiers:
 Enter tier (free/bronze/silver/gold):
 > bronze
 
-Step 3: Reward Address
-Enter your TIME address where you want to receive rewards:
-> TIME1abc123...
+Step 3: Masternode Private Key
+Enter your masternode private key (or press Enter to skip):
+> (Enter)
 
 Step 4: Collateral Information
 Enter collateral transaction ID (txid):
 > abc123def456... (or leave empty to configure later)
+
+Step 5: Public IP Address
+Detected public IP: 50.28.104.50
+Use this IP? (y/n)
+> y
 
 Configuration saved successfully!
 ```
@@ -328,15 +333,10 @@ du -sh ~/.timecoin
 
 The installation script implements security best practices:
 
-- **Dedicated User**: Service runs as non-privileged `timecoin` user
-- **Restricted Permissions**: Config files readable only by service user
-- **Systemd Hardening**: 
-  - `NoNewPrivileges=true`
-  - `PrivateTmp=true`
-  - `ProtectSystem=strict`
-  - `ProtectHome=true`
-- **Firewall**: Configures UFW to allow only P2P port (24000 mainnet / 24100 testnet)
-- **Resource Limits**: Prevents resource exhaustion
+- **Root Service**: Service runs as `root` (required for data dir access under `/root/.timecoin`)
+- **Restricted Permissions**: Config files readable only by root (`chmod 640`)
+- **Firewall**: Configures UFW to allow P2P, RPC, and WebSocket ports
+- **Resource Limits**: Sets `LimitNOFILE=65535` and `LimitNPROC=4096` to prevent resource exhaustion
 
 ---
 
