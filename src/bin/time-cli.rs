@@ -40,7 +40,8 @@ Commands:
     getbalance             Get wallet balance [address]
     getwalletinfo          Get wallet information
     getlocalwallet         Get local wallet address (not the forwarded reward address)
-    getnewaddress          Get this node's reward address
+    getnewaddress          Get this node's local wallet address
+    getwalletaddress       Get local wallet address with reward forwarding info
     getaddressinfo         Get info about an address (ismine, pubkey, etc.)
     getaddresspubkey       Get the public key for an address
     listreceivedbyaddress  List addresses with received balances
@@ -354,9 +355,13 @@ enum Commands {
     #[command(next_help_heading = "Wallet")]
     GetLocalWallet,
 
-    /// Get a new receiving address
+    /// Get this node's local wallet address (same as getwalletaddress)
     #[command(next_help_heading = "Wallet")]
     GetNewAddress,
+
+    /// Get the wallet's local signing-key address (the address funds are actually held at)
+    #[command(next_help_heading = "Wallet")]
+    GetWalletAddress,
 
     /// List addresses with balances
     #[command(next_help_heading = "Wallet")]
@@ -1434,6 +1439,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             maxconf,
         } => ("listunspent", json!([minconf, maxconf, null, limit])),
         Commands::GetNewAddress => ("getnewaddress", json!([])),
+        Commands::GetWalletAddress => ("getwalletaddress", json!([])),
         Commands::GetWalletInfo => ("getwalletinfo", json!([])),
         Commands::GetLocalWallet => ("getlocalwallet", json!([])),
         Commands::ListTransactions { count } => ("listtransactions", json!([count])),
@@ -1711,6 +1717,29 @@ fn print_human_readable(
         }
         Commands::GetNewAddress => {
             println!("Address: {}", result.as_str().unwrap_or("N/A"));
+        }
+        Commands::GetWalletAddress => {
+            println!(
+                "Wallet Address:  {}",
+                result
+                    .get("address")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
+            );
+            println!(
+                "Reward Address:  {}",
+                result
+                    .get("reward_address")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
+            );
+            if result
+                .get("forwards_rewards")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                println!("  (rewards forwarded to external address)");
+            }
         }
         Commands::ListReceivedByAddress { .. } => {
             if let Some(addresses) = result.as_array() {

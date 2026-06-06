@@ -36,7 +36,8 @@
 //! | `getbalance`            | |
 //! | `getbalances`           | |
 //! | `listunspent`           | |
-//! | `getnewaddress`         | |
+//! | `getnewaddress`         | Returns local wallet signing-key address |
+//! | `getwalletaddress`      | Returns local wallet address + reward forwarding info |
 //! | `getwalletinfo`         | |
 //! | `validateaddress`       | |
 //! | `getaddressinfo`        | Modern superset of `validateaddress`; sets `ismine` correctly |
@@ -199,6 +200,7 @@ impl RpcHandler {
             "getbalance" => self.get_balance(&params_array).await,
             "listunspent" => self.list_unspent(&params_array).await,
             "getnewaddress" => self.get_new_address(&params_array).await,
+            "getwalletaddress" => self.get_wallet_address().await,
             "getwalletinfo" => self.get_wallet_info().await,
             "getlocalwallet" => self.get_local_wallet().await,
             "masternodelist" => self.masternode_list(&params_array).await,
@@ -5322,16 +5324,48 @@ impl RpcHandler {
     }
 
     async fn get_new_address(&self, _params: &[Value]) -> Result<Value, RpcError> {
-        // Get local masternode's reward address
-        if let Some(local_mn) = self.registry.get_local_masternode().await {
-            Ok(json!(local_mn.reward_address))
-        } else {
-            Err(RpcError {
-                code: -4,
-                message: "Node is not configured as a masternode. Cannot generate address."
-                    .to_string(),
+        self.consensus
+            .get_wallet_signing_key()
+            .map(|k| {
+                json!(
+                    Address::from_public_key(k.verifying_key().as_bytes(), self.network)
+                        .to_string()
+                )
             })
-        }
+            .ok_or_else(|| RpcError {
+                code: -4,
+                message: "Node wallet key not initialized".to_string(),
+            })
+    }
+
+    async fn get_wallet_address(&self) -> Result<Value, RpcError> {
+        let addr = self
+            .consensus
+            .get_wallet_signing_key()
+            .map(|k| {
+                Address::from_public_key(k.verifying_key().as_bytes(), self.network).to_string()
+            })
+            .ok_or_else(|| RpcError {
+                code: -4,
+                message: "Node wallet key not initialized".to_string(),
+            })?;
+        let reward_address = self
+            .registry
+            .get_local_masternode()
+            .await
+            .map(|mn| mn.reward_address)
+            .unwrap_or_default();
+        let forwards = !reward_address.is_empty() && reward_address != addr;
+        let display_reward = if reward_address.is_empty() {
+            addr.clone()
+        } else {
+            reward_address
+        };
+        Ok(json!({
+            "address": addr,
+            "reward_address": display_reward,
+            "forwards_rewards": forwards,
+        }))
     }
 
     async fn get_wallet_info(&self) -> Result<Value, RpcError> {
@@ -5413,27 +5447,27 @@ impl RpcHandler {
     }
 
     async fn get_local_wallet(&self) -> Result<Value, RpcError> {
-        let (wallet_address, reward_address, is_masternode) =
+        let wallet_address = if let Some(k) = self.consensus.get_wallet_signing_key() {
+            Address::from_public_key(k.verifying_key().as_bytes(), self.network).to_string()
+        } else if let Some(addr) = self.registry.get_local_wallet_address().await {
+            addr
+        } else {
+            return Err(RpcError {
+                code: -4,
+                message: "No local wallet found".to_string(),
+            });
+        };
+        let (reward_address, is_masternode) =
             if let Some(local_mn) = self.registry.get_local_masternode().await {
-                (
-                    local_mn.masternode.wallet_address.clone(),
-                    local_mn.reward_address.clone(),
-                    true,
-                )
-            } else if let Some(addr) = self.registry.get_local_wallet_address().await {
-                (addr.clone(), addr, false)
+                (local_mn.reward_address.clone(), true)
             } else {
-                return Err(RpcError {
-                    code: -4,
-                    message: "No local wallet found".to_string(),
-                });
+                (wallet_address.clone(), false)
             };
-
         Ok(json!({
             "wallet_address": wallet_address,
-            "reward_address": reward_address,
+            "reward_address": if reward_address.is_empty() { wallet_address.clone() } else { reward_address.clone() },
             "is_masternode": is_masternode,
-            "forwards_rewards": wallet_address != reward_address,
+            "forwards_rewards": !reward_address.is_empty() && reward_address != wallet_address,
         }))
     }
 
