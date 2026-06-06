@@ -1632,12 +1632,9 @@ impl RpcHandler {
 
         let filter_addr = if let Some(addr) = address {
             addr.to_string()
-        } else if let Some(local_mn) = self.registry.get_local_masternode().await {
-            // Use wallet_address — the node's own spendable address.
-            // reward_address may be an external GUI wallet; its UTXOs can't be signed here.
-            local_mn.masternode.wallet_address
+        } else if let Some(k) = self.consensus.get_wallet_signing_key() {
+            Address::from_public_key(k.verifying_key().as_bytes(), self.network).to_string()
         } else if let Some(wallet_addr) = self.registry.get_local_wallet_address().await {
-            // Fallback: masternode may have been deregistered but wallet address is still valid
             wallet_addr
         } else {
             return Ok(json!({
@@ -5373,10 +5370,14 @@ impl RpcHandler {
         if let Some(local_mn) = self.registry.get_local_masternode().await {
             let utxos = self.utxo_manager.list_all_utxos().await;
 
-            // Filter by wallet_address — the address whose private key is on this
-            // server.  reward_address may be an external GUI wallet; showing those
-            // UTXOs would make the balance look non-zero while being unspendable.
-            let spendable_addr = &local_mn.masternode.wallet_address;
+            // Derive the spendable address from the signing key — wallet_address in the
+            // registry may be set to an external reward_address from time.conf.
+            let derived = self.consensus.get_wallet_signing_key().map(|k| {
+                Address::from_public_key(k.verifying_key().as_bytes(), self.network).to_string()
+            });
+            let spendable_addr_owned =
+                derived.unwrap_or_else(|| local_mn.masternode.wallet_address.clone());
+            let spendable_addr = &spendable_addr_owned;
 
             // Categorize UTXOs by state
             let mut spendable_balance: u64 = 0;
