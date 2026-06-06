@@ -3887,17 +3887,18 @@ impl RpcHandler {
         let nowait = params.get(3).and_then(|v| v.as_bool()).unwrap_or(false);
         let memo = params.get(4).and_then(|v| v.as_str());
 
-        // Use the node's own wallet address (the one whose private key lives on
-        // this server).  reward_address may point to an external GUI wallet that
-        // this node cannot sign for, so we must never use it as the spend source.
+        // Derive the spendable address from the wallet signing key — this is the only
+        // address whose private key lives on this server.  mn.wallet_address may be set
+        // to an external reward_address from time.conf that this node cannot sign for.
         let wallet_address = self
-            .registry
-            .get_local_masternode()
-            .await
-            .map(|mn| mn.masternode.wallet_address)
+            .consensus
+            .get_wallet_signing_key()
+            .map(|k| {
+                Address::from_public_key(k.verifying_key().as_bytes(), self.network).to_string()
+            })
             .ok_or_else(|| RpcError {
                 code: -4,
-                message: "Node is not configured as a masternode - no wallet address".to_string(),
+                message: "Node wallet key not initialized".to_string(),
             })?;
 
         self.send_coins(
@@ -4399,16 +4400,17 @@ impl RpcHandler {
 
         let filter_address = params.get(2).and_then(|v| v.as_str());
 
-        // Get local masternode's reward address
+        // Derive the spendable address from the wallet signing key (same logic as sendtoaddress).
         let local_address = self
-            .registry
-            .get_local_masternode()
-            .await
+            .consensus
+            .get_wallet_signing_key()
+            .map(|k| {
+                Address::from_public_key(k.verifying_key().as_bytes(), self.network).to_string()
+            })
             .ok_or_else(|| RpcError {
                 code: -4,
-                message: "Node is not configured as a masternode".to_string(),
-            })?
-            .reward_address;
+                message: "Node wallet key not initialized".to_string(),
+            })?;
 
         // Get UTXOs filtered by address using the address index
         let mut utxos = if let Some(addr) = filter_address {
