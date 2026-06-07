@@ -445,12 +445,6 @@ impl App {
             }
         }
 
-        // Fetch wallet info
-        match self.rpc_call::<WalletInfo>("getwalletinfo", vec![]).await {
-            Ok(info) => self.data.wallet = Some(info),
-            Err(e) => self.error_message = Some(format!("getwalletinfo: {}", e)),
-        }
-
         // Fetch network info
         match self.rpc_call::<NetworkInfo>("getnetworkinfo", vec![]).await {
             Ok(info) => self.data.network = Some(info),
@@ -463,13 +457,29 @@ impl App {
             Err(e) => self.error_message = Some(format!("getpeerinfo: {}", e)),
         }
 
-        // Fetch masternode status
+        // Fetch masternode status first so we can use reward_address for balance query
         match self
             .rpc_call::<MasternodeStatus>("masternodestatus", vec![])
             .await
         {
             Ok(status) => self.data.masternode = Some(status),
             Err(e) => self.error_message = Some(format!("masternodestatus: {}", e)),
+        }
+
+        // Fetch wallet balance — use the reward_address (forwarding address) when configured
+        // so the dashboard shows where rewards actually accumulate.
+        let balance_params = match self.data.masternode.as_ref() {
+            Some(mn) if !mn.reward_address.is_empty() => {
+                vec![serde_json::json!(mn.reward_address)]
+            }
+            _ => vec![],
+        };
+        match self
+            .rpc_call::<WalletInfo>("getbalance", balance_params)
+            .await
+        {
+            Ok(info) => self.data.wallet = Some(info),
+            Err(e) => self.error_message = Some(format!("getbalance: {}", e)),
         }
 
         // Fetch network masternode list
