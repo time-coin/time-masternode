@@ -157,6 +157,15 @@ impl RpcHandler {
         }
     }
 
+    /// The address whose private key lives on this server — the only address we can
+    /// sign for and spend from. Derived from the wallet signing key so it is always
+    /// correct even when reward_address is configured to an external forwarding address.
+    fn wallet_address(&self) -> Option<String> {
+        self.consensus.get_wallet_signing_key().map(|k| {
+            Address::from_public_key(k.verifying_key().as_bytes(), self.network).to_string()
+        })
+    }
+
     /// Set the transaction event broadcast sender for WebSocket notifications
     pub fn set_tx_event_sender(
         &mut self,
@@ -906,12 +915,7 @@ impl RpcHandler {
                         let current_height = self.blockchain.get_height();
                         let confirmations = current_height - location.block_height + 1;
 
-                        // Get wallet address for net amount calculation
-                        let local_address = self
-                            .registry
-                            .get_local_masternode()
-                            .await
-                            .map(|mn| mn.reward_address);
+                        let local_address = self.wallet_address();
 
                         // Calculate input/output sums and wallet-relative amounts
                         let mut input_sum: u64 = 0;
@@ -1024,12 +1028,7 @@ impl RpcHandler {
             let is_finalized = self.consensus.tx_pool.is_finalized(&txid_array);
             let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
 
-            // Get wallet address for net amount calculation
-            let local_address = self
-                .registry
-                .get_local_masternode()
-                .await
-                .map(|mn| mn.reward_address);
+            let local_address = self.wallet_address();
 
             let mut wallet_input: u64 = 0;
             let mut wallet_output: u64 = 0;
@@ -1899,16 +1898,9 @@ impl RpcHandler {
                 .filter_map(|a| a.as_str().map(|s| s.to_string()))
                 .collect()
         } else {
-            // Fallback to local masternode/wallet address
             let local_address = self
-                .registry
-                .get_local_masternode()
-                .await
-                .map(|mn| mn.reward_address);
-            let local_address = match local_address {
-                Some(addr) => Some(addr),
-                None => self.registry.get_local_wallet_address().await,
-            };
+                .wallet_address()
+                .or(self.registry.get_local_wallet_address().await);
             match local_address {
                 Some(addr) => vec![addr],
                 None => return Ok(json!([])),
@@ -2044,12 +2036,9 @@ impl RpcHandler {
 
         let current_height = self.blockchain.get_height();
 
-        // Get local masternode's reward address to filter UTXOs
-        let local_address = match self.registry.get_local_masternode().await {
-            Some(mn) => mn.reward_address,
-            None => {
-                return Ok(json!([]));
-            }
+        let local_address = match self.wallet_address() {
+            Some(addr) => addr,
+            None => return Ok(json!([])),
         };
 
         let utxos = self
@@ -2124,27 +2113,17 @@ impl RpcHandler {
             }
             Some(Value::Number(n)) => {
                 let count = n.as_u64().unwrap_or(10) as usize;
-                let addr = self
-                    .registry
-                    .get_local_masternode()
-                    .await
-                    .map(|mn| mn.reward_address)
-                    .ok_or_else(|| RpcError {
-                        code: -4,
-                        message: "No address provided and node is not a masternode".to_string(),
-                    })?;
+                let addr = self.wallet_address().ok_or_else(|| RpcError {
+                    code: -4,
+                    message: "No address provided and node wallet key not initialized".to_string(),
+                })?;
                 (addr, count)
             }
             _ => {
-                let addr = self
-                    .registry
-                    .get_local_masternode()
-                    .await
-                    .map(|mn| mn.reward_address)
-                    .ok_or_else(|| RpcError {
-                        code: -4,
-                        message: "No address provided and node is not a masternode".to_string(),
-                    })?;
+                let addr = self.wallet_address().ok_or_else(|| RpcError {
+                    code: -4,
+                    message: "No address provided and node wallet key not initialized".to_string(),
+                })?;
                 (addr, 10)
             }
         };
@@ -6530,15 +6509,10 @@ impl RpcHandler {
         let label = params.get(2).and_then(|v| v.as_str()).unwrap_or("");
 
         // Get our wallet address
-        let wallet_address = self
-            .registry
-            .get_local_masternode()
-            .await
-            .map(|mn| mn.reward_address)
-            .ok_or_else(|| RpcError {
-                code: -4,
-                message: "Node is not configured as a masternode - no wallet address".to_string(),
-            })?;
+        let wallet_address = self.wallet_address().ok_or_else(|| RpcError {
+            code: -4,
+            message: "Node wallet key not initialized".to_string(),
+        })?;
 
         // Get our Ed25519 public key
         let signing_key = self
@@ -6658,16 +6632,10 @@ impl RpcHandler {
             "Paying payment request"
         );
 
-        // Get wallet address
-        let wallet_address = self
-            .registry
-            .get_local_masternode()
-            .await
-            .map(|mn| mn.reward_address)
-            .ok_or_else(|| RpcError {
-                code: -4,
-                message: "Node is not configured as a masternode - no wallet address".to_string(),
-            })?;
+        let wallet_address = self.wallet_address().ok_or_else(|| RpcError {
+            code: -4,
+            message: "Node wallet key not initialized".to_string(),
+        })?;
 
         // Send the coins with the memo
         let result = self
@@ -8020,12 +7988,7 @@ impl RpcHandler {
         };
         let is_valid = address.starts_with(expected_prefix) && address.len() > 10;
 
-        let local_address = self
-            .registry
-            .get_local_masternode()
-            .await
-            .map(|mn| mn.reward_address);
-        let is_mine = local_address.as_deref() == Some(address);
+        let is_mine = self.wallet_address().as_deref() == Some(address);
 
         let pubkey_hex = self
             .utxo_manager
@@ -8089,15 +8052,10 @@ impl RpcHandler {
                 message: "Expected message".to_string(),
             })?;
 
-        let local_address = self
-            .registry
-            .get_local_masternode()
-            .await
-            .map(|mn| mn.reward_address)
-            .ok_or_else(|| RpcError {
-                code: -4,
-                message: "Node is not configured as a masternode".to_string(),
-            })?;
+        let local_address = self.wallet_address().ok_or_else(|| RpcError {
+            code: -4,
+            message: "Node wallet key not initialized".to_string(),
+        })?;
         if local_address != address {
             return Err(RpcError {
                 code: -4,
