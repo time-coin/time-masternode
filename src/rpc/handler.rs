@@ -4000,8 +4000,8 @@ impl RpcHandler {
             // Sort by value descending (use largest UTXOs first for efficiency)
             utxos.sort_by_key(|b| std::cmp::Reverse(b.value));
 
-            // Calculate fee using governance-adjustable tiered schedule
-            let fee_schedule = crate::consensus::FeeSchedule::default();
+            // Use the live governance-adjustable fee schedule (may have changed via vote)
+            let fee_schedule = self.consensus.current_fee_schedule();
             let fee = fee_schedule.required_fee(amount_units);
 
             // Select sufficient UTXOs
@@ -4044,8 +4044,8 @@ impl RpcHandler {
                 consolidate_utxos.truncate(MAX_TX_INPUTS);
 
                 let consolidate_total: u64 = consolidate_utxos.iter().map(|u| u.value).sum();
-                // Self-sends (consolidations) only pay MIN_TX_FEE, not 1% of total value
-                let consolidate_fee = crate::consensus::MIN_TX_FEE;
+                // Self-sends (consolidations) only pay the minimum fee, not the percentage tier
+                let consolidate_fee = self.consensus.current_fee_schedule().min_fee;
 
                 if consolidate_total <= consolidate_fee {
                     return Err(RpcError {
