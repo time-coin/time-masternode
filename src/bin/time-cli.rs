@@ -1597,6 +1597,102 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         ),
     };
 
+    let auth = if !rpc_user.is_empty() && !rpc_pass.is_empty() {
+        Some((rpc_user.clone(), rpc_pass.clone()))
+    } else {
+        None
+    };
+    let auth_ref = auth.as_ref().map(|(u, p)| (u.as_str(), p.as_str()));
+
+    // ── Interactive sendtoaddress: offer subtract_fee on "Insufficient funds" ──
+    if method == "sendtoaddress" {
+        let params_arr = params.as_array().cloned().unwrap_or_default();
+        let subtract_fee_already = params_arr.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
+
+        if !subtract_fee_already {
+            let result = do_rpc(&client, &rpc_url, auth_ref, method, params.clone()).await;
+
+            match result {
+                Ok(val) => {
+                    print_rpc_result(&args, &val)?;
+                    return Ok(());
+                }
+                Err((code, ref msg))
+                    if code == -6 && msg.to_lowercase().contains("insufficient") =>
+                {
+                    // Fetch the live fee schedule and calculate the fee for this amount.
+                    let amount = params_arr.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let amount_sats = (amount * 100_000_000.0) as u64;
+
+                    let fee_sats = match do_rpc(
+                        &client,
+                        &rpc_url,
+                        auth_ref,
+                        "getfeeschedule",
+                        json!([]),
+                    )
+                    .await
+                    {
+                        Ok(sched) => estimate_fee(&sched, amount_sats),
+                        Err(_) => 0,
+                    };
+
+                    let fee_time = fee_sats as f64 / 100_000_000.0;
+                    let net = amount - fee_time;
+
+                    eprintln!(
+                        "Cannot send {:.8} TIME: insufficient funds to cover the fee.",
+                        amount
+                    );
+                    eprintln!("  Fee:               {:.8} TIME", fee_time);
+                    eprintln!("  Recipient receives: {:.8} TIME", net);
+                    eprint!("Subtract fee from amount and send {:.8} TIME? [y/N] ", net);
+
+                    use std::io::Write;
+                    std::io::stdout().flush().ok();
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input)?;
+
+                    if input.trim().eq_ignore_ascii_case("y") {
+                        let mut new_params = params_arr.clone();
+                        // Ensure slots 0-2 exist; set subtract_fee=true at index 2
+                        while new_params.len() < 3 {
+                            new_params.push(json!(null));
+                        }
+                        new_params[2] = json!(true);
+                        let val = do_rpc(&client, &rpc_url, auth_ref, method, json!(new_params))
+                            .await
+                            .map_err(|(code, msg)| format!("RPC error {}: {}", code, msg))?;
+                        print_rpc_result(&args, &val)?;
+                        return Ok(());
+                    } else {
+                        return Err("Transaction cancelled.".into());
+                    }
+                }
+                Err((code, msg)) => {
+                    return Err(format!("RPC error {}: {}", code, msg).into());
+                }
+            }
+        }
+    }
+
+    // ── Generic RPC dispatch ──────────────────────────────────────────────────
+    let val = do_rpc(&client, &rpc_url, auth_ref, method, params)
+        .await
+        .map_err(|(code, msg)| format!("RPC error {}: {}", code, msg))?;
+
+    print_rpc_result(&args, &val)?;
+    Ok(())
+}
+
+/// Make a single JSON-RPC call. Returns the result value or an (error_code, message) pair.
+async fn do_rpc(
+    client: &HttpClient,
+    rpc_url: &str,
+    auth: Option<(&str, &str)>,
+    method: &str,
+    params: Value,
+) -> Result<Value, (i32, String)> {
     let request = RpcRequest {
         jsonrpc: "2.0".to_string(),
         id: "time-cli".to_string(),
@@ -1604,13 +1700,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         params,
     };
 
-    // Send request; if HTTPS fails, retry over HTTP with a warning (allows use when cert issues)
-    let auth = if !rpc_user.is_empty() && !rpc_pass.is_empty() {
-        Some((rpc_user.as_str(), rpc_pass.as_str()))
-    } else {
-        None
-    };
-    let response = match client.post_json(&rpc_url, &request, auth).await {
+    let response = match client.post_json(rpc_url, &request, auth).await {
         Ok(r) => r,
         Err(e) if rpc_url.starts_with("https://") => {
             let http_url = rpc_url.replacen("https://", "http://", 1);
@@ -1618,43 +1708,72 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 "⚠️  HTTPS RPC failed ({}); retrying over plain HTTP — check rpctlscert/rpctlskey",
                 e
             );
-            client.post_json(&http_url, &request, auth).await?
+            client
+                .post_json(&http_url, &request, auth)
+                .await
+                .map_err(|e2| (-1, e2.to_string()))?
         }
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err((-1, e.to_string())),
     };
 
     if response.status == 401 {
-        return Err("RPC authentication failed. Check rpcuser/rpcpassword in time.conf or use --rpcuser/--rpcpassword flags.".into());
+        return Err((-32600, "RPC authentication failed. Check rpcuser/rpcpassword in time.conf or use --rpcuser/--rpcpassword flags.".to_string()));
     }
-
     if !response.is_success() {
-        return Err(format!("HTTP error: {}", response.status).into());
+        return Err((-1, format!("HTTP error: {}", response.status)));
     }
 
-    let rpc_response: RpcResponse = response
-        .json()
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let rpc_response: RpcResponse = response.json().map_err(|e| (-1, e.to_string()))?;
 
     if let Some(error) = rpc_response.error {
-        return Err(format!("RPC error {}: {}", error.code, error.message).into());
+        return Err((error.code, error.message));
     }
 
-    if let Some(result) = rpc_response.result {
-        if args.human {
-            print_human_readable(&args.command, &result)?;
-        } else if args.compact {
-            println!("{}", serde_json::to_string(&result)?);
+    rpc_response
+        .result
+        .ok_or_else(|| (-1, "Empty RPC response".to_string()))
+}
+
+/// Estimate the fee for `amount_sats` using the fee schedule returned by `getfeeschedule`.
+fn estimate_fee(schedule: &Value, amount_sats: u64) -> u64 {
+    let min_fee = schedule
+        .get("min_fee")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1_000_000);
+
+    let rate_bps = schedule
+        .get("tiers")
+        .and_then(|v| v.as_array())
+        .and_then(|tiers| {
+            tiers.iter().find_map(|t| {
+                let up_to = t.get("up_to").and_then(|v| v.as_u64())?;
+                let bps = t.get("rate_bps").and_then(|v| v.as_u64())?;
+                if amount_sats < up_to {
+                    Some(bps)
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or(10); // fallback 0.1%
+
+    let proportional = amount_sats * rate_bps / 10_000;
+    proportional.max(min_fee)
+}
+
+/// Print an RPC result value according to the output flags on `args`.
+fn print_rpc_result(args: &Args, result: &Value) -> Result<(), Box<dyn std::error::Error>> {
+    if args.human {
+        print_human_readable(&args.command, result)?;
+    } else if args.compact {
+        println!("{}", serde_json::to_string(result)?);
+    } else {
+        if let Some(s) = result.as_str() {
+            println!("{}", s);
         } else {
-            // Default: pretty JSON (like Bitcoin).
-            // Bare string results print without quotes, matching Bitcoin CLI behaviour.
-            if let Some(s) = result.as_str() {
-                println!("{}", s);
-            } else {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-            }
+            println!("{}", serde_json::to_string_pretty(result)?);
         }
     }
-
     Ok(())
 }
 
