@@ -2,13 +2,15 @@
 Description=TIME Coin Masternode Registration Watchdog
 Documentation=https://github.com/TimeCoinsOfficial/time-masternode
 After=timed.service
-BindsTo=timed.service
+Wants=timed.service
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/mn-watchdog
 Restart=always
 RestartSec=10
+# Disable systemd's start-rate limit so it never gives up restarting the watchdog
+StartLimitIntervalSec=0
 
 # Run as root so it can call `systemctl restart timed`
 User=root
