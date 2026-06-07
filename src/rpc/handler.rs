@@ -5427,28 +5427,13 @@ impl RpcHandler {
     }
 
     async fn get_local_wallet(&self) -> Result<Value, RpcError> {
-        let wallet_address = if let Some(k) = self.consensus.get_wallet_signing_key() {
-            Address::from_public_key(k.verifying_key().as_bytes(), self.network).to_string()
-        } else if let Some(addr) = self.registry.get_local_wallet_address().await {
-            addr
-        } else {
-            return Err(RpcError {
+        self.wallet_address()
+            .or(self.registry.get_local_wallet_address().await)
+            .map(|addr| json!(addr))
+            .ok_or_else(|| RpcError {
                 code: -4,
                 message: "No local wallet found".to_string(),
-            });
-        };
-        let (reward_address, is_masternode) =
-            if let Some(local_mn) = self.registry.get_local_masternode().await {
-                (local_mn.reward_address.clone(), true)
-            } else {
-                (wallet_address.clone(), false)
-            };
-        Ok(json!({
-            "wallet_address": wallet_address,
-            "reward_address": if reward_address.is_empty() { wallet_address.clone() } else { reward_address.clone() },
-            "is_masternode": is_masternode,
-            "forwards_rewards": !reward_address.is_empty() && reward_address != wallet_address,
-        }))
+            })
     }
 
     /// List all locked collaterals

@@ -39,7 +39,7 @@ Commands:
   Wallet
     getbalance             Get wallet balance [address]
     getwalletinfo          Get wallet information
-    getlocalwallet         Get local wallet address (not the forwarded reward address)
+    getlocalwallet         Get local wallet address (plain string)
     getnewaddress          Get this node's local wallet address
     getwalletaddress       Get local wallet address with reward forwarding info
     getaddressinfo         Get info about an address (ismine, pubkey, etc.)
@@ -1830,34 +1830,7 @@ fn print_human_readable(
             );
         }
         Commands::GetLocalWallet => {
-            println!(
-                "  Wallet Address:   {}",
-                result
-                    .get("wallet_address")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("N/A")
-            );
-            println!(
-                "  Reward Address:   {}",
-                result
-                    .get("reward_address")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("N/A")
-            );
-            let forwards = result
-                .get("forwards_rewards")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if forwards {
-                println!("  Rewards forwarded to external address");
-            }
-            if !result
-                .get("is_masternode")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                println!("  (non-masternode wallet)");
-            }
+            println!("{}", result.as_str().unwrap_or("N/A"));
         }
         Commands::ListTransactions { .. } => {
             if let Some(txs) = result.as_array() {
