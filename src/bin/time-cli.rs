@@ -1190,6 +1190,56 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
     // ── End Restoredata ───────────────────────────────────────────────────────
 
+    // ── Backupdata: try RPC first; fall back to offline copy if daemon is down ─
+    if let Commands::Backupdata { destination } = &args.command {
+        let probe = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "backupdata", "params": [destination]
+        });
+        let auth = if !rpc_user.is_empty() && !rpc_pass.is_empty() {
+            Some((rpc_user.as_str(), rpc_pass.as_str()))
+        } else {
+            None
+        };
+        if let Ok(resp) = client.post_json(&rpc_url, &probe, auth).await {
+            if let Ok(val) = resp.json::<serde_json::Value>() {
+                // Daemon handled it (including DB flush) — print the result.
+                if let Some(err) = val.get("error") {
+                    return Err(err
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("backupdata failed")
+                        .into());
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(val.get("result").unwrap_or(&val))?
+                );
+                return Ok(());
+            }
+        }
+
+        // Daemon is down — fall back to a direct file copy.
+        let src = if is_testnet {
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".timecoin")
+                .join("testnet")
+        } else {
+            dirs::home_dir().unwrap_or_default().join(".timecoin")
+        };
+        let dst = std::path::Path::new(destination);
+        println!(
+            "Daemon not running — backing up {} to {} ...",
+            src.display(),
+            dst.display()
+        );
+        let count = copy_dir_all(&src, dst)?;
+        println!("✓ Backup complete: {} files copied", count);
+        return Ok(());
+    }
+    // ── End Backupdata ────────────────────────────────────────────────────────
+
     // ── MasternodeReg: local signing then sendrawtransaction ─────────────────
     if let Commands::MasternodeReg {
         collateral,
@@ -1590,7 +1640,6 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::GetTxIndexStatus => ("gettxindexstatus", json!([])),
         Commands::ReindexTransactions => ("reindextransactions", json!([])),
         Commands::Reindex => ("reindex", json!([])),
-        Commands::Backupdata { destination } => ("backupdata", json!([destination])),
         Commands::RollbackToBlock0 => ("rollbacktoblock0", json!([])),
         Commands::RollbackToHeight { height } => ("rollbacktoheight", json!([height])),
         Commands::ResyncFromWhitelist { target_height } => {
@@ -1688,6 +1737,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             json!([request_id, requester_address, payer_address]),
         ),
         // Handled offline before the RPC match — never reached.
+        Commands::Backupdata { .. } => unreachable!(),
         Commands::Restoredata { .. } => unreachable!(),
     };
 
