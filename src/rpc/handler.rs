@@ -252,6 +252,7 @@ impl RpcHandler {
             "stop" => self.stop().await,
             "uptime" => self.uptime().await,
             "getinfo" => self.get_info().await,
+            "backupdata" => self.backup_data(&params_array).await,
             "getmempoolinfo" => self.get_mempool_info().await,
             "getrawmempool" => self.get_raw_mempool(&params_array).await,
             "getmempoolverbose" => self.get_mempool_verbose().await,
@@ -3545,6 +3546,70 @@ impl RpcHandler {
         tracing::debug!("📬 Registered pubkey for address {}", address);
 
         Ok(json!({ "success": true, "address": address }))
+    }
+
+    async fn backup_data(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let destination = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Usage: backupdata <destination_path>".to_string(),
+            })?
+            .to_string();
+
+        // Flush blockchain storage so the copy captures a consistent state
+        if let Err(e) = self.blockchain.flush_storage() {
+            tracing::warn!("backupdata: flush warning (continuing): {}", e);
+        }
+
+        let src = self.data_dir.clone();
+        let dst = destination.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            Self::copy_dir_all(std::path::Path::new(&src), std::path::Path::new(&dst))
+        })
+        .await
+        .map_err(|e| RpcError {
+            code: -8,
+            message: format!("Backup task failed: {}", e),
+        })?
+        .map_err(|e| RpcError {
+            code: -8,
+            message: format!("Backup failed: {}", e),
+        })?;
+
+        tracing::info!(
+            "💾 Backup complete: {} files copied to {}",
+            result,
+            destination
+        );
+
+        Ok(json!({
+            "source": self.data_dir,
+            "destination": destination,
+            "files_copied": result,
+            "status": "complete"
+        }))
+    }
+
+    /// Recursively copy `src` into `dst`, returning the number of files copied.
+    fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<usize> {
+        std::fs::create_dir_all(dst)?;
+        let mut count = 0;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            if file_type.is_dir() {
+                count += Self::copy_dir_all(&src_path, &dst_path)?;
+            } else if file_type.is_file() {
+                std::fs::copy(&src_path, &dst_path)?;
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     async fn stop(&self) -> Result<Value, RpcError> {

@@ -368,6 +368,10 @@ async fn main() {
             println!("✓ Wallet initialized");
             println!("  └─ Address: {}", w.address());
             println!("  └─ File: {}", wallet_manager.default_wallet_path());
+            println!(
+                "  └─ Backup: keep copies of time-wallet.dat, .wallet_password, and address_index from {}",
+                config.storage.data_dir
+            );
             w
         }
         Err(e) => {

@@ -114,6 +114,7 @@ Commands:
     gettxindexstatus       Get transaction index rebuild status
     reindextransactions    Rebuild transaction index
     reindex                Full reindex: rebuild UTXOs + tx index from block 0
+    backupdata             Backup blockchain data and wallet files to a destination directory
     rollbacktoblock0       [DANGER] Delete all blocks above genesis and reset chain
     rollbacktoheight       [DANGER] Roll back chain to a specific block height
     resyncfromwhitelist    [DANGER] Roll back and resync chain from trusted whitelisted peers (bypasses depth limit)
@@ -870,6 +871,13 @@ enum Commands {
     #[command(next_help_heading = "Utility")]
     Reindex,
 
+    /// Backup all blockchain data and wallet files to a destination directory
+    #[command(next_help_heading = "Utility")]
+    Backupdata {
+        /// Destination directory path (will be created if it doesn't exist)
+        destination: String,
+    },
+
     /// Delete all blocks above height 0 and reset chain to genesis (DANGER: wipes all post-genesis chain data)
     #[command(next_help_heading = "Utility")]
     RollbackToBlock0,
@@ -1499,6 +1507,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::GetTxIndexStatus => ("gettxindexstatus", json!([])),
         Commands::ReindexTransactions => ("reindextransactions", json!([])),
         Commands::Reindex => ("reindex", json!([])),
+        Commands::Backupdata { destination } => ("backupdata", json!([destination])),
         Commands::RollbackToBlock0 => ("rollbacktoblock0", json!([])),
         Commands::RollbackToHeight { height } => ("rollbacktoheight", json!([height])),
         Commands::ResyncFromWhitelist { target_height } => {
