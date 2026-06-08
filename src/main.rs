@@ -5892,9 +5892,10 @@ async fn main() {
                 .await
                 {
                     Ok(mut server) => {
-                        // Contacts book is always available (all nodes need pubkey resolution)
+                        // Contacts book and P2P registry always available (all nodes)
                         server.set_contacts_book(rpc_contacts_book);
-                        // Relay store + P2P registry only wired on Silver/Gold relay nodes
+                        server.set_peer_registry(rpc_peer_registry.clone());
+                        // Relay store only wired on Silver/Gold relay nodes
                         if let Some(rs) = rpc_relay_store {
                             server.set_messaging(rs, rpc_peer_registry);
                         }

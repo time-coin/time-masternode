@@ -206,6 +206,14 @@ impl RpcHandler {
         self.contacts_book = Some(contacts_book);
     }
 
+    /// Set the P2P peer registry (all nodes need this for pubkey resolution and message routing).
+    pub fn set_peer_registry(
+        &mut self,
+        peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+    ) {
+        self.peer_registry = Some(peer_registry);
+    }
+
     /// Read the next deterministic address index from disk (4-byte LE u32).
     fn read_address_index(data_dir: &str) -> u32 {
         let path = std::path::Path::new(data_dir).join("address_index");
@@ -8596,23 +8604,19 @@ impl RpcHandler {
                 code: -32000,
                 message: "Wallet key not available".to_string(),
             })?;
-        let relay_store = self
-            .relay_store
-            .as_ref()
-            .ok_or_else(Self::messaging_unavailable)?;
         let contacts = self
             .contacts_book
             .as_ref()
             .ok_or_else(Self::messaging_unavailable)?;
-        let peer_registry = self
-            .peer_registry
-            .as_ref()
-            .ok_or_else(Self::messaging_unavailable)?;
+        let peer_registry = self.peer_registry.as_ref().ok_or_else(|| RpcError {
+            code: -32000,
+            message: "P2P network not initialized".to_string(),
+        })?;
 
         crate::messaging::rpc::rpc_send_message(
             &param,
             &wallet_key,
-            relay_store,
+            self.relay_store.as_ref(), // Optional: only Silver/Gold track local status
             contacts,
             &self.utxo_manager,
             peer_registry,

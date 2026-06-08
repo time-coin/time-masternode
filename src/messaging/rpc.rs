@@ -101,7 +101,7 @@ fn select_relay_peers(
 pub async fn rpc_send_message(
     params: &Value,
     wallet_key: &SigningKey,
-    relay_store: &Arc<RelayStore>,
+    relay_store: Option<&Arc<RelayStore>>,
     contacts: &ContactsBook,
     utxo_mgr: &Arc<UTXOStateManager>,
     peer_registry: &Arc<PeerConnectionRegistry>,
@@ -248,7 +248,9 @@ pub async fn rpc_send_message(
         MessageStatus::Failed
     };
 
-    let _ = relay_store.set_status(&msg_id, &status);
+    if let Some(rs) = relay_store {
+        let _ = rs.set_status(&msg_id, &status);
+    }
 
     let msg_id_hex = hex::encode(msg_id);
     Ok(json!({

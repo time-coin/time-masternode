@@ -343,6 +343,17 @@ impl RpcServer {
         }
     }
 
+    /// Wire the P2P peer registry for all nodes (needed for pubkey resolution and message routing).
+    /// Must be called before `run()`.
+    pub fn set_peer_registry(
+        &mut self,
+        peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+    ) {
+        if let Some(h) = Arc::get_mut(&mut self.handler) {
+            h.set_peer_registry(peer_registry);
+        }
+    }
+
     pub async fn run(&mut self) -> Result<(), std::io::Error> {
         let auth_mode = if !self.auth.is_enabled() {
             "disabled"
