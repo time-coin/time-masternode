@@ -115,6 +115,7 @@ Commands:
     reindextransactions    Rebuild transaction index
     reindex                Full reindex: rebuild UTXOs + tx index from block 0
     backupdata             Backup blockchain data and wallet files to a destination directory
+    restoredata            Restore from a backup (fails if timed is running — stop it first)
     rollbacktoblock0       [DANGER] Delete all blocks above genesis and reset chain
     rollbacktoheight       [DANGER] Roll back chain to a specific block height
     resyncfromwhitelist    [DANGER] Roll back and resync chain from trusted whitelisted peers (bypasses depth limit)
@@ -878,6 +879,17 @@ enum Commands {
         destination: String,
     },
 
+    /// Restore blockchain data from a backup directory.
+    /// Works offline — fails with an error if timed is running (stop it first).
+    #[command(next_help_heading = "Utility")]
+    Restoredata {
+        /// Source directory path (the backup to restore from)
+        source: String,
+        /// Override the data directory to restore into (default: auto-detect)
+        #[arg(long)]
+        datadir: Option<String>,
+    },
+
     /// Delete all blocks above height 0 and reset chain to genesis (DANGER: wipes all post-genesis chain data)
     #[command(next_help_heading = "Utility")]
     RollbackToBlock0,
@@ -988,6 +1000,27 @@ struct RpcResponse {
 struct RpcError {
     code: i32,
     message: String,
+}
+
+fn copy_dir_all(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(dst)?;
+    let mut count = 0;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if ft.is_dir() {
+            count += copy_dir_all(&src_path, &dst_path)?;
+        } else if ft.is_file() {
+            std::fs::copy(&src_path, &dst_path)?;
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 #[tokio::main]
@@ -1106,6 +1139,56 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     // ── End DumpPrivKey ───────────────────────────────────────────────────────
+
+    // ── Restoredata: offline restore — fails if daemon is reachable ──────────
+    if let Commands::Restoredata { source, datadir } = &args.command {
+        // Try the RPC first. If the daemon responds, it will return its own
+        // "cannot restore while running" error. If the connection is refused,
+        // the daemon is down and we proceed with the local restore.
+        let probe = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "restoredata", "params": []
+        });
+        let auth = if !rpc_user.is_empty() && !rpc_pass.is_empty() {
+            Some((rpc_user.as_str(), rpc_pass.as_str()))
+        } else {
+            None
+        };
+        if let Ok(resp) = client.post_json(&rpc_url, &probe, auth).await {
+            if let Ok(val) = resp.json::<serde_json::Value>() {
+                // Daemon is running — surface its error message and stop.
+                let msg = val
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Daemon is running — stop timed before restoring.");
+                return Err(msg.into());
+            }
+        }
+
+        // Daemon is down — resolve data directory.
+        let dst = if let Some(d) = datadir {
+            std::path::PathBuf::from(d)
+        } else if is_testnet {
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".timecoin")
+                .join("testnet")
+        } else {
+            dirs::home_dir().unwrap_or_default().join(".timecoin")
+        };
+
+        let src = std::path::Path::new(source);
+        if !src.exists() {
+            return Err(format!("Source path does not exist: {}", source).into());
+        }
+
+        println!("Restoring from {} to {} ...", source, dst.display());
+        let count = copy_dir_all(src, &dst)?;
+        println!("✓ Restore complete: {} files copied", count);
+        return Ok(());
+    }
+    // ── End Restoredata ───────────────────────────────────────────────────────
 
     // ── MasternodeReg: local signing then sendrawtransaction ─────────────────
     if let Commands::MasternodeReg {
@@ -1604,6 +1687,8 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             "markpaymentrequestviewed",
             json!([request_id, requester_address, payer_address]),
         ),
+        // Handled offline before the RPC match — never reached.
+        Commands::Restoredata { .. } => unreachable!(),
     };
 
     let auth = if !rpc_user.is_empty() && !rpc_pass.is_empty() {

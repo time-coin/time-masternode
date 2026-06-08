@@ -253,6 +253,7 @@ impl RpcHandler {
             "uptime" => self.uptime().await,
             "getinfo" => self.get_info().await,
             "backupdata" => self.backup_data(&params_array).await,
+            "restoredata" => self.restore_data().await,
             "getmempoolinfo" => self.get_mempool_info().await,
             "getrawmempool" => self.get_raw_mempool(&params_array).await,
             "getmempoolverbose" => self.get_mempool_verbose().await,
@@ -3610,6 +3611,17 @@ impl RpcHandler {
             }
         }
         Ok(count)
+    }
+
+    async fn restore_data(&self) -> Result<Value, RpcError> {
+        Err(RpcError {
+            code: -32,
+            message: format!(
+                "Cannot restore while daemon is running. \
+                 Stop timed first (time-cli stop), then run: \
+                 time-cli restoredata <source>"
+            ),
+        })
     }
 
     async fn stop(&self) -> Result<Value, RpcError> {
