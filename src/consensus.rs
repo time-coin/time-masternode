@@ -22,7 +22,7 @@ use crate::utxo_manager::UTXOStateManager;
 use dashmap::{DashMap, DashSet};
 use ed25519_dalek::{Signer, VerifyingKey};
 use parking_lot::RwLock;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -1680,6 +1680,9 @@ pub struct ConsensusEngine {
     pub payment_requests: Arc<DashMap<String, Vec<crate::network::message::PaymentRequest>>>,
     /// Live fee schedule — may be replaced by governance proposals.
     fee_schedule: Arc<parking_lot::RwLock<FeeSchedule>>,
+    /// Deterministic child address registry: address_string → derivation_index.
+    /// Populated at startup and updated on each getnewaddress call.
+    derived_address_map: DashMap<String, u32>,
 }
 
 impl ConsensusEngine {
@@ -1708,6 +1711,7 @@ impl ConsensusEngine {
             tx_finalized_sender: tokio::sync::broadcast::channel(1000).0,
             payment_requests: Arc::new(DashMap::new()),
             fee_schedule: Arc::new(parking_lot::RwLock::new(FeeSchedule::default())),
+            derived_address_map: DashMap::new(),
         }
     }
 
@@ -1752,6 +1756,7 @@ impl ConsensusEngine {
             tx_finalized_sender: tokio::sync::broadcast::channel(1000).0,
             payment_requests: Arc::new(DashMap::new()),
             fee_schedule: Arc::new(parking_lot::RwLock::new(FeeSchedule::default())),
+            derived_address_map: DashMap::new(),
         }
     }
 
@@ -2182,6 +2187,72 @@ impl ConsensusEngine {
             .get()
             .cloned()
             .or_else(|| self.get_signing_key())
+    }
+
+    /// Derive a child signing key deterministically from the master wallet key.
+    /// Uses SHA-512 domain separation: H("TIMECOIN-KEY-DERIVATION" || master || index_le)[0..32].
+    pub fn derive_child_key_at(&self, index: u32) -> Option<ed25519_dalek::SigningKey> {
+        let master = self.wallet_signing_key.get()?;
+        let master_bytes = master.to_bytes();
+        let mut hasher = Sha512::new();
+        hasher.update(b"TIMECOIN-KEY-DERIVATION");
+        hasher.update(master_bytes);
+        hasher.update(index.to_le_bytes());
+        let output = hasher.finalize();
+        let mut child_secret = [0u8; 32];
+        child_secret.copy_from_slice(&output[..32]);
+        Some(ed25519_dalek::SigningKey::from_bytes(&child_secret))
+    }
+
+    /// Register a derived address so it can be found for spending.
+    pub fn register_derived_address(&self, address: String, index: u32) {
+        self.derived_address_map.insert(address, index);
+    }
+
+    /// Pre-populate the derived address map from disk state on startup.
+    /// Call once after set_wallet_signing_key with the persisted next_index.
+    pub fn preload_derived_addresses(&self, count: u32, network: crate::network_type::NetworkType) {
+        use crate::address::Address;
+        for i in 0..count {
+            if let Some(key) = self.derive_child_key_at(i) {
+                let addr =
+                    Address::from_public_key(key.verifying_key().as_bytes(), network).to_string();
+                self.derived_address_map.insert(addr, i);
+            }
+        }
+    }
+
+    /// Return the signing key that controls the given address.
+    /// Checks derived addresses first (O(1)), then falls back to the master wallet key.
+    pub fn get_signing_key_for_address(&self, address: &str) -> Option<ed25519_dalek::SigningKey> {
+        if let Some(idx) = self.derived_address_map.get(address) {
+            return self.derive_child_key_at(*idx);
+        }
+        self.wallet_signing_key
+            .get()
+            .cloned()
+            .or_else(|| self.get_signing_key())
+    }
+
+    /// Sign all transaction inputs with the key that controls `from_address`.
+    pub fn sign_transaction_for_address(
+        &self,
+        tx: &mut Transaction,
+        from_address: &str,
+    ) -> Result<(), String> {
+        let signing_key = self
+            .get_signing_key_for_address(from_address)
+            .ok_or_else(|| format!("No signing key for address {}", from_address))?;
+        let pubkey_bytes = signing_key.verifying_key().to_bytes();
+        for idx in 0..tx.inputs.len() {
+            let message = self.create_signature_message(tx, idx)?;
+            let signature = signing_key.sign(&message);
+            let mut script_sig = Vec::with_capacity(96);
+            script_sig.extend_from_slice(&pubkey_bytes);
+            script_sig.extend_from_slice(&signature.to_bytes());
+            tx.inputs[idx].script_sig = script_sig;
+        }
+        Ok(())
     }
 
     /// Encrypt a memo for a self-send (consolidation, merge).
@@ -3313,6 +3384,7 @@ impl ConsensusEngine {
             tx_finalized_sender: self.tx_finalized_sender.clone(),
             payment_requests: self.payment_requests.clone(),
             fee_schedule: self.fee_schedule.clone(),
+            derived_address_map: DashMap::new(),
         });
         let tx_status_map = self.timevote.tx_status.clone();
         let finalized_signal = self.tx_finalized_sender.clone();

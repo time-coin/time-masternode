@@ -40,7 +40,7 @@ Commands:
     getbalance             Get wallet balance [address]
     getwalletinfo          Get wallet information
     getlocalwallet         Get local wallet address (plain string)
-    getnewaddress          Get this node's local wallet address
+    getnewaddress          Generate a new deterministic wallet address (each call returns a fresh address)
     getwalletaddress       Get local wallet address with reward forwarding info
     getaddressinfo         Get info about an address (ismine, pubkey, etc.)
     getaddresspubkey       Get the public key for an address

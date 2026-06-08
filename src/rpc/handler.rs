@@ -36,7 +36,7 @@
 //! | `getbalance`            | |
 //! | `getbalances`           | |
 //! | `listunspent`           | |
-//! | `getnewaddress`         | Returns local wallet signing-key address |
+//! | `getnewaddress`         | Generates a new deterministic child address (SHA-512 from master key + counter) |
 //! | `getwalletaddress`      | Returns local wallet address + reward forwarding info |
 //! | `getwalletinfo`         | |
 //! | `validateaddress`       | |
@@ -133,6 +133,8 @@ pub struct RpcHandler {
     tx_event_sender:
         Option<tokio::sync::broadcast::Sender<crate::rpc::websocket::TransactionEvent>>,
     reconnection_ai: Option<Arc<crate::ai::adaptive_reconnection::AdaptiveReconnectionAI>>,
+    /// Data directory path used to persist the deterministic address counter.
+    data_dir: String,
 }
 
 impl RpcHandler {
@@ -143,7 +145,13 @@ impl RpcHandler {
         registry: Arc<MasternodeRegistry>,
         blockchain: Arc<crate::blockchain::Blockchain>,
         banlist: Arc<tokio::sync::RwLock<crate::network::banlist::IPBanlist>>,
+        data_dir: String,
     ) -> Self {
+        // Restore derived address → key mappings so spending from getnewaddress
+        // addresses survives daemon restarts.
+        let next_index = Self::read_address_index(&data_dir);
+        consensus.preload_derived_addresses(next_index, network);
+
         Self {
             consensus,
             utxo_manager,
@@ -154,7 +162,24 @@ impl RpcHandler {
             network,
             tx_event_sender: None,
             reconnection_ai: None,
+            data_dir,
         }
+    }
+
+    /// Read the next deterministic address index from disk (4-byte LE u32).
+    fn read_address_index(data_dir: &str) -> u32 {
+        let path = std::path::Path::new(data_dir).join("address_index");
+        std::fs::read(&path)
+            .ok()
+            .and_then(|b| b.try_into().ok())
+            .map(u32::from_le_bytes)
+            .unwrap_or(0)
+    }
+
+    /// Persist the next deterministic address index to disk.
+    fn write_address_index(data_dir: &str, index: u32) -> std::io::Result<()> {
+        let path = std::path::Path::new(data_dir).join("address_index");
+        std::fs::write(path, index.to_le_bytes())
     }
 
     /// The address whose private key lives on this server — the only address we can
@@ -4086,7 +4111,7 @@ impl RpcHandler {
                 };
 
                 self.consensus
-                    .sign_transaction(&mut cons_tx)
+                    .sign_transaction_for_address(&mut cons_tx, from_address)
                     .map_err(|e| RpcError {
                         code: -4,
                         message: format!("Failed to sign consolidation transaction: {}", e),
@@ -4227,9 +4252,9 @@ impl RpcHandler {
                 encrypted_memo,
             };
 
-            // Sign all inputs with wallet key
+            // Sign all inputs with the key that controls from_address
             self.consensus
-                .sign_transaction(&mut tx)
+                .sign_transaction_for_address(&mut tx, from_address)
                 .map_err(|e| RpcError {
                     code: -4,
                     message: format!("Failed to sign transaction: {}", e),
@@ -4485,9 +4510,9 @@ impl RpcHandler {
             encrypted_memo: merge_memo,
         };
 
-        // Sign all inputs with wallet key
+        // Sign all inputs with the key that controls output_address
         self.consensus
-            .sign_transaction(&mut tx)
+            .sign_transaction_for_address(&mut tx, output_address)
             .map_err(|e| RpcError {
                 code: -4,
                 message: format!("Failed to sign transaction: {}", e),
@@ -5300,18 +5325,27 @@ impl RpcHandler {
     }
 
     async fn get_new_address(&self, _params: &[Value]) -> Result<Value, RpcError> {
-        self.consensus
-            .get_wallet_signing_key()
-            .map(|k| {
-                json!(
-                    Address::from_public_key(k.verifying_key().as_bytes(), self.network)
-                        .to_string()
-                )
-            })
+        let index = Self::read_address_index(&self.data_dir);
+
+        let child_key = self
+            .consensus
+            .derive_child_key_at(index)
             .ok_or_else(|| RpcError {
                 code: -4,
                 message: "Node wallet key not initialized".to_string(),
-            })
+            })?;
+
+        let address = Address::from_public_key(child_key.verifying_key().as_bytes(), self.network);
+
+        Self::write_address_index(&self.data_dir, index + 1).map_err(|e| RpcError {
+            code: -5,
+            message: format!("Failed to persist address index: {}", e),
+        })?;
+
+        self.consensus
+            .register_derived_address(address.to_string(), index);
+
+        Ok(json!(address.to_string()))
     }
 
     async fn get_wallet_address(&self) -> Result<Value, RpcError> {
@@ -8542,6 +8576,7 @@ mod tests {
             Arc::new(tokio::sync::RwLock::new(
                 crate::network::banlist::IPBanlist::new(),
             )),
+            String::new(),
         );
 
         utxo_manager.clear_all().await.unwrap();

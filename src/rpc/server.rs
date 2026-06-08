@@ -279,6 +279,7 @@ impl RpcServer {
         rpcuser: String,
         rpcpassword: String,
         rpcauth: Vec<String>,
+        data_dir: String,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(addr).await?;
         let mut handler = RpcHandler::new(
@@ -288,6 +289,7 @@ impl RpcServer {
             registry,
             blockchain,
             banlist,
+            data_dir,
         );
         if let Some(sender) = tx_event_sender {
             handler.set_tx_event_sender(sender);

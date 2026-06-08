@@ -5772,6 +5772,7 @@ async fn main() {
                     rpc_user,
                     rpc_pass,
                     rpc_auth_entries,
+                    rpc_data_dir.clone(),
                 )
                 .await
                 {
