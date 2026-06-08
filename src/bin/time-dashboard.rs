@@ -3003,10 +3003,18 @@ fn render_secure_msg_detail(f: &mut Frame, area: Rect, msg: &SecureMsg) {
             ),
         ]),
         Line::from(""),
-        Line::from(Span::styled(
-            "Esc / q: Back to inbox",
-            Style::default().fg(Color::DarkGray),
-        )),
+        Line::from(vec![
+            Span::styled(
+                "[r] Reply   ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "[Esc / q] Back to inbox",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
     ];
 
     let header = Paragraph::new(header_lines)
@@ -3407,6 +3415,31 @@ async fn run_app<B: ratatui::backend::Backend>(
                                     .contains(crossterm::event::KeyModifiers::CONTROL) =>
                             {
                                 app.should_quit = true;
+                            }
+                            // [r] in message detail → reply (pre-fills address + subject)
+                            KeyCode::Char('r') | KeyCode::Char('R')
+                                if app.current_tab == 6 && app.secure_msg_detail.is_some() =>
+                            {
+                                if let Some(idx) = app.secure_msg_detail {
+                                    if let Some(msg) = app.data.secure_messages.get(idx) {
+                                        let reply_subject = if msg.subject.starts_with("Re: ") {
+                                            msg.subject.clone()
+                                        } else {
+                                            format!("Re: {}", msg.subject)
+                                        };
+                                        app.compose = Some(ComposeState {
+                                            stage: ComposeStage::EnteringBody,
+                                            ip_input: String::new(),
+                                            message_input: String::new(),
+                                            address_input: msg.from.clone(),
+                                            subject_input: reply_subject,
+                                            body_input: String::new(),
+                                            is_secure: true,
+                                            status: None,
+                                        });
+                                        app.secure_msg_detail = None;
+                                    }
+                                }
                             }
                             KeyCode::Char('r') => {
                                 app.update_data().await;
