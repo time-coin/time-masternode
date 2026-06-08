@@ -53,6 +53,8 @@ pub struct NetworkClient {
     /// genesis the pyramid expansion in Phase 1 is gated until initial
     /// blockchain sync completes from this trusted set.
     discovered_peer_ips: Vec<String>,
+    relay_store: Option<Arc<crate::messaging::relay::RelayStore>>,
+    relay_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
 }
 
 impl NetworkClient {
@@ -103,6 +105,8 @@ impl NetworkClient {
             network_type,
             attack_detector: None,
             discovered_peer_ips: Vec::new(),
+            relay_store: None,
+            relay_signing_key: None,
         }
     }
 
@@ -120,6 +124,16 @@ impl NetworkClient {
     /// Set the attack detector so outbound disconnects are recorded for AV3 detection.
     pub fn set_attack_detector(&mut self, ad: Arc<crate::ai::attack_detector::AttackDetector>) {
         self.attack_detector = Some(ad);
+    }
+
+    /// Wire the secure messaging relay store so outbound connections can handle MSG_* messages.
+    pub fn set_relay_store(
+        &mut self,
+        relay_store: Arc<crate::messaging::relay::RelayStore>,
+        signing_key: Arc<ed25519_dalek::SigningKey>,
+    ) {
+        self.relay_store = Some(relay_store);
+        self.relay_signing_key = Some(signing_key);
     }
 
     /// Seed the client with trusted discovery peers fetched at startup.
@@ -152,6 +166,8 @@ impl NetworkClient {
             tls_config: self.tls_config.clone(),
             network_type: self.network_type,
             attack_detector: self.attack_detector.clone(),
+            relay_store: self.relay_store.clone(),
+            relay_signing_key: self.relay_signing_key.clone(),
         };
 
         tokio::spawn(async move {
@@ -837,6 +853,8 @@ struct ConnectionResources {
     tls_config: Option<Arc<TlsConfig>>,
     network_type: NetworkType,
     attack_detector: Option<Arc<crate::ai::attack_detector::AttackDetector>>,
+    relay_store: Option<Arc<crate::messaging::relay::RelayStore>>,
+    relay_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
 }
 
 impl ConnectionResources {
@@ -887,6 +905,8 @@ impl ConnectionResources {
                 tls_config: res.tls_config.clone(),
                 network_type: res.network_type,
                 ai_system: None,
+                relay_store: res.relay_store.clone(),
+                relay_signing_key: res.relay_signing_key.clone(),
             };
 
             let connect_duration: Option<std::time::Duration> =

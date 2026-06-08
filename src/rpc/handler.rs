@@ -135,6 +135,12 @@ pub struct RpcHandler {
     reconnection_ai: Option<Arc<crate::ai::adaptive_reconnection::AdaptiveReconnectionAI>>,
     /// Data directory path used to persist the deterministic address counter.
     data_dir: String,
+    /// Relay store for message encryption/decryption and status tracking.
+    relay_store: Option<Arc<crate::messaging::relay::RelayStore>>,
+    /// Contacts book for recipient pubkey resolution.
+    contacts_book: Option<Arc<crate::messaging::contacts::ContactsBook>>,
+    /// Peer connection registry for P2P message submission.
+    peer_registry: Option<Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>>,
 }
 
 impl RpcHandler {
@@ -163,7 +169,22 @@ impl RpcHandler {
             tx_event_sender: None,
             reconnection_ai: None,
             data_dir,
+            relay_store: None,
+            contacts_book: None,
+            peer_registry: None,
         }
+    }
+
+    /// Set the relay store and contacts book for secure messaging.
+    pub fn set_messaging(
+        &mut self,
+        relay_store: Arc<crate::messaging::relay::RelayStore>,
+        contacts_book: Arc<crate::messaging::contacts::ContactsBook>,
+        peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+    ) {
+        self.relay_store = Some(relay_store);
+        self.contacts_book = Some(contacts_book);
+        self.peer_registry = Some(peer_registry);
     }
 
     /// Read the next deterministic address index from disk (4-byte LE u32).
@@ -327,6 +348,14 @@ impl RpcHandler {
             "submitcollateralproof" => self.submit_collateral_proof(&params_array).await,
             "getoperatormessages" => self.get_operator_messages().await,
             "sendoperatormessage" => self.send_operator_message(&params_array).await,
+            // --- Secure Messaging (TIME-MSG v1) ---
+            "sendmessage" => self.send_message(&params_array).await,
+            "getmessages" => self.get_messages(&params_array).await,
+            "getmessagestatus" => self.get_message_status(&params_array).await,
+            "getpubkey" => self.get_pubkey().await,
+            "addcontact" => self.add_contact(&params_array).await,
+            "listcontacts" => self.list_contacts().await,
+            "removecontact" => self.remove_contact(&params_array).await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -8527,6 +8556,224 @@ async fn fetch_official_peer_ips(
     }
 
     Ok(ips)
+}
+
+// ── Secure Messaging RPC methods ──────────────────────────────────────────────
+
+impl RpcHandler {
+    fn messaging_unavailable() -> RpcError {
+        RpcError {
+            code: -32000,
+            message: "Messaging not available on this node (requires relay store)".to_string(),
+        }
+    }
+
+    async fn send_message(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let param = params.first().cloned().unwrap_or(serde_json::json!({}));
+        let wallet_key = self
+            .consensus
+            .get_wallet_signing_key()
+            .ok_or_else(|| RpcError {
+                code: -32000,
+                message: "Wallet key not available".to_string(),
+            })?;
+        let relay_store = self
+            .relay_store
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+        let contacts = self
+            .contacts_book
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+        let peer_registry = self
+            .peer_registry
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+
+        crate::messaging::rpc::rpc_send_message(
+            &param,
+            &wallet_key,
+            relay_store,
+            contacts,
+            &self.utxo_manager,
+            peer_registry,
+            &self.registry,
+            self.network,
+        )
+        .await
+        .map_err(|e| RpcError {
+            code: -32000,
+            message: e,
+        })
+    }
+
+    async fn get_messages(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let param = params.first().cloned().unwrap_or(serde_json::json!({}));
+        let wallet_key = self
+            .consensus
+            .get_wallet_signing_key()
+            .ok_or_else(|| RpcError {
+                code: -32000,
+                message: "Wallet key not available".to_string(),
+            })?;
+        let relay_store = self
+            .relay_store
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+        let contacts = self
+            .contacts_book
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+        let peer_registry = self
+            .peer_registry
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+
+        crate::messaging::rpc::rpc_get_messages(
+            &param,
+            &wallet_key,
+            relay_store,
+            contacts,
+            peer_registry,
+            self.network,
+        )
+        .await
+        .map_err(|e| RpcError {
+            code: -32000,
+            message: e,
+        })
+    }
+
+    async fn get_message_status(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let param = params.first().cloned().unwrap_or(serde_json::json!({}));
+        let relay_store = self
+            .relay_store
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+        let peer_registry = self
+            .peer_registry
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+
+        crate::messaging::rpc::rpc_get_message_status(&param, relay_store, peer_registry)
+            .await
+            .map_err(|e| RpcError {
+                code: -32000,
+                message: e,
+            })
+    }
+
+    async fn get_pubkey(&self) -> Result<Value, RpcError> {
+        let wallet_key = self
+            .consensus
+            .get_wallet_signing_key()
+            .ok_or_else(|| RpcError {
+                code: -32000,
+                message: "Wallet key not available".to_string(),
+            })?;
+        let address = crate::address::Address::from_public_key(
+            wallet_key.verifying_key().as_bytes(),
+            self.network,
+        )
+        .to_string();
+        let pubkey_hex = hex::encode(wallet_key.verifying_key().to_bytes());
+        Ok(serde_json::json!({ "address": address, "pubkey": pubkey_hex }))
+    }
+
+    async fn add_contact(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let param = params.first().cloned().unwrap_or(serde_json::json!({}));
+        let contacts = self
+            .contacts_book
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+
+        let address = param
+            .get("address")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing 'address' parameter".to_string(),
+            })?;
+        let pubkey_hex = param
+            .get("pubkey")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing 'pubkey' parameter".to_string(),
+            })?;
+        let pubkey_bytes = hex::decode(pubkey_hex).map_err(|_| RpcError {
+            code: -32602,
+            message: "Invalid pubkey hex".to_string(),
+        })?;
+        if pubkey_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -32602,
+                message: "pubkey must be 32 bytes (64 hex chars)".to_string(),
+            });
+        }
+        let mut pubkey = [0u8; 32];
+        pubkey.copy_from_slice(&pubkey_bytes);
+        let label = param
+            .get("label")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        contacts
+            .upsert(
+                address,
+                crate::messaging::contacts::Contact {
+                    pubkey,
+                    label,
+                    added_at: chrono::Utc::now().timestamp(),
+                },
+            )
+            .map_err(|e| RpcError {
+                code: -32000,
+                message: e.to_string(),
+            })?;
+
+        Ok(serde_json::json!({ "added": true }))
+    }
+
+    async fn list_contacts(&self) -> Result<Value, RpcError> {
+        let contacts = self
+            .contacts_book
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+        let list: Vec<Value> = contacts
+            .list()
+            .into_iter()
+            .map(|(addr, c)| {
+                serde_json::json!({
+                    "address": addr,
+                    "pubkey": hex::encode(c.pubkey),
+                    "label": c.label,
+                    "added_at": c.added_at,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!(list))
+    }
+
+    async fn remove_contact(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let param = params.first().cloned().unwrap_or(serde_json::json!({}));
+        let contacts = self
+            .contacts_book
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+        let address = param
+            .get("address")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing 'address' parameter".to_string(),
+            })?;
+        contacts.remove(address).map_err(|e| RpcError {
+            code: -32000,
+            message: e.to_string(),
+        })?;
+        Ok(serde_json::json!({ "removed": true }))
+    }
 }
 
 #[cfg(test)]

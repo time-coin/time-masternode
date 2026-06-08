@@ -961,6 +961,68 @@ enum Commands {
         /// Transaction ID to drop (64 hex chars)
         txid: String,
     },
+
+    // ── Secure Messaging ──────────────────────────────────────────────────────
+    /// Send an end-to-end encrypted message to a TIME address
+    #[command(next_help_heading = "Messaging")]
+    SendMessage {
+        /// Recipient TIME address
+        to: String,
+        /// Message body (plain text)
+        body: String,
+        /// Optional subject line
+        #[arg(long)]
+        subject: Option<String>,
+        /// Time-to-live in seconds (default: 30 days)
+        #[arg(long)]
+        ttl: Option<u64>,
+    },
+
+    /// Fetch encrypted messages sent to your wallet address
+    #[command(next_help_heading = "Messaging")]
+    GetMessages {
+        /// Fetch messages received since this Unix timestamp (default: last 30 days)
+        #[arg(long)]
+        since: Option<i64>,
+        /// Maximum number of messages to return
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+
+    /// Get delivery/read-receipt status for a sent message
+    #[command(next_help_heading = "Messaging")]
+    GetMessageStatus {
+        /// Message ID (64 hex characters)
+        msg_id: String,
+    },
+
+    /// Look up the messaging public key for a TIME address
+    #[command(next_help_heading = "Messaging")]
+    GetPubkey {
+        /// TIME address to look up
+        address: String,
+    },
+
+    /// Add or update a contact in the local contacts book
+    #[command(next_help_heading = "Messaging")]
+    AddContact {
+        /// TIME address of the contact
+        address: String,
+        /// Human-readable label
+        #[arg(long)]
+        label: Option<String>,
+    },
+
+    /// List all saved contacts
+    #[command(next_help_heading = "Messaging")]
+    ListContacts,
+
+    /// Remove a contact from the local contacts book
+    #[command(next_help_heading = "Messaging")]
+    RemoveContact {
+        /// TIME address of the contact to remove
+        address: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1736,6 +1798,29 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             "markpaymentrequestviewed",
             json!([request_id, requester_address, payer_address]),
         ),
+        // Secure Messaging
+        Commands::SendMessage {
+            to,
+            body,
+            subject,
+            ttl,
+        } => (
+            "sendmessage",
+            json!([{ "to": to, "body": body, "subject": subject, "ttl": ttl }]),
+        ),
+        Commands::GetMessages { since, limit } => {
+            ("getmessages", json!([{ "since": since, "limit": limit }]))
+        }
+        Commands::GetMessageStatus { msg_id } => {
+            ("getmessagestatus", json!([{ "msg_id": msg_id }]))
+        }
+        Commands::GetPubkey { address } => ("getpubkey", json!([address])),
+        Commands::AddContact { address, label } => (
+            "addcontact",
+            json!([{ "address": address, "label": label }]),
+        ),
+        Commands::ListContacts => ("listcontacts", json!([])),
+        Commands::RemoveContact { address } => ("removecontact", json!([address])),
         // Handled offline before the RPC match — never reached.
         Commands::Backupdata { .. } => unreachable!(),
         Commands::Restoredata { .. } => unreachable!(),

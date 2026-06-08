@@ -275,6 +275,10 @@ pub struct MessageLoopConfig {
 
     /// Optional: Per-connection rate limiter — mirrors the inbound check_rate_limit! macro
     pub rate_limiter: Option<Arc<RwLock<crate::network::rate_limiter::RateLimiter>>>,
+    /// Optional: Relay store for Silver/Gold message relay nodes
+    pub relay_store: Option<Arc<crate::messaging::relay::RelayStore>>,
+    /// Optional: Signing key for relay operations (storage acks, delivery events)
+    pub relay_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
 }
 
 impl MessageLoopConfig {
@@ -290,7 +294,20 @@ impl MessageLoopConfig {
             banlist: None,
             ai_system: None,
             rate_limiter: None,
+            relay_store: None,
+            relay_signing_key: None,
         }
+    }
+
+    /// Add relay store and signing key for Silver/Gold messaging relay (builder pattern)
+    pub fn with_relay_store(
+        mut self,
+        relay_store: Arc<crate::messaging::relay::RelayStore>,
+        signing_key: Arc<ed25519_dalek::SigningKey>,
+    ) -> Self {
+        self.relay_store = Some(relay_store);
+        self.relay_signing_key = Some(signing_key);
+        self
     }
 
     /// Add masternode registry (builder pattern)
@@ -933,6 +950,13 @@ impl PeerConnection {
             // Add AI system if available
             if let Some(ref ai_system) = config.ai_system {
                 ctx = ctx.with_ai_system(Arc::clone(ai_system));
+            }
+
+            // Add relay store if available (Silver/Gold nodes)
+            if let (Some(ref relay_store), Some(ref relay_key)) =
+                (&config.relay_store, &config.relay_signing_key)
+            {
+                ctx = ctx.with_relay_store(Arc::clone(relay_store), Arc::clone(relay_key));
             }
 
             ctx

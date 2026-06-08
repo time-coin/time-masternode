@@ -17,6 +17,7 @@ pub mod masternode_authority;
 pub mod masternode_certificate;
 pub mod masternode_registry;
 pub mod memo;
+pub mod messaging;
 pub mod network;
 pub mod network_type;
 pub mod peer_manager;
@@ -1252,6 +1253,56 @@ async fn main() {
         Err(e) => tracing::warn!("🏛️  Governance init failed (non-fatal): {e}"),
     }
 
+    // ── Messaging relay store (Silver/Gold nodes only) ────────────────────────
+    let is_relay_eligible = masternode_info
+        .as_ref()
+        .map(|mn| {
+            matches!(
+                mn.tier,
+                types::MasternodeTier::Silver | types::MasternodeTier::Gold
+            )
+        })
+        .unwrap_or(false);
+
+    let relay_store: Option<Arc<messaging::relay::RelayStore>> = if is_relay_eligible {
+        match messaging::relay::RelayStore::open(&db_dir) {
+            Ok(store) => {
+                tracing::info!("📨 Relay store initialized (Silver/Gold node)");
+                Some(Arc::new(store))
+            }
+            Err(e) => {
+                tracing::warn!("📨 Relay store failed to open: {} — messaging disabled", e);
+                None
+            }
+        }
+    } else {
+        tracing::debug!("📨 Not relay-eligible — relay store skipped");
+        None
+    };
+
+    // Contacts book (all nodes — needed to resolve recipient pubkeys for sendmessage)
+    let contacts_book: Option<Arc<messaging::contacts::ContactsBook>> = {
+        let contacts_path = format!("{}/contacts", db_dir);
+        match sled::Config::new()
+            .path(&contacts_path)
+            .cache_capacity(4 * 1024 * 1024)
+            .mode(sled::Mode::LowSpace)
+            .open()
+        {
+            Ok(db) => match messaging::contacts::ContactsBook::open(&db) {
+                Ok(book) => Some(Arc::new(book)),
+                Err(e) => {
+                    tracing::warn!("📨 Contacts book failed to open: {}", e);
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!("📨 Contacts DB failed to open: {}", e);
+                None
+            }
+        }
+    };
+
     // Initialize transaction index for O(1) lookups
     tracing::info!("🔧 Initializing transaction index...");
     let tx_index_path = format!("{}/txindex", db_dir);
@@ -1994,6 +2045,46 @@ async fn main() {
             shutdown_manager.register_task(integrity_handle);
         }
         // ── END RUNTIME CHAIN INTEGRITY TASK ─────────────────────────────────
+
+        // ── Relay TTL sweep task ───────────────────────────────────────────────
+        if let Some(ref relay) = relay_store {
+            let relay_for_sweep = relay.clone();
+            let sweep_key = masternode_signing_key
+                .clone()
+                .unwrap_or_else(|| wallet.signing_key().clone());
+            let sweep_shutdown = shutdown_token.clone();
+            let sweep_registry = peer_connection_registry.clone();
+
+            let sweep_handle = tokio::spawn(async move {
+                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(600));
+                loop {
+                    tokio::select! {
+                        _ = sweep_shutdown.cancelled() => {
+                            tracing::debug!("📨 Relay sweep task shutting down");
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            let notices = relay_for_sweep.sweep_expired(&sweep_key);
+                            if !notices.is_empty() {
+                                tracing::info!("📨 Swept {} expired message(s)", notices.len());
+                                for notice in notices {
+                                    if let Ok(bytes) = serde_cbor::to_vec(&notice) {
+                                        sweep_registry.broadcast(
+                                            crate::network::message::NetworkMessage::MsgExpiryNotice {
+                                                notice: bytes,
+                                            }
+                                        ).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            shutdown_manager.register_task(sweep_handle);
+        }
+        // ── END RELAY TTL SWEEP TASK ──────────────────────────────────────────
 
         // Start masternode announcement task
         let mn_for_announcement = mn.clone();
@@ -5621,6 +5712,15 @@ async fn main() {
             // Wire up AI system for attack detection enforcement
             server.set_ai_system(ai_system.clone());
 
+            // Wire secure messaging relay store for P2P MSG_* message handling
+            if let Some(ref rs) = relay_store {
+                let relay_key = masternode_signing_key
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| wallet.signing_key().clone());
+                server.set_relay_store(rs.clone(), Arc::new(relay_key));
+            }
+
             // Enable separate attack log — one line per AI-detected attack event
             {
                 let attack_log = Arc::new(crate::network::attack_log::AttackLog::new(
@@ -5761,6 +5861,9 @@ async fn main() {
             let ws_tls_cert = config.rpc.wstlscert.clone();
             let ws_tls_key = config.rpc.wstlskey.clone();
             let ws_data_dir = config.storage.data_dir.clone();
+            let rpc_relay_store = relay_store.clone();
+            let rpc_contacts_book = contacts_book.clone();
+            let rpc_peer_registry = peer_connection_registry.clone();
 
             let rpc_handle = tokio::spawn(async move {
                 match RpcServer::new(
@@ -5781,6 +5884,11 @@ async fn main() {
                 .await
                 {
                     Ok(mut server) => {
+                        // Wire secure messaging if relay store is available
+                        if let (Some(rs), Some(cb)) = (rpc_relay_store, rpc_contacts_book) {
+                            server.set_messaging(rs, cb, rpc_peer_registry);
+                        }
+
                         // Set up TLS if configured
                         if rpc_tls_enabled {
                             use crate::network::tls::TlsConfig;
@@ -5970,6 +6078,13 @@ async fn main() {
             network_client.set_attack_detector(ai_system.attack_detector.clone());
             if let Some(ref tls) = tls_config {
                 network_client.set_tls_config(tls.clone());
+            }
+            if let Some(ref rs) = relay_store {
+                let relay_key = masternode_signing_key
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| wallet.signing_key().clone());
+                network_client.set_relay_store(rs.clone(), Arc::new(relay_key));
             }
             network_client.set_discovered_peer_ips(discovered_peer_ips.clone());
             network_client.start().await;

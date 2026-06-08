@@ -387,6 +387,63 @@ pub enum NetworkMessage {
         /// Unix timestamp (seconds since epoch)
         timestamp: u64,
     },
+    // ── Secure Messaging (TIME-MSG v1) ────────────────────────────────────────
+    /// Sender submits an encrypted envelope to a relay node for storage.
+    MsgSubmit {
+        envelope: Vec<u8>,
+    },
+
+    /// Relay confirms it stored the envelope.
+    MsgRelayAck {
+        ack: Vec<u8>,
+    },
+
+    /// Wallet queries a relay node for its pending messages.
+    MsgFetchPending {
+        recipient_addr_hash: [u8; 32],
+        since: i64,
+    },
+
+    /// Relay delivers one or more envelopes to the recipient wallet.
+    MsgEnvelopes {
+        recipient_addr_hash: [u8; 32],
+        envelopes: Vec<Vec<u8>>,
+    },
+
+    /// Recipient submits a signed ReadAck to the relay.
+    MsgReadAck {
+        ack: Vec<u8>,
+        recipient_pubkey: [u8; 32],
+    },
+
+    /// Sender queries for a read receipt.
+    MsgAckQuery {
+        msg_id: [u8; 32],
+    },
+
+    /// Relay returns a ReadAck (or delivery event) for a queried msg_id.
+    MsgAckResponse {
+        msg_id: [u8; 32],
+        ack: Option<Vec<u8>>,
+        delivery: Option<Vec<u8>>,
+    },
+
+    /// Relay notifies sender that a message expired before delivery.
+    MsgExpiryNotice {
+        notice: Vec<u8>,
+    },
+
+    /// Query a node for the Ed25519 pubkey of an address (privacy-preserving).
+    MsgPubkeyQuery {
+        address_hash: [u8; 32],
+    },
+
+    /// Response to pubkey query.
+    MsgPubkeyResponse {
+        address_hash: [u8; 32],
+        pubkey: Option<[u8; 32]>,
+    },
+
     /// Placeholder for messages from newer protocol versions that we can't parse
     UnknownMessage,
 }
@@ -576,6 +633,16 @@ impl NetworkMessage {
             NetworkMessage::UTXOSetChunk { .. } => "UTXOSetChunk",
             NetworkMessage::UtxoReconciliationChunk { .. } => "UtxoReconciliationChunk",
             NetworkMessage::OperatorMessage { .. } => "OperatorMessage",
+            NetworkMessage::MsgSubmit { .. } => "MsgSubmit",
+            NetworkMessage::MsgRelayAck { .. } => "MsgRelayAck",
+            NetworkMessage::MsgFetchPending { .. } => "MsgFetchPending",
+            NetworkMessage::MsgEnvelopes { .. } => "MsgEnvelopes",
+            NetworkMessage::MsgReadAck { .. } => "MsgReadAck",
+            NetworkMessage::MsgAckQuery { .. } => "MsgAckQuery",
+            NetworkMessage::MsgAckResponse { .. } => "MsgAckResponse",
+            NetworkMessage::MsgExpiryNotice { .. } => "MsgExpiryNotice",
+            NetworkMessage::MsgPubkeyQuery { .. } => "MsgPubkeyQuery",
+            NetworkMessage::MsgPubkeyResponse { .. } => "MsgPubkeyResponse",
         }
     }
 

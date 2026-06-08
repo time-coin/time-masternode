@@ -330,6 +330,10 @@ pub struct MessageContext {
     pub drift_tracker: Option<Arc<tokio::sync::Mutex<crate::time_sync::PeerDriftTracker>>>,
     // Shared operator message inbox (timestamp, from, message). Capped at 50 entries.
     pub operator_messages: OperatorMessages,
+    // Relay store for Silver/Gold nodes — stores/retrieves encrypted message envelopes.
+    pub relay_store: Option<Arc<crate::messaging::relay::RelayStore>>,
+    // Signing key used to sign relay delivery events and storage acks.
+    pub relay_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
 }
 
 impl MessageContext {
@@ -359,6 +363,8 @@ impl MessageContext {
             tx_event_sender: None,
             drift_tracker: None,
             operator_messages: None,
+            relay_store: None,
+            relay_signing_key: None,
         }
     }
 
@@ -392,6 +398,8 @@ impl MessageContext {
             tx_event_sender: None,
             drift_tracker: None,
             operator_messages: None,
+            relay_store: None,
+            relay_signing_key: None,
         }
     }
 
@@ -439,7 +447,20 @@ impl MessageContext {
             tx_event_sender,
             drift_tracker: None,
             operator_messages: Some(operator_messages),
+            relay_store: None,
+            relay_signing_key: None,
         }
+    }
+
+    /// Set the relay store and signing key (Silver/Gold nodes only).
+    pub fn with_relay_store(
+        mut self,
+        relay_store: Arc<crate::messaging::relay::RelayStore>,
+        signing_key: Arc<ed25519_dalek::SigningKey>,
+    ) -> Self {
+        self.relay_store = Some(relay_store);
+        self.relay_signing_key = Some(signing_key);
+        self
     }
 
     /// Set the node's masternode address for voting identity
@@ -1644,6 +1665,143 @@ impl MessageHandler {
                     context,
                 )
                 .await
+            }
+
+            // === Secure Messaging (TIME-MSG v1) ===
+            NetworkMessage::MsgSubmit { envelope } => {
+                let tier = if let Some(ref addr) = context.node_masternode_address {
+                    context
+                        .masternode_registry
+                        .get(addr)
+                        .await
+                        .map(|info| info.masternode.tier)
+                        .unwrap_or(crate::types::MasternodeTier::Free)
+                } else {
+                    crate::types::MasternodeTier::Free
+                };
+                let key_ref = context.relay_signing_key.as_deref();
+                if let Some(key) = key_ref {
+                    crate::messaging::handlers::handle_msg_submit(
+                        envelope,
+                        context.relay_store.as_ref(),
+                        tier,
+                        key,
+                    )
+                    .await
+                } else {
+                    Ok(None)
+                }
+            }
+
+            NetworkMessage::MsgFetchPending {
+                recipient_addr_hash,
+                since,
+            } => {
+                if let Some(key) = context.relay_signing_key.as_deref() {
+                    crate::messaging::handlers::handle_msg_fetch_pending(
+                        recipient_addr_hash,
+                        *since,
+                        context.relay_store.as_ref(),
+                        key,
+                    )
+                    .await
+                } else {
+                    Ok(None)
+                }
+            }
+
+            NetworkMessage::MsgReadAck {
+                ack,
+                recipient_pubkey,
+            } => {
+                crate::messaging::handlers::handle_msg_read_ack(
+                    ack,
+                    recipient_pubkey,
+                    context.relay_store.as_ref(),
+                )
+                .await
+            }
+
+            NetworkMessage::MsgAckQuery { msg_id } => {
+                crate::messaging::handlers::handle_msg_ack_query(
+                    msg_id,
+                    context.relay_store.as_ref(),
+                )
+                .await
+            }
+
+            NetworkMessage::MsgPubkeyQuery { address_hash } => {
+                if let Some(ref utxo_mgr) = context.utxo_manager {
+                    crate::messaging::handlers::handle_pubkey_query(address_hash, utxo_mgr).await
+                } else {
+                    Ok(Some(NetworkMessage::MsgPubkeyResponse {
+                        address_hash: *address_hash,
+                        pubkey: None,
+                    }))
+                }
+            }
+
+            NetworkMessage::MsgRelayAck { ack } => {
+                crate::messaging::handlers::handle_msg_relay_ack(ack, &context.peer_registry)
+            }
+
+            NetworkMessage::MsgEnvelopes {
+                recipient_addr_hash,
+                envelopes,
+            } => crate::messaging::handlers::handle_msg_envelopes(
+                recipient_addr_hash,
+                envelopes,
+                &context.peer_registry,
+            ),
+
+            NetworkMessage::MsgAckResponse {
+                msg_id,
+                ack,
+                delivery,
+            } => {
+                // Store ack/delivery events in local relay store if available
+                if let Some(ref store) = context.relay_store {
+                    if let Some(ref ack_bytes) = ack {
+                        if let Ok(read_ack) =
+                            serde_cbor::from_slice::<crate::messaging::types::ReadAck>(ack_bytes)
+                        {
+                            let _ = store.store_ack(
+                                &read_ack,
+                                &read_ack.recipient_sig[..32].try_into().unwrap_or([0u8; 32]),
+                            );
+                        }
+                    }
+                    let _ = delivery; // delivery events are informational
+                }
+                let _ = msg_id;
+                Ok(None)
+            }
+
+            NetworkMessage::MsgPubkeyResponse {
+                address_hash,
+                pubkey,
+            } => crate::messaging::handlers::handle_pubkey_response(
+                address_hash,
+                *pubkey,
+                &context.peer_registry,
+            ),
+
+            NetworkMessage::MsgExpiryNotice { notice } => {
+                if let Ok(n) =
+                    serde_cbor::from_slice::<crate::messaging::types::ExpiryNotice>(notice)
+                {
+                    debug!(
+                        "📨 Message {} expired before delivery",
+                        hex::encode(&n.msg_id)
+                    );
+                    if let Some(ref store) = context.relay_store {
+                        let _ = store.set_status(
+                            &n.msg_id,
+                            &crate::messaging::types::MessageStatus::Expired,
+                        );
+                    }
+                }
+                Ok(None)
             }
 
             // === Messages not handled here ===

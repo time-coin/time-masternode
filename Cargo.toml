@@ -63,6 +63,9 @@ tokio-util = "0.7"
 aes-gcm = "0.10"                                    # AES-256-GCM encryption
 argon2 = "0.5"                                       # Password-based key derivation
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }  # ECDH key exchange for encrypted memos
+chacha20poly1305 = "0.10"                                           # XChaCha20-Poly1305 for message encryption
+hkdf = "0.12"                                                       # HKDF key derivation for message keys
+serde_cbor = "0.11"                                                 # CBOR serialisation for message envelopes
 urlencoding = "2.1"                                  # URI percent-encoding for payment requests
 
 # Critical security enhancements

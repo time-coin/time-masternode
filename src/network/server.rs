@@ -74,6 +74,8 @@ pub struct NetworkServer {
     pub network_type: crate::network_type::NetworkType,
     pub ddos_guard: Arc<DDoSGuard>, // Integrated DDoS coordinator (subnet rate tracking)
     pub attack_log: Option<Arc<AttackLog>>, // Separate file log for AI-detected attacks
+    pub relay_store: Option<Arc<crate::messaging::relay::RelayStore>>,
+    pub relay_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
 }
 
 #[allow(dead_code)] // Used by binary, not visible to library check
@@ -194,12 +196,25 @@ impl NetworkServer {
             network_type,
             ddos_guard: Arc::new(DDoSGuard::new()),
             attack_log: None,
+            relay_store: None,
+            relay_signing_key: None,
         })
     }
 
     /// Set the AI system for attack detection and mitigation enforcement
     pub fn set_ai_system(&mut self, ai_system: Arc<crate::ai::AISystem>) {
         self.ai_system = Some(ai_system);
+    }
+
+    /// Wire the secure messaging relay store so every inbound/outbound connection
+    /// can handle MSG_* network messages.
+    pub fn set_relay_store(
+        &mut self,
+        relay_store: Arc<crate::messaging::relay::RelayStore>,
+        signing_key: Arc<ed25519_dalek::SigningKey>,
+    ) {
+        self.relay_store = Some(relay_store);
+        self.relay_signing_key = Some(signing_key);
     }
 
     /// Set the separate attack log file (writes a line per AI-detected attack).
@@ -670,6 +685,8 @@ impl NetworkServer {
             let tls_config = self.tls_config.clone();
             let network_type = self.network_type;
             let ai_system = self.ai_system.clone();
+            let relay_store = self.relay_store.clone();
+            let relay_signing_key = self.relay_signing_key.clone();
 
             tokio::spawn(async move {
                 let _ = handle_peer(
@@ -699,6 +716,8 @@ impl NetworkServer {
                     tls_config,
                     network_type,
                     ai_system,
+                    relay_store,
+                    relay_signing_key,
                 )
                 .await;
             });
@@ -766,6 +785,8 @@ async fn handle_peer(
     tls_config: Option<Arc<crate::network::tls::TlsConfig>>,
     network_type: crate::network_type::NetworkType,
     ai_system: Option<Arc<crate::ai::AISystem>>,
+    relay_store: Option<Arc<crate::messaging::relay::RelayStore>>,
+    relay_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
 ) -> Result<(), std::io::Error> {
     let driver = crate::network::connection_driver::ConnectionDriver {
         connection_manager,
@@ -776,6 +797,8 @@ async fn handle_peer(
         tls_config,
         network_type,
         ai_system,
+        relay_store: relay_store.clone(),
+        relay_signing_key: relay_signing_key.clone(),
     };
     let resources = crate::network::connection_driver::InboundResources {
         consensus,
@@ -790,6 +813,8 @@ async fn handle_peer(
         block_cache,
         utxo_mgr,
         subs,
+        relay_store,
+        relay_signing_key,
     };
     driver
         .drive_inbound(stream, peer.addr, is_whitelisted, notifier, resources)

@@ -248,6 +248,11 @@ const PUBLIC_METHODS: &[&str] = &[
     "respondpaymentrequest",
     "cancelpaymentrequest",
     "markpaymentrequestviewed",
+    // Secure messaging — read-only methods
+    "getpubkey",
+    "listcontacts",
+    "getmessagestatus",
+    "getmessages",
 ];
 
 /// Returns `true` if the given RPC method is in the public (read-only) whitelist
@@ -312,6 +317,19 @@ impl RpcServer {
     /// Enable TLS for the RPC server with the given acceptor.
     pub fn set_tls(&mut self, acceptor: tokio_rustls::TlsAcceptor) {
         self.tls_acceptor = Some(acceptor);
+    }
+
+    /// Wire the secure messaging subsystem into the RPC handler.
+    /// Must be called before `run()`.
+    pub fn set_messaging(
+        &mut self,
+        relay_store: Arc<crate::messaging::relay::RelayStore>,
+        contacts_book: Arc<crate::messaging::contacts::ContactsBook>,
+        peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+    ) {
+        if let Some(h) = Arc::get_mut(&mut self.handler) {
+            h.set_messaging(relay_store, contacts_book, peer_registry);
+        }
     }
 
     pub async fn run(&mut self) -> Result<(), std::io::Error> {

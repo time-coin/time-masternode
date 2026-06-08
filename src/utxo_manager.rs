@@ -177,6 +177,20 @@ impl UTXOStateManager {
         self.pubkey_cache.get(address).map(|v| *v)
     }
 
+    /// Look up a pubkey by SHA-256(address) — privacy-preserving lookup for P2P queries.
+    /// O(n) over the cache; acceptable since the cache is small and this is called rarely.
+    pub fn get_pubkey_by_address_hash(&self, hash: &[u8; 32]) -> Option<[u8; 32]> {
+        use sha2::Digest;
+        self.pubkey_cache.iter().find_map(|entry| {
+            let h: [u8; 32] = sha2::Sha256::digest(entry.key().as_bytes()).into();
+            if h == *hash {
+                Some(*entry.value())
+            } else {
+                None
+            }
+        })
+    }
+
     /// Load persisted collateral locks from sled into memory.
     /// Called on startup after `enable_collateral_persistence` and `initialize_states`.
     pub fn load_persisted_collateral_locks(&self) -> usize {

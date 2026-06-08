@@ -43,6 +43,8 @@ pub struct InboundResources {
             std::collections::HashMap<String, crate::network::message::Subscription>,
         >,
     >,
+    pub relay_store: Option<Arc<crate::messaging::relay::RelayStore>>,
+    pub relay_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
 }
 
 /// Shared resources for managing the lifecycle of a single outbound connection.
@@ -55,6 +57,8 @@ pub struct ConnectionDriver {
     pub tls_config: Option<Arc<TlsConfig>>,
     pub network_type: crate::network_type::NetworkType,
     pub ai_system: Option<Arc<crate::ai::AISystem>>,
+    pub relay_store: Option<Arc<crate::messaging::relay::RelayStore>>,
+    pub relay_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
 }
 impl ConnectionDriver {
     /// Establish an outbound connection to `ip:port`, run its message loop, then clean up.
@@ -150,6 +154,10 @@ impl ConnectionDriver {
 
         if let Some(ref ai) = self.ai_system {
             config = config.with_ai_system(ai.clone());
+        }
+
+        if let (Some(ref rs), Some(ref sk)) = (&self.relay_store, &self.relay_signing_key) {
+            config = config.with_relay_store(rs.clone(), sk.clone());
         }
 
         // Fresh per-connection rate limiter ΓÇö mirrors the inbound check_rate_limit! path.
@@ -977,6 +985,11 @@ impl ConnectionDriver {
                 }
                 if let Some(ref ai) = self.ai_system {
                     loop_config = loop_config.with_ai_system(ai.clone());
+                }
+                if let (Some(ref rs), Some(ref sk)) =
+                    (&resources.relay_store, &resources.relay_signing_key)
+                {
+                    loop_config = loop_config.with_relay_store(rs.clone(), sk.clone());
                 }
                 let rl = Arc::new(RwLock::new(RateLimiter::new()));
                 loop_config = loop_config.with_rate_limiter(rl);

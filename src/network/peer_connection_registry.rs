@@ -127,6 +127,14 @@ pub struct PeerConnectionRegistry {
     /// Capped at 50 entries (oldest dropped when full). Shared with the RPC handler so
     /// the dashboard can poll `getoperatormessages` without a separate storage system.
     pub operator_messages: Arc<std::sync::Mutex<std::collections::VecDeque<(u64, String, String)>>>,
+    /// Pending relay storage ack listeners, keyed by msg_id.
+    /// `sendmessage` RPC registers a channel here; message handler sends on it when MsgRelayAck arrives.
+    pub pending_relay_acks: Arc<DashMap<[u8; 32], mpsc::UnboundedSender<Vec<u8>>>>,
+    /// Pending message fetch listeners, keyed by recipient_addr_hash.
+    /// `getmessages` RPC registers a channel here; handler sends each envelope byte vec on it.
+    pub pending_msg_envelopes: Arc<DashMap<[u8; 32], mpsc::UnboundedSender<Vec<u8>>>>,
+    /// Pending pubkey query listeners, keyed by address_hash (SHA-256 of TIME1 address).
+    pub pending_pubkey_queries: Arc<DashMap<[u8; 32], mpsc::UnboundedSender<[u8; 32]>>>,
 }
 
 fn extract_ip(addr: &str) -> &str {
@@ -176,6 +184,9 @@ impl PeerConnectionRegistry {
                 std::time::Duration::from_secs(300), // same 5-min window as votes
             )),
             operator_messages: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            pending_relay_acks: Arc::new(DashMap::new()),
+            pending_msg_envelopes: Arc::new(DashMap::new()),
+            pending_pubkey_queries: Arc::new(DashMap::new()),
         }
     }
 
