@@ -20,6 +20,17 @@ impl ContactsBook {
         Ok(Self { tree })
     }
 
+    /// In-memory fallback: used when the on-disk contacts DB cannot be opened.
+    /// Contact data is not persisted across restarts but pubkey resolution still works.
+    pub fn open_in_memory() -> Self {
+        let db = sled::Config::new()
+            .temporary(true)
+            .open()
+            .expect("ephemeral sled DB for ContactsBook");
+        let tree = db.open_tree("contacts").expect("open contacts tree");
+        Self { tree }
+    }
+
     pub fn get(&self, address: &str) -> Option<Contact> {
         let bytes = self.tree.get(address.as_bytes()).ok()??;
         serde_cbor::from_slice(&bytes).ok()

@@ -176,6 +176,7 @@ impl RpcHandler {
     }
 
     /// Set the relay store and contacts book for secure messaging.
+    /// Kept for compatibility — prefer the individual setters below.
     pub fn set_messaging(
         &mut self,
         relay_store: Arc<crate::messaging::relay::RelayStore>,
@@ -185,6 +186,24 @@ impl RpcHandler {
         self.relay_store = Some(relay_store);
         self.contacts_book = Some(contacts_book);
         self.peer_registry = Some(peer_registry);
+    }
+
+    /// Set only the relay store and peer registry (Silver/Gold relay nodes).
+    pub fn set_relay_store(
+        &mut self,
+        relay_store: Arc<crate::messaging::relay::RelayStore>,
+        peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+    ) {
+        self.relay_store = Some(relay_store);
+        self.peer_registry = Some(peer_registry);
+    }
+
+    /// Set only the contacts book (available on all nodes, not just relay nodes).
+    pub fn set_contacts_book(
+        &mut self,
+        contacts_book: Arc<crate::messaging::contacts::ContactsBook>,
+    ) {
+        self.contacts_book = Some(contacts_book);
     }
 
     /// Read the next deterministic address index from disk (4-byte LE u32).

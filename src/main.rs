@@ -1280,25 +1280,33 @@ async fn main() {
         None
     };
 
-    // Contacts book (all nodes — needed to resolve recipient pubkeys for sendmessage)
-    let contacts_book: Option<Arc<messaging::contacts::ContactsBook>> = {
+    // Contacts book (all nodes — needed to resolve recipient pubkeys for sendmessage).
+    // Always succeeds: falls back to an in-memory store if the on-disk DB fails.
+    let contacts_book: Arc<messaging::contacts::ContactsBook> = {
         let contacts_path = format!("{}/contacts", db_dir);
         match sled::Config::new()
             .path(&contacts_path)
             .cache_capacity(4 * 1024 * 1024)
             .mode(sled::Mode::LowSpace)
             .open()
-        {
-            Ok(db) => match messaging::contacts::ContactsBook::open(&db) {
-                Ok(book) => Some(Arc::new(book)),
-                Err(e) => {
-                    tracing::warn!("📨 Contacts book failed to open: {}", e);
-                    None
-                }
-            },
+            .and_then(|db| {
+                messaging::contacts::ContactsBook::open(&db).map_err(|e| {
+                    sled::Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e.to_string(),
+                    ))
+                })
+            }) {
+            Ok(book) => {
+                tracing::info!("📨 Contacts book initialized");
+                Arc::new(book)
+            }
             Err(e) => {
-                tracing::warn!("📨 Contacts DB failed to open: {}", e);
-                None
+                tracing::warn!(
+                    "📨 Contacts book failed to open: {} — using in-memory fallback",
+                    e
+                );
+                Arc::new(messaging::contacts::ContactsBook::open_in_memory())
             }
         }
     };
@@ -5884,9 +5892,11 @@ async fn main() {
                 .await
                 {
                     Ok(mut server) => {
-                        // Wire secure messaging if relay store is available
-                        if let (Some(rs), Some(cb)) = (rpc_relay_store, rpc_contacts_book) {
-                            server.set_messaging(rs, cb, rpc_peer_registry);
+                        // Contacts book is always available (all nodes need pubkey resolution)
+                        server.set_contacts_book(rpc_contacts_book);
+                        // Relay store + P2P registry only wired on Silver/Gold relay nodes
+                        if let Some(rs) = rpc_relay_store {
+                            server.set_messaging(rs, rpc_peer_registry);
                         }
 
                         // Set up TLS if configured

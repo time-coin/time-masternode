@@ -319,16 +319,27 @@ impl RpcServer {
         self.tls_acceptor = Some(acceptor);
     }
 
-    /// Wire the secure messaging subsystem into the RPC handler.
+    /// Wire the relay store and P2P registry for Silver/Gold relay nodes.
+    /// `set_contacts_book` should be called first (on all nodes).
     /// Must be called before `run()`.
     pub fn set_messaging(
         &mut self,
         relay_store: Arc<crate::messaging::relay::RelayStore>,
-        contacts_book: Arc<crate::messaging::contacts::ContactsBook>,
         peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
     ) {
         if let Some(h) = Arc::get_mut(&mut self.handler) {
-            h.set_messaging(relay_store, contacts_book, peer_registry);
+            h.set_relay_store(relay_store, peer_registry);
+        }
+    }
+
+    /// Wire the contacts book into the RPC handler (available on all nodes).
+    /// Must be called before `run()`.
+    pub fn set_contacts_book(
+        &mut self,
+        contacts_book: Arc<crate::messaging::contacts::ContactsBook>,
+    ) {
+        if let Some(h) = Arc::get_mut(&mut self.handler) {
+            h.set_contacts_book(contacts_book);
         }
     }
 

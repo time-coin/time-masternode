@@ -327,10 +327,14 @@ pub async fn rpc_get_messages(
     for (envelope, _) in &unique {
         match decrypt_envelope(wallet_key, envelope) {
             Ok(msg) => {
-                // Auto-add sender to contacts
-                let sender_addr = &msg.recipient_addr; // actually the plaintext has sender_pubkey
+                // Derive the sender's TIME address from their pubkey
+                let sender_addr =
+                    crate::address::Address::from_public_key(&envelope.sender_pubkey, network)
+                        .to_string();
+
+                // Auto-add sender to contacts so future sends require no network lookup
                 let _ = contacts.upsert(
-                    sender_addr,
+                    &sender_addr,
                     Contact {
                         pubkey: envelope.sender_pubkey,
                         label: None,
@@ -340,12 +344,12 @@ pub async fn rpc_get_messages(
 
                 // If sender requested a read receipt, send one
                 if msg.request_read_receipt() {
-                    let _ = send_read_ack(envelope, wallet_key, peer_registry).await;
+                    let _ = send_read_ack(envelope, &sender_addr, wallet_key, peer_registry).await;
                 }
 
                 let msg_json = json!({
                     "msg_id": hex::encode(&envelope.msg_id),
-                    "from": hex::encode(&envelope.sender_pubkey),
+                    "from": sender_addr,
                     "subject": String::from_utf8_lossy(&msg.subject),
                     "body": String::from_utf8_lossy(&msg.body),
                     "timestamp": msg.timestamp,
@@ -435,20 +439,18 @@ pub async fn rpc_get_message_status(
 
 async fn send_read_ack(
     envelope: &crate::messaging::types::TimeEnvelope,
+    sender_addr: &str,
     recipient_key: &SigningKey,
     peer_registry: &Arc<PeerConnectionRegistry>,
 ) -> Result<(), MessageError> {
     use ed25519_dalek::Signer;
     let read_at = chrono::Utc::now().timestamp();
-    // Reconstruct sender address from envelope - we need it for the ack
-    // For now we use a placeholder; a real implementation would derive it from sender_pubkey
-    let sender_addr = hex::encode(&envelope.sender_pubkey);
     let sig_bytes =
-        crate::messaging::types::ReadAck::signing_bytes(&envelope.msg_id, &sender_addr, read_at);
+        crate::messaging::types::ReadAck::signing_bytes(&envelope.msg_id, sender_addr, read_at);
     let ack = crate::messaging::types::ReadAck {
         version: MSG_VERSION,
         msg_id: envelope.msg_id,
-        sender_addr: sender_addr.clone(),
+        sender_addr: sender_addr.to_string(),
         read_at,
         recipient_sig: recipient_key.sign(&sig_bytes).to_bytes(),
     };

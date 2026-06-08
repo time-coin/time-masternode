@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Tabs},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Tabs, Wrap},
     Frame, Terminal,
 };
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ use std::{
 use sysinfo::{Disks, System};
 use timed::http_client::HttpClient;
 
-const DASHBOARD_VERSION: &str = "1.5.8";
+const DASHBOARD_VERSION: &str = "1.6.0";
 
 use timed::rpc::credentials::resolve_credentials;
 
@@ -276,6 +276,25 @@ struct BlockDetail {
     block_reward: f64,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+#[allow(dead_code)]
+struct SecureMsg {
+    #[serde(default)]
+    msg_id: String,
+    #[serde(default)]
+    from: String,
+    #[serde(default)]
+    subject: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    timestamp: i64,
+    #[serde(default)]
+    ttl_seconds: u32,
+    #[serde(default)]
+    read_receipt_requested: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 struct GovernanceProposal {
@@ -320,6 +339,8 @@ struct DashboardData {
     recent_blocks: Vec<BlockDetail>,
     proposals: Vec<GovernanceProposal>,
     operator_messages: Vec<OperatorMsg>,
+    secure_messages: Vec<SecureMsg>,
+    contacts_count: usize,
     system: Option<SystemResources>,
     last_update: DateTime<Utc>,
     update_count: u64,
@@ -340,6 +361,8 @@ impl Default for DashboardData {
             recent_blocks: Vec::new(),
             proposals: Vec::new(),
             operator_messages: Vec::new(),
+            secure_messages: Vec::new(),
+            contacts_count: 0,
             system: None,
             last_update: Utc::now(),
             update_count: 0,
@@ -350,12 +373,21 @@ impl Default for DashboardData {
 enum ComposeStage {
     EnteringIp,
     EnteringMessage,
+    EnteringAddress,
+    EnteringSubject,
+    EnteringBody,
 }
 
 struct ComposeState {
     stage: ComposeStage,
+    // Operator message fields
     ip_input: String,
     message_input: String,
+    // Secure message (TIME-MSG) fields
+    address_input: String,
+    subject_input: String,
+    body_input: String,
+    is_secure: bool,
     status: Option<(bool, String)>,
 }
 
@@ -384,6 +416,8 @@ struct App {
     governance_scroll: usize,
     masternode_scroll: usize,
     messages_scroll: usize,
+    secure_msg_scroll: usize,
+    secure_msg_detail: Option<usize>,
     vote_status: Option<(bool, String)>, // (success, message)
     compose: Option<ComposeState>,
 }
@@ -421,6 +455,8 @@ impl App {
             governance_scroll: 0,
             masternode_scroll: 0,
             messages_scroll: 0,
+            secure_msg_scroll: 0,
+            secure_msg_detail: None,
             vote_status: None,
             compose: None,
         }
@@ -642,6 +678,22 @@ impl App {
                 .collect();
         }
 
+        // Fetch TIME-MSG secure inbox (Silver/Gold relay nodes only; silently skipped otherwise)
+        if let Ok(msgs) = self
+            .rpc_call::<Vec<SecureMsg>>("getmessages", vec![serde_json::json!({"since": 0})])
+            .await
+        {
+            self.data.secure_messages = msgs;
+        }
+
+        // Fetch contacts count (available on all nodes with contacts book)
+        if let Ok(contacts) = self
+            .rpc_call::<Vec<serde_json::Value>>("listcontacts", vec![])
+            .await
+        {
+            self.data.contacts_count = contacts.len();
+        }
+
         // Collect local system resources — use persistent System for accurate CPU delta
         self.sysinfo.refresh_all();
         let cpu_pct = self.sysinfo.global_cpu_info().cpu_usage();
@@ -756,6 +808,30 @@ impl App {
             .await
         {
             Ok(_) => Ok(format!("Message sent to {}", ip)),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    async fn send_secure_message(
+        &self,
+        address: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<String, String> {
+        let params = vec![serde_json::json!({
+            "to": address,
+            "subject": subject,
+            "body": body,
+            "request_read_receipt": false
+        })];
+        match self
+            .rpc_call::<serde_json::Value>("sendmessage", params)
+            .await
+        {
+            Ok(result) => {
+                let msg_id = result.get("msg_id").and_then(|v| v.as_str()).unwrap_or("?");
+                Ok(format!("Sent (id: {})", &msg_id[..12.min(msg_id.len())]))
+            }
             Err(e) => Err(e.to_string()),
         }
     }
@@ -2551,20 +2627,57 @@ fn render_governance(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_messages(f: &mut Frame, area: Rect, app: &App) {
+    // Secure message full-screen detail view
+    if let Some(idx) = app.secure_msg_detail {
+        if let Some(msg) = app.data.secure_messages.get(idx) {
+            render_secure_msg_detail(f, area, msg);
+            return;
+        }
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5), // Hint / compose area
-            Constraint::Min(0),    // Message list
+            Constraint::Length(5),  // Hint / compose area
+            Constraint::Min(6),     // Secure inbox (TIME-MSG)
+            Constraint::Length(12), // Operator alerts
         ])
         .split(area);
 
     // --- Top pane: compose input or hint bar ---
     if let Some(ref compose) = app.compose {
-        let (label, value, title_suffix) = match compose.stage {
-            ComposeStage::EnteringIp => ("Target IP:port › ", &compose.ip_input, "Enter IP"),
-            ComposeStage::EnteringMessage => {
-                ("Message › ", &compose.message_input, "Enter Message")
+        let (label, value_str, title_str): (&str, &str, &str) = if compose.is_secure {
+            match compose.stage {
+                ComposeStage::EnteringAddress => (
+                    "To › ",
+                    compose.address_input.as_str(),
+                    "Send Secure Message — Step 1/3: Recipient Address",
+                ),
+                ComposeStage::EnteringSubject => (
+                    "Subject › ",
+                    compose.subject_input.as_str(),
+                    "Send Secure Message — Step 2/3: Subject (Enter to skip)",
+                ),
+                ComposeStage::EnteringBody => (
+                    "Body › ",
+                    compose.body_input.as_str(),
+                    "Send Secure Message — Step 3/3: Message Body",
+                ),
+                _ => ("", "", ""),
+            }
+        } else {
+            match compose.stage {
+                ComposeStage::EnteringIp => (
+                    "Target IP:port › ",
+                    compose.ip_input.as_str(),
+                    "Send Operator Alert — Enter IP",
+                ),
+                ComposeStage::EnteringMessage => (
+                    "Message › ",
+                    compose.message_input.as_str(),
+                    "Send Operator Alert — Enter Message",
+                ),
+                _ => ("", "", ""),
             }
         };
         let input_line = Line::from(vec![
@@ -2574,51 +2687,225 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(value.as_str(), Style::default().fg(Color::White)),
-            Span::styled("█", Style::default().fg(Color::Yellow)), // cursor
+            Span::styled(value_str, Style::default().fg(Color::White)),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
         ]);
-        let status_line = if let Some((ok, ref msg)) = compose.status {
+        let second_line = if let Some((ok, ref msg)) = compose.status {
             let color = if ok { Color::Green } else { Color::Red };
-            Line::from(vec![Span::styled(msg.as_str(), Style::default().fg(color))])
+            Line::from(Span::styled(msg.as_str(), Style::default().fg(color)))
+        } else if compose.is_secure && !matches!(compose.stage, ComposeStage::EnteringAddress) {
+            let ctx = if matches!(compose.stage, ComposeStage::EnteringBody) {
+                format!(
+                    "To: {}  Subj: {}",
+                    &compose.address_input[..24.min(compose.address_input.len())],
+                    if compose.subject_input.is_empty() {
+                        "(no subject)"
+                    } else {
+                        &compose.subject_input[..30.min(compose.subject_input.len())]
+                    }
+                )
+            } else {
+                format!(
+                    "To: {}",
+                    &compose.address_input[..40.min(compose.address_input.len())]
+                )
+            };
+            Line::from(Span::styled(ctx, Style::default().fg(Color::DarkGray)))
         } else {
-            Line::from(vec![Span::styled(
-                "[Enter] Confirm  [Esc] Cancel",
-                Style::default().fg(Color::DarkGray),
-            )])
+            let hint = if compose.is_secure {
+                match compose.stage {
+                    ComposeStage::EnteringSubject => "[Enter] Skip/Next  [Esc] Cancel",
+                    ComposeStage::EnteringBody => "[Enter] Send  [Esc] Cancel",
+                    _ => "[Enter] Next  [Esc] Cancel",
+                }
+            } else {
+                "[Enter] Confirm  [Esc] Cancel"
+            };
+            Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray)))
         };
-        let compose_box = Paragraph::new(vec![input_line, status_line]).block(
+        let compose_box = Paragraph::new(vec![input_line, second_line]).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!("Send Operator Message — {}", title_suffix))
+                .title(title_str)
                 .border_style(Style::default().fg(Color::Yellow)),
         );
         f.render_widget(compose_box, chunks[0]);
     } else {
-        let hint = Paragraph::new(Line::from(vec![
-            Span::styled("[m] ", Style::default().fg(Color::Green)),
-            Span::raw("Send message to peer  "),
-            Span::styled("[↑↓] ", Style::default().fg(Color::Yellow)),
-            Span::raw("Scroll  "),
-            Span::styled("[r] ", Style::default().fg(Color::Yellow)),
-            Span::raw("Refresh"),
-        ]))
+        let secure_count = app.data.secure_messages.len();
+        let contact_count = app.data.contacts_count;
+        let hint = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("[m] ", Style::default().fg(Color::Green)),
+                Span::raw("Secure msg  "),
+                Span::styled("[o] ", Style::default().fg(Color::Cyan)),
+                Span::raw("Operator alert  "),
+                Span::styled("[↑↓] ", Style::default().fg(Color::Yellow)),
+                Span::raw("Scroll  "),
+                Span::styled("[Enter] ", Style::default().fg(Color::Yellow)),
+                Span::raw("Read  "),
+                Span::styled("[r] ", Style::default().fg(Color::Yellow)),
+                Span::raw("Refresh"),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    format!("{} secure msg(s)", secure_count),
+                    Style::default().fg(if secure_count > 0 {
+                        Color::Cyan
+                    } else {
+                        Color::DarkGray
+                    }),
+                ),
+                Span::raw("  |  "),
+                Span::styled(
+                    format!("{} contacts", contact_count),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]),
+        ])
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Operator Messages")
+                .title("Messages (TIME-MSG v1)")
                 .border_style(Style::default().fg(Color::Cyan)),
         );
         f.render_widget(hint, chunks[0]);
     }
 
-    // --- Message list ---
-    let messages = &app.data.operator_messages;
-    let scroll = app.messages_scroll.min(messages.len().saturating_sub(1));
+    // --- Secure Inbox (TIME-MSG) ---
+    let secure_msgs = &app.data.secure_messages;
+    let secure_scroll = app
+        .secure_msg_scroll
+        .min(secure_msgs.len().saturating_sub(1));
 
-    let rows: Vec<Row> = messages
+    if secure_msgs.is_empty() {
+        let empty = Paragraph::new("No encrypted messages in inbox.  Silver/Gold relay nodes receive messages automatically.")
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Secure Inbox (TIME-MSG)")
+                    .border_style(Style::default().fg(Color::Green)),
+            )
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true });
+        f.render_widget(empty, chunks[1]);
+    } else {
+        let header = Row::new(vec![
+            Cell::from("#").style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Cell::from("From").style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Cell::from("Subject").style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Cell::from("Time").style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Cell::from("Preview").style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+        .height(1);
+
+        let rows: Vec<Row> = secure_msgs
+            .iter()
+            .enumerate()
+            .map(|(i, msg)| {
+                let selected = i == secure_scroll;
+                let ts = if msg.timestamp > 0 {
+                    chrono::DateTime::from_timestamp(msg.timestamp, 0)
+                        .map(|dt: chrono::DateTime<Utc>| dt.format("%m/%d %H:%M").to_string())
+                        .unwrap_or_else(|| "—".to_string())
+                } else {
+                    "—".to_string()
+                };
+                let short_from = if msg.from.len() > 20 {
+                    format!("{}…", &msg.from[..20])
+                } else {
+                    msg.from.clone()
+                };
+                let subj_display = if msg.subject.is_empty() {
+                    "(no subject)".to_string()
+                } else if msg.subject.len() > 22 {
+                    format!("{}…", &msg.subject[..22])
+                } else {
+                    msg.subject.clone()
+                };
+                let body_preview = msg.body.replace('\n', " ");
+                let preview = if body_preview.len() > 36 {
+                    format!("{}…", &body_preview[..36])
+                } else {
+                    body_preview.clone()
+                };
+                let row = Row::new(vec![
+                    Cell::from(format!("{}", i + 1)),
+                    Cell::from(short_from).style(Style::default().fg(Color::Cyan)),
+                    Cell::from(subj_display).style(Style::default().fg(Color::White)),
+                    Cell::from(ts).style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(preview).style(Style::default().fg(Color::Gray)),
+                ]);
+                if selected {
+                    row.style(
+                        Style::default()
+                            .bg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    row
+                }
+            })
+            .collect();
+
+        let widths = [
+            Constraint::Length(4),
+            Constraint::Length(22),
+            Constraint::Length(24),
+            Constraint::Length(12),
+            Constraint::Min(0),
+        ];
+
+        let mut table_state = TableState::default();
+        if !secure_msgs.is_empty() {
+            table_state.select(Some(secure_scroll));
+        }
+
+        let title = format!(
+            "Secure Inbox ({}/{})  [↑↓ navigate  Enter: read]",
+            secure_scroll + 1,
+            secure_msgs.len()
+        );
+        let table = Table::new(rows, widths)
+            .header(header)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .border_style(Style::default().fg(Color::Green)),
+            )
+            .highlight_style(Style::default().bg(Color::DarkGray));
+        f.render_stateful_widget(table, chunks[1], &mut table_state);
+    }
+
+    // --- Operator Alerts ---
+    let messages = &app.data.operator_messages;
+    let op_scroll = app.messages_scroll.min(messages.len().saturating_sub(1));
+
+    let op_rows: Vec<Row> = messages
         .iter()
         .enumerate()
-        .skip(scroll)
+        .skip(op_scroll)
         .map(|(i, msg)| {
             let ts = chrono::DateTime::from_timestamp(msg.timestamp as i64, 0)
                 .map(|dt: chrono::DateTime<Utc>| dt.format("%H:%M:%S").to_string())
@@ -2632,14 +2919,13 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let widths = [
+    let op_widths = [
         Constraint::Length(4),
         Constraint::Length(10),
         Constraint::Length(22),
         Constraint::Min(0),
     ];
-
-    let header = Row::new(vec![
+    let op_header = Row::new(vec![
         Cell::from("#").style(
             Style::default()
                 .fg(Color::Yellow)
@@ -2663,18 +2949,102 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
     ])
     .height(1);
 
-    let title = format!("Inbox ({} messages)  [↑↓ scroll]", messages.len());
-    let table = Table::new(rows, widths)
-        .header(header)
+    let op_title = format!("Operator Alerts ({})  [o] send alert", messages.len());
+    let op_table = Table::new(op_rows, op_widths).header(op_header).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(op_title)
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+    f.render_widget(op_table, chunks[2]);
+}
+
+fn render_secure_msg_detail(f: &mut Frame, area: Rect, msg: &SecureMsg) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(9), Constraint::Min(4)])
+        .split(area);
+
+    let ts = if msg.timestamp > 0 {
+        chrono::DateTime::from_timestamp(msg.timestamp, 0)
+            .map(|dt: chrono::DateTime<Utc>| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| "—".to_string())
+    } else {
+        "—".to_string()
+    };
+
+    let header_lines = vec![
+        Line::from(vec![
+            Span::styled("From:    ", Style::default().fg(Color::Yellow)),
+            Span::styled(&msg.from, Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(vec![
+            Span::styled("Time:    ", Style::default().fg(Color::Yellow)),
+            Span::styled(ts, Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("Subject: ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                if msg.subject.is_empty() {
+                    "(no subject)"
+                } else {
+                    &msg.subject
+                },
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Msg ID:  ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                &msg.msg_id[..32.min(msg.msg_id.len())],
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Esc / q: Back to inbox",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let header = Paragraph::new(header_lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(title)
-                .border_style(Style::default().fg(Color::Cyan)),
+                .title("Secure Message Detail (TIME-MSG v1)")
+                .border_style(Style::default().fg(Color::Green)),
         )
-        .highlight_style(Style::default().bg(Color::DarkGray));
+        .style(Style::default().fg(Color::White));
+    f.render_widget(header, chunks[0]);
 
-    f.render_widget(table, chunks[1]);
+    let body_lines: Vec<Line> = if msg.body.is_empty() {
+        vec![Line::from(Span::styled(
+            "(empty body)",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    } else {
+        msg.body
+            .lines()
+            .map(|l| {
+                Line::from(Span::styled(
+                    l.to_string(),
+                    Style::default().fg(Color::White),
+                ))
+            })
+            .collect()
+    };
+
+    let body = Paragraph::new(body_lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Message Body")
+                .border_style(Style::default().fg(Color::Green)),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(body, chunks[1]);
 }
 
 fn format_age(secs: u64) -> String {
@@ -2709,7 +3079,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("[r] ", Style::default().fg(Color::Yellow)),
             Span::raw("Refresh  |  "),
             Span::styled("[m] ", Style::default().fg(Color::Yellow)),
-            Span::raw("Message (Messages tab)  |  "),
+            Span::raw("Secure msg (Messages tab)  |  "),
             Span::styled("[q] ", Style::default().fg(Color::Yellow)),
             Span::raw("Quit"),
         ])]
@@ -2851,51 +3221,121 @@ async fn run_app<B: ratatui::backend::Backend>(
                             }
                             KeyCode::Backspace => {
                                 if let Some(ref mut c) = app.compose {
-                                    match c.stage {
-                                        ComposeStage::EnteringIp => {
-                                            c.ip_input.pop();
+                                    if c.is_secure {
+                                        match c.stage {
+                                            ComposeStage::EnteringAddress => {
+                                                c.address_input.pop();
+                                            }
+                                            ComposeStage::EnteringSubject => {
+                                                c.subject_input.pop();
+                                            }
+                                            ComposeStage::EnteringBody => {
+                                                c.body_input.pop();
+                                            }
+                                            _ => {}
                                         }
-                                        ComposeStage::EnteringMessage => {
-                                            c.message_input.pop();
+                                    } else {
+                                        match c.stage {
+                                            ComposeStage::EnteringIp => {
+                                                c.ip_input.pop();
+                                            }
+                                            ComposeStage::EnteringMessage => {
+                                                c.message_input.pop();
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
                             }
                             KeyCode::Enter => {
                                 let done = if let Some(ref mut c) = app.compose {
-                                    match c.stage {
-                                        ComposeStage::EnteringIp => {
-                                            if !c.ip_input.is_empty() {
-                                                c.stage = ComposeStage::EnteringMessage;
-                                                c.status = None;
+                                    if c.is_secure {
+                                        match c.stage {
+                                            ComposeStage::EnteringAddress => {
+                                                if !c.address_input.is_empty() {
+                                                    c.stage = ComposeStage::EnteringSubject;
+                                                    c.status = None;
+                                                }
+                                                false
                                             }
-                                            false
+                                            ComposeStage::EnteringSubject => {
+                                                c.stage = ComposeStage::EnteringBody;
+                                                c.status = None;
+                                                false
+                                            }
+                                            ComposeStage::EnteringBody => !c.body_input.is_empty(),
+                                            _ => false,
                                         }
-                                        ComposeStage::EnteringMessage => {
-                                            !c.message_input.is_empty()
+                                    } else {
+                                        match c.stage {
+                                            ComposeStage::EnteringIp => {
+                                                if !c.ip_input.is_empty() {
+                                                    c.stage = ComposeStage::EnteringMessage;
+                                                    c.status = None;
+                                                }
+                                                false
+                                            }
+                                            ComposeStage::EnteringMessage => {
+                                                !c.message_input.is_empty()
+                                            }
+                                            _ => false,
                                         }
                                     }
                                 } else {
                                     false
                                 };
                                 if done {
-                                    let (ip, msg) = if let Some(ref c) = app.compose {
-                                        (c.ip_input.clone(), c.message_input.clone())
-                                    } else {
-                                        (String::new(), String::new())
-                                    };
-                                    match app.send_operator_message(&ip, &msg).await {
-                                        Ok(ok_msg) => {
-                                            if let Some(ref mut c) = app.compose {
-                                                c.status = Some((true, ok_msg));
-                                                c.message_input.clear();
-                                                c.ip_input.clear();
-                                                c.stage = ComposeStage::EnteringIp;
+                                    let (is_secure, addr, subj, body, ip, msg) =
+                                        if let Some(ref c) = app.compose {
+                                            (
+                                                c.is_secure,
+                                                c.address_input.clone(),
+                                                c.subject_input.clone(),
+                                                c.body_input.clone(),
+                                                c.ip_input.clone(),
+                                                c.message_input.clone(),
+                                            )
+                                        } else {
+                                            (
+                                                false,
+                                                String::new(),
+                                                String::new(),
+                                                String::new(),
+                                                String::new(),
+                                                String::new(),
+                                            )
+                                        };
+                                    if is_secure {
+                                        match app.send_secure_message(&addr, &subj, &body).await {
+                                            Ok(ok_msg) => {
+                                                if let Some(ref mut c) = app.compose {
+                                                    c.status = Some((true, ok_msg));
+                                                    c.address_input.clear();
+                                                    c.subject_input.clear();
+                                                    c.body_input.clear();
+                                                    c.stage = ComposeStage::EnteringAddress;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                if let Some(ref mut c) = app.compose {
+                                                    c.status = Some((false, e));
+                                                }
                                             }
                                         }
-                                        Err(e) => {
-                                            if let Some(ref mut c) = app.compose {
-                                                c.status = Some((false, e));
+                                    } else {
+                                        match app.send_operator_message(&ip, &msg).await {
+                                            Ok(ok_msg) => {
+                                                if let Some(ref mut c) = app.compose {
+                                                    c.status = Some((true, ok_msg));
+                                                    c.message_input.clear();
+                                                    c.ip_input.clear();
+                                                    c.stage = ComposeStage::EnteringIp;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                if let Some(ref mut c) = app.compose {
+                                                    c.status = Some((false, e));
+                                                }
                                             }
                                         }
                                     }
@@ -2903,16 +3343,38 @@ async fn run_app<B: ratatui::backend::Backend>(
                             }
                             KeyCode::Char(ch) => {
                                 if let Some(ref mut c) = app.compose {
-                                    match c.stage {
-                                        ComposeStage::EnteringIp => {
-                                            if c.ip_input.len() < 50 {
-                                                c.ip_input.push(ch);
+                                    if c.is_secure {
+                                        match c.stage {
+                                            ComposeStage::EnteringAddress => {
+                                                if c.address_input.len() < 80 {
+                                                    c.address_input.push(ch);
+                                                }
                                             }
+                                            ComposeStage::EnteringSubject => {
+                                                if c.subject_input.len() < 200 {
+                                                    c.subject_input.push(ch);
+                                                }
+                                            }
+                                            ComposeStage::EnteringBody => {
+                                                if c.body_input.len() < 1000 {
+                                                    c.body_input.push(ch);
+                                                }
+                                            }
+                                            _ => {}
                                         }
-                                        ComposeStage::EnteringMessage => {
-                                            if c.message_input.len() < 500 {
-                                                c.message_input.push(ch);
+                                    } else {
+                                        match c.stage {
+                                            ComposeStage::EnteringIp => {
+                                                if c.ip_input.len() < 50 {
+                                                    c.ip_input.push(ch);
+                                                }
                                             }
+                                            ComposeStage::EnteringMessage => {
+                                                if c.message_input.len() < 500 {
+                                                    c.message_input.push(ch);
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                     c.status = None;
@@ -2931,6 +3393,8 @@ async fn run_app<B: ratatui::backend::Backend>(
                                     app.block_detail = None;
                                     app.block_tx_scroll = 0;
                                     app.block_tx_cursor = 0;
+                                } else if app.secure_msg_detail.is_some() {
+                                    app.secure_msg_detail = None;
                                 } else if app.current_tab == 5 && app.vote_status.is_some() {
                                     app.vote_status = None;
                                 } else {
@@ -2948,18 +3412,39 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 app.update_data().await;
                                 last_update = Instant::now();
                             }
+                            // [m] → compose a TIME-MSG secure message (new primary feature)
                             KeyCode::Char('m') | KeyCode::Char('M') if app.current_tab == 6 => {
+                                app.secure_msg_detail = None;
+                                app.compose = Some(ComposeState {
+                                    stage: ComposeStage::EnteringAddress,
+                                    ip_input: String::new(),
+                                    message_input: String::new(),
+                                    address_input: String::new(),
+                                    subject_input: String::new(),
+                                    body_input: String::new(),
+                                    is_secure: true,
+                                    status: None,
+                                });
+                            }
+                            // [o] → compose an operator alert (plain P2P message to an IP)
+                            KeyCode::Char('o') | KeyCode::Char('O') if app.current_tab == 6 => {
+                                app.secure_msg_detail = None;
                                 app.compose = Some(ComposeState {
                                     stage: ComposeStage::EnteringIp,
                                     ip_input: String::new(),
                                     message_input: String::new(),
+                                    address_input: String::new(),
+                                    subject_input: String::new(),
+                                    body_input: String::new(),
+                                    is_secure: false,
                                     status: None,
                                 });
                             }
                             KeyCode::Tab | KeyCode::Right
                                 if app.mempool_detail.is_none()
                                     && app.block_detail.is_none()
-                                    && app.block_tx_detail.is_none() =>
+                                    && app.block_tx_detail.is_none()
+                                    && app.secure_msg_detail.is_none() =>
                             {
                                 app.next_tab();
                                 app.mempool_scroll = 0;
@@ -2969,7 +3454,8 @@ async fn run_app<B: ratatui::backend::Backend>(
                             KeyCode::Left
                                 if app.mempool_detail.is_none()
                                     && app.block_detail.is_none()
-                                    && app.block_tx_detail.is_none() =>
+                                    && app.block_tx_detail.is_none()
+                                    && app.secure_msg_detail.is_none() =>
                             {
                                 app.previous_tab();
                                 app.mempool_scroll = 0;
@@ -3010,7 +3496,10 @@ async fn run_app<B: ratatui::backend::Backend>(
                                     app.governance_scroll = app.governance_scroll.saturating_sub(1);
                                     app.vote_status = None;
                                 } else if app.current_tab == 6 {
-                                    app.messages_scroll = app.messages_scroll.saturating_sub(1);
+                                    if app.secure_msg_detail.is_none() {
+                                        app.secure_msg_scroll =
+                                            app.secure_msg_scroll.saturating_sub(1);
+                                    }
                                 }
                             }
                             KeyCode::Down => {
@@ -3077,9 +3566,11 @@ async fn run_app<B: ratatui::backend::Backend>(
                                     }
                                     app.vote_status = None;
                                 } else if app.current_tab == 6 {
-                                    let max = app.data.operator_messages.len().saturating_sub(1);
-                                    if app.messages_scroll < max {
-                                        app.messages_scroll += 1;
+                                    if app.secure_msg_detail.is_none() {
+                                        let max = app.data.secure_messages.len().saturating_sub(1);
+                                        if app.secure_msg_scroll < max {
+                                            app.secure_msg_scroll += 1;
+                                        }
                                     }
                                 }
                             }
@@ -3125,6 +3616,12 @@ async fn run_app<B: ratatui::backend::Backend>(
                                         app.block_tx_scroll = 0;
                                         app.block_tx_cursor = 0;
                                     }
+                                } else if app.current_tab == 6 {
+                                    if app.secure_msg_detail.is_some() {
+                                        app.secure_msg_detail = None;
+                                    } else if !app.data.secure_messages.is_empty() {
+                                        app.secure_msg_detail = Some(app.secure_msg_scroll);
+                                    }
                                 }
                             }
                             KeyCode::Esc => {
@@ -3139,7 +3636,11 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 } else if app.current_tab == 5 {
                                     app.vote_status = None;
                                 } else if app.current_tab == 6 {
-                                    app.compose = None;
+                                    if app.secure_msg_detail.is_some() {
+                                        app.secure_msg_detail = None;
+                                    } else {
+                                        app.compose = None;
+                                    }
                                 }
                             }
                             KeyCode::Char('v') | KeyCode::Char('V') if app.current_tab == 5 => {
