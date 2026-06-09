@@ -817,6 +817,96 @@ time-cli markpaymentrequestviewed <request_id> <requester_address> <payer_addres
 
 ---
 
+### Secure Messaging (TIME-MSG v1)
+
+TIME-MSG v1 is an end-to-end encrypted store-and-forward messaging layer built into `timed`. Messages are encrypted on the sender side using X25519 ECDH + XChaCha20-Poly1305 and relayed through Silver/Gold masternodes. They are never stored or transmitted in plaintext.
+
+All nodes (Free, Bronze, Silver, Gold) can send and receive messages. Silver/Gold masternodes also act as relay nodes that store and forward envelopes.
+
+#### Send a Secure Message
+```bash
+time-cli sendmessage <to_address> "<body>"
+time-cli sendmessage <to_address> "<body>" --subject "Meeting tomorrow"
+time-cli sendmessage <to_address> "<body>" --ttl 168
+```
+Encrypts `body` for the recipient and submits the envelope to Silver/Gold relay nodes. Returns a `msg_id` (64 hex chars) and relay confirmation status.
+
+**Options:**
+- `--subject <text>` — Optional subject line (max 255 bytes)
+- `--ttl <hours>` — Time-to-live in hours (default 720 = 30 days, max 720)
+
+Requires the recipient's Ed25519 pubkey, resolved via: local contacts book → UTXO pubkey cache → P2P query (5 s timeout). Fails with `PubkeyNotFound` if none of the three sources return a key.
+
+```json
+{
+  "msg_id": "a3f8c1...",
+  "status": "pending",
+  "relay_acks": 2,
+  "relay_targets": 3
+}
+```
+
+#### Fetch Incoming Messages
+```bash
+time-cli getmessages
+time-cli getmessages --since 1748736000
+time-cli getmessages --limit 20
+```
+Fetches and decrypts all envelopes addressed to this wallet from the local relay store and connected peers. Automatically sends read receipts when requested by the sender and caches each sender's pubkey in your contacts book.
+
+**Options:**
+- `--since <unix_timestamp>` — Only fetch messages received after this time (default: last 30 days)
+- `--limit <n>` — Maximum number of messages to return
+
+Each message in the result includes `msg_id`, `from`, `subject`, `body`, `timestamp`, `ttl_seconds`, and `read_receipt_requested`.
+
+#### Check Message Status
+```bash
+time-cli getmessagestatus <msg_id>
+```
+Returns delivery/read-receipt status for a message you sent. Queries the local relay store and broadcasts a `MsgAckQuery` to peers before responding.
+
+Status values: `pending` | `delivered` | `read` | `expired` | `failed`
+
+#### Look Up a Pubkey
+```bash
+time-cli getpubkey <address>
+```
+Resolves the Ed25519 public key for a TIME address using the same 3-source chain as `sendmessage`. Useful for verifying you have the correct key before sending.
+
+#### Contacts Book
+
+The local contacts book caches pubkeys by TIME address for instant future sends without a P2P lookup.
+
+```bash
+# Add or update a contact
+time-cli addcontact <address>
+time-cli addcontact <address> --label "Alice"
+
+# List all saved contacts
+time-cli listcontacts
+
+# Remove a contact
+time-cli removecontact <address>
+```
+
+Contacts are automatically added when you receive a message from an address.
+
+---
+
+### Secure Messaging — RPC-Only Methods (Wallet Bridge)
+
+These four methods are for wallets that hold their own keys and handle encryption locally (forwarded-address masternodes). They have no corresponding `time-cli` subcommand.
+
+| Method | Description |
+|--------|-------------|
+| `getrawenvelopes` | Fetch raw CBOR-serialized envelopes for a TIME address without decrypting |
+| `submitenvelope` | Submit a pre-encrypted CBOR envelope; stored locally and forwarded to Silver/Gold relay peers |
+| `lookuppubkey` | Resolve Ed25519 pubkey for any TIME address (same 3-source chain as `sendmessage`) |
+| `publishpubkey` | Broadcast this node's Ed25519 pubkey via `MsgPubkeyResponse` to all connected peers |
+
+---
+
 ### Daemon Control
 
 #### Get Info
@@ -1166,6 +1256,13 @@ Shows help for a specific command.
 | `mergeutxos` | Consolidate UTXOs into one output |
 | `sendfrom` | Send from a specific address |
 | `aggregatebanlistss` | Merge ban lists from multiple nodes |
+| `sendmessage` | Send an E2E encrypted message to a TIME address |
+| `getmessages` | Fetch and decrypt incoming messages |
+| `getmessagestatus` | Delivery/read-receipt status for a sent message |
+| `getpubkey` | Resolve the Ed25519 messaging pubkey for an address |
+| `addcontact` | Add or update a contact in the local contacts book |
+| `listcontacts` | List all saved contacts |
+| `removecontact` | Remove a contact from the contacts book |
 
 ---
 

@@ -75,6 +75,98 @@ Parameters:
 
 ---
 
+## TIME-MSG v1 — Secure Messaging
+
+End-to-end encrypted store-and-forward messaging, native to `timed`. No separate port or binary.
+
+### Cryptography
+
+```yaml
+Key exchange:   X25519 ECDH (ephemeral sender key per message)
+Encryption:     XChaCha20-Poly1305
+Auth signature: Ed25519 (sender signs envelope header)
+Serialization:  CBOR (serde_cbor)
+Magic:          b"TIME" (4 bytes)
+```
+
+### Wire Envelope (`TimeEnvelope`) — CBOR-serialized
+
+```
+version:              u8          (= 1)
+msg_id:               [u8; 32]    SHA-256(ciphertext_payload)
+recipient_addr_hash:  [u8; 32]    SHA-256(recipient TIME address bytes)
+sender_pubkey:        [u8; 32]    sender's Ed25519 verifying key
+ephemeral_pubkey:     [u8; 32]    X25519 ephemeral public key
+nonce:                [u8; 24]    XChaCha20-Poly1305 nonce
+ciphertext_payload:   bytes       encrypted TimeMessage (CBOR)
+sender_sig:           [u8; 64]    Ed25519 over: msg_id || recipient_addr_hash || nonce || ciphertext_payload
+created_at:           i64         Unix timestamp
+ttl_seconds:          u32         max 2,592,000 (30 days)
+flags:                u8          bit 0 = request_read_receipt, bit 1 = reply_allowed
+```
+
+### Plaintext Message (`TimeMessage`) — encrypted inside `ciphertext_payload`
+
+```
+version:         u8
+sender_pubkey:   [u8; 32]
+recipient_addr:  String
+timestamp:       i64
+ttl_seconds:     u32
+flags:           u8
+thread_id:       Option<[u8; 32]>
+subject:         bytes   (max 255)
+body:            bytes   (max 65,535)
+```
+
+### ECDH Key Derivation
+
+```
+1. ephemeral_secret = X25519 random scalar
+2. ephemeral_pubkey = X25519(ephemeral_secret, basepoint)
+3. shared_secret    = X25519(ephemeral_secret, recipient_X25519_pubkey)
+   (recipient_X25519_pubkey converted from Ed25519 via Montgomery map)
+4. encryption_key   = BLAKE3(shared_secret || ephemeral_pubkey || recipient_pubkey)
+5. Encrypt TimeMessage CBOR with XChaCha20-Poly1305(key, nonce)
+```
+
+### Relay Model
+
+```yaml
+Relay nodes:           Silver and Gold masternodes
+Replication factor:    3 (deterministic selection via SHA-256(msg_id || peer_pubkey))
+Relay ack required:    2-of-3 within 10 s for "pending" status
+TTL sweep interval:    hourly; expired envelopes deleted
+Max envelope size:     512 KB
+Sled trees (relay):    msg_envelopes, msg_status, msg_delivery, msg_ack, msg_expiry, msg_pubkeys
+```
+
+### Pubkey Resolution (3-source chain)
+
+```
+1. Local contacts book (sled key: contacts_<address>)
+2. Local UTXO pubkey cache (extracted from prior tx signatures)
+3. P2P MsgPubkeyQuery broadcast (privacy-preserving: sends SHA-256(address), not address)
+   Timeout: 5 seconds
+```
+
+### Network Messages
+
+```
+MsgSubmit          { envelope: Vec<u8> }                  sender → relay
+MsgSubmitAck       { msg_id: [u8;32], stored_at, expires_at, relay_sig }
+MsgFetchPending    { recipient_addr_hash: [u8;32], since: i64 }
+MsgEnvelopes       { envelopes: Vec<Vec<u8>> }
+MsgReadAck         { ack: ReadAck }
+MsgDeliveryNotify  { event: DeliveryEvent }
+MsgAckQuery        { msg_id: [u8;32] }
+MsgAckResponse     { msg_id: [u8;32], status: MessageStatus }
+MsgPubkeyQuery     { address_hash: [u8;32] }
+MsgPubkeyResponse  { address_hash: [u8;32], pubkey: [u8;32] }
+```
+
+---
+
 ## Staking Script
 
 ```
