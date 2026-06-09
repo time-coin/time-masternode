@@ -13,16 +13,16 @@
 cargo build --release
 
 # Basic usage (pretty JSON output by default)
-./target/release/time-cli getblockchaininfo
+time-cli getblockchaininfo
 
 # Compact JSON output (single line)
-./target/release/time-cli --compact getblockchaininfo
+time-cli --compact getblockchaininfo
 
 # Human-readable output
-./target/release/time-cli --human getblockchaininfo
+time-cli --human getblockchaininfo
 
 # With custom RPC URL
-./target/release/time-cli --rpc-url http://192.168.1.100:24101 getnetworkinfo
+time-cli --rpc-url http://192.168.1.100:24101 getnetworkinfo
 ```
 
 ---
@@ -1351,5 +1351,5 @@ Error: RPC error -32700: Parse error
 
 ```bash
 cargo build --release
-./target/release/time-cli getblockchaininfo
+time-cli getblockchaininfo
 ```
