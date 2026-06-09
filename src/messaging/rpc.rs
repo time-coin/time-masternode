@@ -297,8 +297,8 @@ pub async fn rpc_get_messages(
         })
         .await;
 
-    // Collect responses for 3 seconds
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+    // Collect responses for 2 seconds (dashboard HTTP timeout is 3s)
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {

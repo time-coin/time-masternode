@@ -8513,14 +8513,10 @@ impl RpcHandler {
             timestamp: now,
         };
 
-        let registry = self
-            .blockchain
-            .get_peer_registry()
-            .await
-            .ok_or_else(|| RpcError {
-                code: -32603,
-                message: "Peer registry not available".to_string(),
-            })?;
+        let registry = self.peer_registry.as_ref().ok_or_else(|| RpcError {
+            code: -32603,
+            message: "Peer registry not available".to_string(),
+        })?;
 
         // Extract IP (strip port if target contains one different from P2P default)
         let ip_only = to_addr.split(':').next().unwrap_or(to_addr);
@@ -8530,7 +8526,7 @@ impl RpcHandler {
             .await
             .map_err(|e| RpcError {
                 code: -32603,
-                message: format!("Failed to send to {}: {}", to_addr, e),
+                message: format!("Peer {} not connected: {}", to_addr, e),
             })?;
 
         Ok(json!({ "success": true, "to": to_addr }))
@@ -8597,6 +8593,22 @@ impl RpcHandler {
 
     async fn send_message(&self, params: &[Value]) -> Result<Value, RpcError> {
         let param = params.first().cloned().unwrap_or(serde_json::json!({}));
+
+        // Only Bronze/Silver/Gold masternodes may send messages (anti-spam)
+        let local_mn = self.registry.get_local_masternode().await;
+        match local_mn.as_ref().map(|i| &i.masternode.tier) {
+            Some(crate::types::MasternodeTier::Bronze)
+            | Some(crate::types::MasternodeTier::Silver)
+            | Some(crate::types::MasternodeTier::Gold) => {}
+            _ => {
+                return Err(RpcError {
+                    code: -32000,
+                    message: "sendmessage requires a Bronze, Silver, or Gold masternode"
+                        .to_string(),
+                });
+            }
+        }
+
         let wallet_key = self
             .consensus
             .get_wallet_signing_key()

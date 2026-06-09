@@ -678,22 +678,6 @@ impl App {
                 .collect();
         }
 
-        // Fetch TIME-MSG secure inbox (Silver/Gold relay nodes only; silently skipped otherwise)
-        if let Ok(msgs) = self
-            .rpc_call::<Vec<SecureMsg>>("getmessages", vec![serde_json::json!({"since": 0})])
-            .await
-        {
-            self.data.secure_messages = msgs;
-        }
-
-        // Fetch contacts count (available on all nodes with contacts book)
-        if let Ok(contacts) = self
-            .rpc_call::<Vec<serde_json::Value>>("listcontacts", vec![])
-            .await
-        {
-            self.data.contacts_count = contacts.len();
-        }
-
         // Collect local system resources — use persistent System for accurate CPU delta
         self.sysinfo.refresh_all();
         let cpu_pct = self.sysinfo.global_cpu_info().cpu_usage();
@@ -713,6 +697,24 @@ impl App {
 
         self.data.last_update = Utc::now();
         self.data.update_count += 1;
+    }
+
+    /// Fetch messages and contacts — called only when on the Messages tab.
+    /// Separated from update_data() because getmessages waits ~2s for P2P responses,
+    /// which would block the event loop on every auto-refresh cycle.
+    async fn update_messages(&mut self) {
+        if let Ok(msgs) = self
+            .rpc_call::<Vec<SecureMsg>>("getmessages", vec![serde_json::json!({"since": 0})])
+            .await
+        {
+            self.data.secure_messages = msgs;
+        }
+        if let Ok(contacts) = self
+            .rpc_call::<Vec<serde_json::Value>>("listcontacts", vec![])
+            .await
+        {
+            self.data.contacts_count = contacts.len();
+        }
     }
 
     async fn cast_vote(&self, proposal_id: &str, approve: bool) -> Result<String, String> {
@@ -3213,6 +3215,9 @@ async fn run_app<B: ratatui::backend::Backend>(
 ) -> Result<(), Box<dyn Error>> {
     let mut last_update = Instant::now();
     let update_interval = Duration::from_secs(2);
+    // Messages tab uses a separate slower interval — getmessages waits ~2s for P2P responses
+    let mut last_msg_update = Instant::now() - Duration::from_secs(10); // force fetch on first view
+    let msg_update_interval = Duration::from_secs(10);
 
     loop {
         terminal.draw(|f| ui(f, app))?;
@@ -3444,6 +3449,10 @@ async fn run_app<B: ratatui::backend::Backend>(
                             KeyCode::Char('r') => {
                                 app.update_data().await;
                                 last_update = Instant::now();
+                                if app.current_tab == 6 {
+                                    app.update_messages().await;
+                                    last_msg_update = Instant::now();
+                                }
                             }
                             // [m] → compose a TIME-MSG secure message (new primary feature)
                             KeyCode::Char('m') | KeyCode::Char('M') if app.current_tab == 6 => {
@@ -3713,6 +3722,13 @@ async fn run_app<B: ratatui::backend::Backend>(
         if last_update.elapsed() >= update_interval {
             app.update_data().await;
             last_update = Instant::now();
+        }
+
+        // Fetch messages only when on the Messages tab and every 10 seconds.
+        // getmessages waits ~2s for P2P responses, so it must not run on every 2s cycle.
+        if app.current_tab == 6 && last_msg_update.elapsed() >= msg_update_interval {
+            app.update_messages().await;
+            last_msg_update = Instant::now();
         }
 
         if app.should_quit {
