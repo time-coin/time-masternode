@@ -2780,7 +2780,7 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
         .min(secure_msgs.len().saturating_sub(1));
 
     if secure_msgs.is_empty() {
-        let empty = Paragraph::new("No encrypted messages in inbox.  Silver/Gold relay nodes receive messages automatically.")
+        let empty = Paragraph::new("No messages found.  Bronze/Silver/Gold nodes can send and receive.  Messages are stored on Silver/Gold relay nodes.  Press [r] to refresh.")
             .block(
                 Block::default()
                     .borders(Borders::ALL)
