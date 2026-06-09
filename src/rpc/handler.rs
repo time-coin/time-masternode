@@ -382,6 +382,7 @@ impl RpcHandler {
             "getrawenvelopes" => self.get_raw_envelopes(&params_array).await,
             "submitenvelope" => self.submit_envelope(&params_array).await,
             "lookuppubkey" => self.lookup_pubkey(&params_array).await,
+            "registerpubkey" => self.register_pubkey(&params_array).await,
             "publishpubkey" => self.publish_pubkey(&params_array).await,
             "getpubkey" => self.get_pubkey().await,
             "addcontact" => self.add_contact(&params_array).await,
@@ -9089,6 +9090,103 @@ impl RpcHandler {
                 message: format!("Pubkey not found for address {}", address),
             }),
         }
+    }
+
+    /// `registerpubkey` — thin-client wallet announces its own Ed25519 pubkey.
+    ///
+    /// Params: `[{"address": "TIME1...", "pubkey": "<64-hex-char Ed25519 pubkey>"}]`
+    ///
+    /// The node verifies that SHA-256(pubkey_bytes)[..20] matches the address hash
+    /// embedded in the address before storing it, so this endpoint cannot be used
+    /// to register a fake key for someone else's address.
+    ///
+    /// Returns: `{"stored": true, "address": "TIME1...", "broadcast_count": usize}`
+    async fn register_pubkey(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let param = params.first().cloned().unwrap_or(serde_json::json!({}));
+
+        let address = param
+            .get("address")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing 'address' parameter".to_string(),
+            })?;
+
+        let pubkey_hex = param
+            .get("pubkey")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing 'pubkey' parameter".to_string(),
+            })?;
+
+        let pubkey_bytes = hex::decode(pubkey_hex).map_err(|_| RpcError {
+            code: -32602,
+            message: "Invalid pubkey hex".to_string(),
+        })?;
+
+        if pubkey_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -32602,
+                message: "pubkey must be 32 bytes (64 hex chars)".to_string(),
+            });
+        }
+
+        let mut pk_arr = [0u8; 32];
+        pk_arr.copy_from_slice(&pubkey_bytes);
+
+        // Verify pubkey → address binding: the address must derive from this pubkey.
+        let derived = crate::address::Address::from_public_key(&pk_arr, self.network).to_string();
+        if derived != address {
+            return Err(RpcError {
+                code: -32602,
+                message: format!(
+                    "pubkey does not match address (derived {})",
+                    &derived[..derived.len().min(20)]
+                ),
+            });
+        }
+
+        let contacts = self
+            .contacts_book
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+
+        contacts
+            .upsert(
+                address,
+                crate::messaging::contacts::Contact {
+                    pubkey: pk_arr,
+                    label: None,
+                    added_at: chrono::Utc::now().timestamp(),
+                },
+            )
+            .map_err(|e| RpcError {
+                code: -32000,
+                message: format!("Failed to store pubkey: {e}"),
+            })?;
+
+        // Propagate to peers so other masternodes can answer lookuppubkey queries.
+        let broadcast_count = if let Some(peer_registry) = self.peer_registry.as_ref() {
+            use sha2::Digest;
+            let addr_hash: [u8; 32] = sha2::Sha256::digest(address.as_bytes()).into();
+            peer_registry
+                .broadcast(crate::network::message::NetworkMessage::MsgPubkeyResponse {
+                    address_hash: addr_hash,
+                    pubkey: Some(pk_arr),
+                })
+                .await;
+            peer_registry.get_connected_peers().await.len()
+        } else {
+            0
+        };
+
+        Ok(serde_json::json!({
+            "stored":          true,
+            "address":         address,
+            "pubkey":          pubkey_hex,
+            "broadcast_count": broadcast_count,
+        }))
     }
 
     /// `publishpubkey` — advertise this node's Ed25519 pubkey to the network so that

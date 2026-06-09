@@ -248,11 +248,19 @@ const PUBLIC_METHODS: &[&str] = &[
     "respondpaymentrequest",
     "cancelpaymentrequest",
     "markpaymentrequestviewed",
-    // Secure messaging — read-only methods
+    // Secure messaging — read-only and thin-client methods
+    // Thin-client envelope methods are self-authenticated by the sender's Ed25519 signature,
+    // so they are safe to expose without HTTP-level credentials.
     "getpubkey",
     "listcontacts",
     "getmessagestatus",
     "getmessages",
+    "lookuppubkey",
+    "registerpubkey",
+    "registeraddresspubkey",
+    "getrawenvelopes",
+    "submitenvelope",
+    "publishpubkey",
 ];
 
 /// Returns `true` if the given RPC method is in the public (read-only) whitelist
