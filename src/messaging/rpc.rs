@@ -73,7 +73,7 @@ pub async fn resolve_recipient_pubkey(
 
 /// Deterministically select up to `n` relay peers from the Silver/Gold set.
 /// Uses SHA-256(msg_id || peer_pubkey) for consistent ordering.
-fn select_relay_peers(
+pub fn select_relay_peers(
     candidates: &[(String, [u8; 32])], // (ip_or_addr, pubkey)
     msg_id: &[u8; 32],
     n: usize,

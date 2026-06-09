@@ -379,6 +379,10 @@ impl RpcHandler {
             "sendmessage" => self.send_message(&params_array).await,
             "getmessages" => self.get_messages(&params_array).await,
             "getmessagestatus" => self.get_message_status(&params_array).await,
+            "getrawenvelopes" => self.get_raw_envelopes(&params_array).await,
+            "submitenvelope" => self.submit_envelope(&params_array).await,
+            "lookuppubkey" => self.lookup_pubkey(&params_array).await,
+            "publishpubkey" => self.publish_pubkey(&params_array).await,
             "getpubkey" => self.get_pubkey().await,
             "addcontact" => self.add_contact(&params_array).await,
             "listcontacts" => self.list_contacts().await,
@@ -8808,6 +8812,337 @@ impl RpcHandler {
             message: e.to_string(),
         })?;
         Ok(serde_json::json!({ "removed": true }))
+    }
+
+    /// `getrawenvelopes` — return CBOR-serialised envelopes for a recipient address without
+    /// decrypting. The wallet holds the private key and decrypts locally.
+    /// Params: `[{"address": "TIME1..."}]`
+    /// Returns: `[{"msg_id": "hex", "envelope": "hex", "created_at": i64, "expires_at": i64}]`
+    async fn get_raw_envelopes(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let param = params.first().cloned().unwrap_or(serde_json::json!({}));
+
+        let address = param
+            .get("address")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing 'address' parameter".to_string(),
+            })?;
+
+        let recipient_addr_hash: [u8; 32] = {
+            use sha2::Digest;
+            sha2::Sha256::digest(address.as_bytes()).into()
+        };
+
+        let peer_registry = self.peer_registry.as_ref().ok_or_else(|| RpcError {
+            code: -32000,
+            message: "P2P network not initialized".to_string(),
+        })?;
+
+        // Collect from local relay store (Silver/Gold nodes)
+        let mut envelope_bytes: Vec<Vec<u8>> = if let Some(rs) = self.relay_store.as_ref() {
+            rs.fetch_pending(&recipient_addr_hash)
+                .into_iter()
+                .filter_map(|e| e.serialise().ok())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Query connected peers for any envelopes they hold
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        peer_registry
+            .pending_msg_envelopes
+            .insert(recipient_addr_hash, tx);
+        peer_registry
+            .broadcast(crate::network::message::NetworkMessage::MsgFetchPending {
+                recipient_addr_hash,
+                since: param.get("since").and_then(|v| v.as_i64()).unwrap_or(0),
+            })
+            .await;
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Some(bytes)) => envelope_bytes.push(bytes),
+                _ => break,
+            }
+        }
+        peer_registry
+            .pending_msg_envelopes
+            .remove(&recipient_addr_hash);
+
+        // Deduplicate and return raw bytes — no decryption
+        let mut seen = std::collections::HashSet::new();
+        let result: Vec<Value> = envelope_bytes
+            .into_iter()
+            .filter_map(|bytes| {
+                crate::messaging::types::TimeEnvelope::deserialise(&bytes)
+                    .ok()
+                    .map(|e| (e, bytes))
+            })
+            .filter(|(env, _)| seen.insert(env.msg_id))
+            .map(|(env, bytes)| {
+                serde_json::json!({
+                    "msg_id":     hex::encode(env.msg_id),
+                    "envelope":   hex::encode(&bytes),
+                    "created_at": env.created_at,
+                    "expires_at": env.expires_at(),
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!(result))
+    }
+
+    /// `submitenvelope` — accept a pre-encrypted CBOR envelope from the wallet, store it
+    /// locally (if relay node), and forward to relay peers. This path does not require a
+    /// tier-checked wallet key on the server — the wallet encrypts locally.
+    /// Params: `[{"envelope": "hex"}]`
+    /// Returns: `{"msg_id": "hex", "stored": bool, "relay_targets": usize}`
+    async fn submit_envelope(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let param = params.first().cloned().unwrap_or(serde_json::json!({}));
+
+        let envelope_hex = param
+            .get("envelope")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing 'envelope' parameter (hex-encoded CBOR)".to_string(),
+            })?;
+
+        let envelope_bytes = hex::decode(envelope_hex).map_err(|_| RpcError {
+            code: -32602,
+            message: "Invalid hex in 'envelope'".to_string(),
+        })?;
+
+        if envelope_bytes.len() > crate::messaging::types::MAX_ENVELOPE_BYTES {
+            return Err(RpcError {
+                code: -32602,
+                message: format!(
+                    "Envelope too large: {} bytes (max {})",
+                    envelope_bytes.len(),
+                    crate::messaging::types::MAX_ENVELOPE_BYTES
+                ),
+            });
+        }
+
+        let envelope = crate::messaging::types::TimeEnvelope::deserialise(&envelope_bytes)
+            .map_err(|e| RpcError {
+                code: -32602,
+                message: format!("Invalid envelope: {}", e),
+            })?;
+
+        // Reject already-expired envelopes
+        if envelope.is_expired() {
+            return Err(RpcError {
+                code: -32602,
+                message: "Envelope is already expired".to_string(),
+            });
+        }
+
+        let msg_id_hex = hex::encode(envelope.msg_id);
+
+        // Store locally if this is a relay node
+        let stored = if let Some(rs) = self.relay_store.as_ref() {
+            rs.store_envelope(&envelope).is_ok()
+        } else {
+            false
+        };
+
+        // Forward to Silver/Gold relay peers
+        let peer_registry = self.peer_registry.as_ref().ok_or_else(|| RpcError {
+            code: -32000,
+            message: "P2P network not initialized".to_string(),
+        })?;
+
+        let silver_gold: Vec<(String, [u8; 32])> = self
+            .registry
+            .list_all()
+            .await
+            .into_iter()
+            .filter(|info| {
+                matches!(
+                    info.masternode.tier,
+                    crate::types::MasternodeTier::Silver | crate::types::MasternodeTier::Gold
+                )
+            })
+            .map(|info| {
+                let pk = info.masternode.public_key.to_bytes();
+                (info.masternode.address.clone(), pk)
+            })
+            .collect();
+
+        let relay_targets = crate::messaging::rpc::select_relay_peers(
+            &silver_gold,
+            &envelope.msg_id,
+            crate::messaging::types::RELAY_REPLICATION_FACTOR,
+        );
+
+        for target in &relay_targets {
+            let _ = peer_registry
+                .send_to_peer(
+                    target,
+                    crate::network::message::NetworkMessage::MsgSubmit {
+                        envelope: envelope_bytes.clone(),
+                    },
+                )
+                .await;
+        }
+
+        Ok(serde_json::json!({
+            "msg_id":       msg_id_hex,
+            "stored":       stored,
+            "relay_targets": relay_targets.len(),
+        }))
+    }
+
+    /// `lookuppubkey` — resolve an Ed25519 pubkey for a TIME address using the same
+    /// 3-source chain as sendmessage: local contacts → UTXO cache → P2P query.
+    /// Params: `[{"address": "TIME1..."}]`
+    /// Returns: `{"address": "TIME1...", "pubkey": "hex", "source": "contacts|utxo|p2p"}`
+    async fn lookup_pubkey(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let param = params.first().cloned().unwrap_or(serde_json::json!({}));
+
+        let address = param
+            .get("address")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing 'address' parameter".to_string(),
+            })?;
+
+        let contacts = self
+            .contacts_book
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+
+        // 1. Local contacts book
+        if let Some(contact) = contacts.get(address) {
+            return Ok(serde_json::json!({
+                "address": address,
+                "pubkey":  hex::encode(contact.pubkey),
+                "source":  "contacts",
+            }));
+        }
+
+        // 2. UTXO pubkey cache
+        if let Some(pk) = self.utxo_manager.find_pubkey_for_address(address) {
+            let _ = contacts.upsert(
+                address,
+                crate::messaging::contacts::Contact {
+                    pubkey: pk,
+                    label: None,
+                    added_at: chrono::Utc::now().timestamp(),
+                },
+            );
+            return Ok(serde_json::json!({
+                "address": address,
+                "pubkey":  hex::encode(pk),
+                "source":  "utxo",
+            }));
+        }
+
+        // 3. P2P MsgPubkeyQuery
+        let peer_registry = self.peer_registry.as_ref().ok_or_else(|| RpcError {
+            code: -32000,
+            message: "P2P network not initialized".to_string(),
+        })?;
+
+        let addr_hash: [u8; 32] = {
+            use sha2::Digest;
+            sha2::Sha256::digest(address.as_bytes()).into()
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<[u8; 32]>();
+        peer_registry.pending_pubkey_queries.insert(addr_hash, tx);
+        peer_registry
+            .broadcast(crate::network::message::NetworkMessage::MsgPubkeyQuery {
+                address_hash: addr_hash,
+            })
+            .await;
+
+        let result = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv()).await;
+        peer_registry.pending_pubkey_queries.remove(&addr_hash);
+
+        match result {
+            Ok(Some(pk)) => {
+                let _ = contacts.upsert(
+                    address,
+                    crate::messaging::contacts::Contact {
+                        pubkey: pk,
+                        label: None,
+                        added_at: chrono::Utc::now().timestamp(),
+                    },
+                );
+                Ok(serde_json::json!({
+                    "address": address,
+                    "pubkey":  hex::encode(pk),
+                    "source":  "p2p",
+                }))
+            }
+            _ => Err(RpcError {
+                code: -32000,
+                message: format!("Pubkey not found for address {}", address),
+            }),
+        }
+    }
+
+    /// `publishpubkey` — advertise this node's Ed25519 pubkey to the network so that
+    /// other nodes can send encrypted messages without requiring an on-chain spend first.
+    /// Params: none (uses the node's own wallet key)
+    /// Returns: `{"address": "TIME1...", "pubkey": "hex", "broadcast_count": usize}`
+    async fn publish_pubkey(&self, _params: &[Value]) -> Result<Value, RpcError> {
+        let wallet_key = self
+            .consensus
+            .get_wallet_signing_key()
+            .ok_or_else(|| RpcError {
+                code: -32000,
+                message: "Wallet key not available".to_string(),
+            })?;
+
+        let pubkey_bytes = wallet_key.verifying_key().to_bytes();
+        let address =
+            crate::address::Address::from_public_key(&pubkey_bytes, self.network).to_string();
+        let addr_hash: [u8; 32] = {
+            use sha2::Digest;
+            sha2::Sha256::digest(address.as_bytes()).into()
+        };
+
+        // Store in own contacts book so self-lookup works immediately
+        if let Some(contacts) = self.contacts_book.as_ref() {
+            let _ = contacts.upsert(
+                &address,
+                crate::messaging::contacts::Contact {
+                    pubkey: pubkey_bytes,
+                    label: Some("self".to_string()),
+                    added_at: chrono::Utc::now().timestamp(),
+                },
+            );
+        }
+
+        let peer_registry = self.peer_registry.as_ref().ok_or_else(|| RpcError {
+            code: -32000,
+            message: "P2P network not initialized".to_string(),
+        })?;
+
+        peer_registry
+            .broadcast(crate::network::message::NetworkMessage::MsgPubkeyResponse {
+                address_hash: addr_hash,
+                pubkey: Some(pubkey_bytes),
+            })
+            .await;
+
+        let broadcast_count = peer_registry.get_connected_peers().await.len();
+
+        Ok(serde_json::json!({
+            "address":         address,
+            "pubkey":          hex::encode(pubkey_bytes),
+            "broadcast_count": broadcast_count,
+        }))
     }
 }
 
