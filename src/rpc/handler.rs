@@ -3603,7 +3603,32 @@ impl RpcHandler {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&pubkey_bytes);
 
+        // In-memory cache for fast UTXO-path lookups.
         self.consensus.utxo_manager.register_pubkey(address, arr);
+
+        // Persist to sled so pubkeys survive masternode restarts.
+        if let Some(contacts) = &self.contacts_book {
+            let _ = contacts.upsert(
+                address,
+                crate::messaging::contacts::Contact {
+                    pubkey: arr,
+                    label: None,
+                    added_at: chrono::Utc::now().timestamp(),
+                },
+            );
+        }
+
+        // Broadcast to peer masternodes so the whole network can answer lookuppubkey.
+        if let Some(peer_registry) = self.peer_registry.as_ref() {
+            use sha2::Digest;
+            let addr_hash: [u8; 32] = sha2::Sha256::digest(address.as_bytes()).into();
+            peer_registry
+                .broadcast(crate::network::message::NetworkMessage::MsgPubkeyResponse {
+                    address_hash: addr_hash,
+                    pubkey: Some(arr),
+                })
+                .await;
+        }
 
         tracing::debug!("📬 Registered pubkey for address {}", address);
 
