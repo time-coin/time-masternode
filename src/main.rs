@@ -1253,21 +1253,15 @@ async fn main() {
         Err(e) => tracing::warn!("🏛️  Governance init failed (non-fatal): {e}"),
     }
 
-    // ── Messaging relay store (Silver/Gold nodes only) ────────────────────────
-    let is_relay_eligible = masternode_info
-        .as_ref()
-        .map(|mn| {
-            matches!(
-                mn.tier,
-                types::MasternodeTier::Silver | types::MasternodeTier::Gold
-            )
-        })
-        .unwrap_or(false);
-
-    let relay_store: Option<Arc<messaging::relay::RelayStore>> = if is_relay_eligible {
+    // ── Messaging relay store (all node tiers) ───────────────────────────────
+    let relay_store: Option<Arc<messaging::relay::RelayStore>> = {
+        let tier_label = masternode_info
+            .as_ref()
+            .map(|mn| format!("{:?}", mn.tier))
+            .unwrap_or_else(|| "Unknown".to_string());
         match messaging::relay::RelayStore::open(&db_dir) {
             Ok(store) => {
-                tracing::info!("📨 Relay store initialized (Silver/Gold node)");
+                tracing::info!("📨 Relay store initialized ({} node)", tier_label);
                 Some(Arc::new(store))
             }
             Err(e) => {
@@ -1275,9 +1269,6 @@ async fn main() {
                 None
             }
         }
-    } else {
-        tracing::debug!("📨 Not relay-eligible — relay store skipped");
-        None
     };
 
     // Contacts book (all nodes — needed to resolve recipient pubkeys for sendmessage).
