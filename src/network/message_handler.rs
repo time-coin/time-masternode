@@ -334,6 +334,8 @@ pub struct MessageContext {
     pub relay_store: Option<Arc<crate::messaging::relay::RelayStore>>,
     // Signing key used to sign relay delivery events and storage acks.
     pub relay_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
+    // Contacts book — persists pubkeys across restarts and acts as fallback for pubkey queries.
+    pub contacts_book: Option<Arc<crate::messaging::contacts::ContactsBook>>,
 }
 
 impl MessageContext {
@@ -365,6 +367,7 @@ impl MessageContext {
             operator_messages: None,
             relay_store: None,
             relay_signing_key: None,
+            contacts_book: None,
         }
     }
 
@@ -400,6 +403,7 @@ impl MessageContext {
             operator_messages: None,
             relay_store: None,
             relay_signing_key: None,
+            contacts_book: None,
         }
     }
 
@@ -449,6 +453,7 @@ impl MessageContext {
             operator_messages: Some(operator_messages),
             relay_store: None,
             relay_signing_key: None,
+            contacts_book: None,
         }
     }
 
@@ -460,6 +465,15 @@ impl MessageContext {
     ) -> Self {
         self.relay_store = Some(relay_store);
         self.relay_signing_key = Some(signing_key);
+        self
+    }
+
+    /// Set the contacts book for persistent pubkey lookups across restarts.
+    pub fn with_contacts_book(
+        mut self,
+        contacts_book: Arc<crate::messaging::contacts::ContactsBook>,
+    ) -> Self {
+        self.contacts_book = Some(contacts_book);
         self
     }
 
@@ -1732,7 +1746,12 @@ impl MessageHandler {
 
             NetworkMessage::MsgPubkeyQuery { address_hash } => {
                 if let Some(ref utxo_mgr) = context.utxo_manager {
-                    crate::messaging::handlers::handle_pubkey_query(address_hash, utxo_mgr).await
+                    crate::messaging::handlers::handle_pubkey_query(
+                        address_hash,
+                        utxo_mgr,
+                        context.contacts_book.as_ref(),
+                    )
+                    .await
                 } else {
                     Ok(Some(NetworkMessage::MsgPubkeyResponse {
                         address_hash: *address_hash,
@@ -1784,6 +1803,7 @@ impl MessageHandler {
                 address_hash,
                 *pubkey,
                 &context.peer_registry,
+                context.contacts_book.as_ref(),
             ),
 
             NetworkMessage::MsgExpiryNotice { notice } => {

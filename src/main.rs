@@ -5729,6 +5729,9 @@ async fn main() {
                 server.set_relay_store(rs.clone(), Arc::new(relay_key));
             }
 
+            // Wire contacts book so inbound P2P connections can persist pubkeys
+            server.set_contacts_book(contacts_book.clone());
+
             // Enable separate attack log — one line per AI-detected attack event
             {
                 let attack_log = Arc::new(crate::network::attack_log::AttackLog::new(
@@ -6097,6 +6100,7 @@ async fn main() {
                     .unwrap_or_else(|| wallet.signing_key().clone());
                 network_client.set_relay_store(rs.clone(), Arc::new(relay_key));
             }
+            network_client.set_contacts_book(contacts_book.clone());
             network_client.set_discovered_peer_ips(discovered_peer_ips.clone());
             network_client.start().await;
 

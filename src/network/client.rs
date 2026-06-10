@@ -55,6 +55,7 @@ pub struct NetworkClient {
     discovered_peer_ips: Vec<String>,
     relay_store: Option<Arc<crate::messaging::relay::RelayStore>>,
     relay_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
+    contacts_book: Option<Arc<crate::messaging::contacts::ContactsBook>>,
 }
 
 impl NetworkClient {
@@ -107,6 +108,7 @@ impl NetworkClient {
             discovered_peer_ips: Vec::new(),
             relay_store: None,
             relay_signing_key: None,
+            contacts_book: None,
         }
     }
 
@@ -134,6 +136,14 @@ impl NetworkClient {
     ) {
         self.relay_store = Some(relay_store);
         self.relay_signing_key = Some(signing_key);
+    }
+
+    /// Wire the contacts book so outbound connections can persist and look up pubkeys.
+    pub fn set_contacts_book(
+        &mut self,
+        contacts_book: Arc<crate::messaging::contacts::ContactsBook>,
+    ) {
+        self.contacts_book = Some(contacts_book);
     }
 
     /// Seed the client with trusted discovery peers fetched at startup.
@@ -168,6 +178,7 @@ impl NetworkClient {
             attack_detector: self.attack_detector.clone(),
             relay_store: self.relay_store.clone(),
             relay_signing_key: self.relay_signing_key.clone(),
+            contacts_book: self.contacts_book.clone(),
         };
 
         tokio::spawn(async move {
@@ -855,6 +866,7 @@ struct ConnectionResources {
     attack_detector: Option<Arc<crate::ai::attack_detector::AttackDetector>>,
     relay_store: Option<Arc<crate::messaging::relay::RelayStore>>,
     relay_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
+    contacts_book: Option<Arc<crate::messaging::contacts::ContactsBook>>,
 }
 
 impl ConnectionResources {
@@ -907,6 +919,7 @@ impl ConnectionResources {
                 ai_system: None,
                 relay_store: res.relay_store.clone(),
                 relay_signing_key: res.relay_signing_key.clone(),
+                contacts_book: res.contacts_book.clone(),
             };
 
             let connect_duration: Option<std::time::Duration> =

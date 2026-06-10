@@ -279,6 +279,8 @@ pub struct MessageLoopConfig {
     pub relay_store: Option<Arc<crate::messaging::relay::RelayStore>>,
     /// Optional: Signing key for relay operations (storage acks, delivery events)
     pub relay_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
+    /// Optional: Contacts book for persistent pubkey lookups across restarts
+    pub contacts_book: Option<Arc<crate::messaging::contacts::ContactsBook>>,
 }
 
 impl MessageLoopConfig {
@@ -296,6 +298,7 @@ impl MessageLoopConfig {
             rate_limiter: None,
             relay_store: None,
             relay_signing_key: None,
+            contacts_book: None,
         }
     }
 
@@ -307,6 +310,15 @@ impl MessageLoopConfig {
     ) -> Self {
         self.relay_store = Some(relay_store);
         self.relay_signing_key = Some(signing_key);
+        self
+    }
+
+    /// Add contacts book for persistent pubkey lookups (builder pattern)
+    pub fn with_contacts_book(
+        mut self,
+        contacts_book: Arc<crate::messaging::contacts::ContactsBook>,
+    ) -> Self {
+        self.contacts_book = Some(contacts_book);
         self
     }
 
@@ -957,6 +969,11 @@ impl PeerConnection {
                 (&config.relay_store, &config.relay_signing_key)
             {
                 ctx = ctx.with_relay_store(Arc::clone(relay_store), Arc::clone(relay_key));
+            }
+
+            // Add contacts book if available
+            if let Some(ref cb) = config.contacts_book {
+                ctx = ctx.with_contacts_book(Arc::clone(cb));
             }
 
             ctx

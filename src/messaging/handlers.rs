@@ -149,12 +149,18 @@ pub async fn handle_msg_ack_query(
     }))
 }
 
-/// Handle MsgPubkeyQuery — look up address pubkey from utxo_manager cache.
+/// Handle MsgPubkeyQuery — look up address pubkey from utxo_manager cache,
+/// with contacts_book as a fallback for pubkeys registered via P2P on other nodes.
 pub async fn handle_pubkey_query(
     address_hash: &[u8; 32],
     utxo_manager: &Arc<crate::utxo_manager::UTXOStateManager>,
+    contacts_book: Option<&Arc<crate::messaging::contacts::ContactsBook>>,
 ) -> Result<Option<NetworkMessage>, String> {
-    let pubkey = utxo_manager.get_pubkey_by_address_hash(address_hash);
+    let pubkey = utxo_manager
+        .get_pubkey_by_address_hash(address_hash)
+        .or_else(|| {
+            contacts_book.and_then(|c| c.get_pubkey_by_address_hash(address_hash))
+        });
     Ok(Some(NetworkMessage::MsgPubkeyResponse {
         address_hash: *address_hash,
         pubkey,
@@ -193,15 +199,60 @@ pub fn handle_msg_envelopes(
     Ok(None)
 }
 
-/// Handle MsgPubkeyResponse — forward to the pending pubkey query map in peer_registry.
+/// Handle MsgPubkeyResponse — forward to the pending pubkey query map in peer_registry,
+/// and persist the pubkey to contacts_book so it survives restarts.
 pub fn handle_pubkey_response(
     address_hash: &[u8; 32],
     pubkey: Option<[u8; 32]>,
     peer_registry: &Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+    contacts_book: Option<&Arc<crate::messaging::contacts::ContactsBook>>,
 ) -> Result<Option<NetworkMessage>, String> {
     if let Some(pk) = pubkey {
         if let Some(tx) = peer_registry.pending_pubkey_queries.get(address_hash) {
             let _ = tx.send(pk);
+        }
+
+        // Persist the pubkey to contacts_book so it survives restarts and is
+        // available to future queries on this node without another P2P round-trip.
+        if let Some(book) = contacts_book {
+            use sha2::Digest;
+            // Derive address from pubkey (try both mainnet and testnet) and verify
+            // that SHA-256(derived_addr) matches the address_hash we received.
+            let addr_opt = [
+                crate::network_type::NetworkType::Mainnet,
+                crate::network_type::NetworkType::Testnet,
+            ]
+            .iter()
+            .find_map(|&net| {
+                let addr =
+                    crate::address::Address::from_public_key(&pk, net).as_string();
+                let h: [u8; 32] = sha2::Sha256::digest(addr.as_bytes()).into();
+                if &h == address_hash {
+                    Some(addr)
+                } else {
+                    None
+                }
+            });
+
+            if let Some(addr) = addr_opt {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let contact = crate::messaging::contacts::Contact {
+                    pubkey: pk,
+                    label: None,
+                    added_at: now,
+                };
+                if let Err(e) = book.upsert(&addr, contact) {
+                    tracing::warn!("📨 handle_pubkey_response: failed to persist pubkey: {}", e);
+                } else {
+                    tracing::debug!(
+                        "📨 Persisted pubkey for {} to contacts_book",
+                        addr
+                    );
+                }
+            }
         }
     }
     Ok(None)

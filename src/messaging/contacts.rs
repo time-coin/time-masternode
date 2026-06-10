@@ -63,4 +63,22 @@ impl ContactsBook {
             .map_err(|e| MessageError::Storage(e.to_string()))?;
         Ok(())
     }
+
+    /// Look up a pubkey by SHA-256(address string) hash.
+    /// Performs an O(n) scan of all contacts; used as a fallback when the
+    /// utxo_manager does not have the address registered locally.
+    pub fn get_pubkey_by_address_hash(&self, hash: &[u8; 32]) -> Option<[u8; 32]> {
+        use sha2::Digest;
+        self.tree.iter().find_map(|r| {
+            let (key, val) = r.ok()?;
+            let addr = std::str::from_utf8(&key).ok()?;
+            let h: [u8; 32] = sha2::Sha256::digest(addr.as_bytes()).into();
+            if &h == hash {
+                let contact: Contact = serde_cbor::from_slice(&val).ok()?;
+                Some(contact.pubkey)
+            } else {
+                None
+            }
+        })
+    }
 }

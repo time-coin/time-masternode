@@ -76,6 +76,7 @@ pub struct NetworkServer {
     pub attack_log: Option<Arc<AttackLog>>, // Separate file log for AI-detected attacks
     pub relay_store: Option<Arc<crate::messaging::relay::RelayStore>>,
     pub relay_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
+    pub contacts_book: Option<Arc<crate::messaging::contacts::ContactsBook>>,
 }
 
 #[allow(dead_code)] // Used by binary, not visible to library check
@@ -198,6 +199,7 @@ impl NetworkServer {
             attack_log: None,
             relay_store: None,
             relay_signing_key: None,
+            contacts_book: None,
         })
     }
 
@@ -215,6 +217,15 @@ impl NetworkServer {
     ) {
         self.relay_store = Some(relay_store);
         self.relay_signing_key = Some(signing_key);
+    }
+
+    /// Wire the contacts book so every inbound/outbound connection can persist
+    /// and look up pubkeys across restarts.
+    pub fn set_contacts_book(
+        &mut self,
+        contacts_book: Arc<crate::messaging::contacts::ContactsBook>,
+    ) {
+        self.contacts_book = Some(contacts_book);
     }
 
     /// Set the separate attack log file (writes a line per AI-detected attack).
@@ -687,6 +698,7 @@ impl NetworkServer {
             let ai_system = self.ai_system.clone();
             let relay_store = self.relay_store.clone();
             let relay_signing_key = self.relay_signing_key.clone();
+            let contacts_book = self.contacts_book.clone();
 
             tokio::spawn(async move {
                 let _ = handle_peer(
@@ -718,6 +730,7 @@ impl NetworkServer {
                     ai_system,
                     relay_store,
                     relay_signing_key,
+                    contacts_book,
                 )
                 .await;
             });
@@ -787,6 +800,7 @@ async fn handle_peer(
     ai_system: Option<Arc<crate::ai::AISystem>>,
     relay_store: Option<Arc<crate::messaging::relay::RelayStore>>,
     relay_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
+    contacts_book: Option<Arc<crate::messaging::contacts::ContactsBook>>,
 ) -> Result<(), std::io::Error> {
     let driver = crate::network::connection_driver::ConnectionDriver {
         connection_manager,
@@ -799,6 +813,7 @@ async fn handle_peer(
         ai_system,
         relay_store: relay_store.clone(),
         relay_signing_key: relay_signing_key.clone(),
+        contacts_book: contacts_book.clone(),
     };
     let resources = crate::network::connection_driver::InboundResources {
         consensus,
@@ -815,6 +830,7 @@ async fn handle_peer(
         subs,
         relay_store,
         relay_signing_key,
+        contacts_book,
     };
     driver
         .drive_inbound(stream, peer.addr, is_whitelisted, notifier, resources)
