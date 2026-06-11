@@ -388,6 +388,9 @@ impl RpcHandler {
             "addcontact" => self.add_contact(&params_array).await,
             "listcontacts" => self.list_contacts().await,
             "removecontact" => self.remove_contact(&params_array).await,
+            "blockmessagesender" => self.block_message_sender(&params_array).await,
+            "unblockmessagesender" => self.unblock_message_sender(&params_array).await,
+            "listblockedsenders" => self.list_blocked_senders().await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -8170,7 +8173,11 @@ impl RpcHandler {
         };
         let is_valid = address.starts_with(expected_prefix) && address.len() > 10;
 
-        let is_mine = self.wallet_address().as_deref() == Some(address);
+        let is_mine = self.wallet_address().as_deref() == Some(address)
+            || self
+                .consensus
+                .get_signing_key_for_address(address)
+                .is_some();
 
         let pubkey_hex = self
             .utxo_manager
@@ -8838,6 +8845,90 @@ impl RpcHandler {
             message: e.to_string(),
         })?;
         Ok(serde_json::json!({ "removed": true }))
+    }
+
+    /// `blockmessagesender` — add a sender to the relay block list.
+    /// Params: `[{"address": "TIME1..."}]`
+    async fn block_message_sender(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let param = params.first().cloned().unwrap_or(serde_json::json!({}));
+        let address = param
+            .get("address")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing 'address' parameter".to_string(),
+            })?;
+        let relay_store = self
+            .relay_store
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+        let contacts = self
+            .contacts_book
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+        let utxo_mgr = &self.utxo_manager;
+        crate::messaging::rpc::rpc_block_message_sender(
+            address,
+            relay_store,
+            contacts,
+            utxo_mgr,
+            self.network,
+        )
+        .map_err(|e| RpcError {
+            code: -32000,
+            message: e,
+        })
+    }
+
+    /// `unblockmessagesender` — remove a sender from the relay block list.
+    /// Params: `[{"address": "TIME1..."}]`
+    async fn unblock_message_sender(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let param = params.first().cloned().unwrap_or(serde_json::json!({}));
+        let address = param
+            .get("address")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing 'address' parameter".to_string(),
+            })?;
+        let relay_store = self
+            .relay_store
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+        let contacts = self
+            .contacts_book
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+        let utxo_mgr = &self.utxo_manager;
+        crate::messaging::rpc::rpc_unblock_message_sender(
+            address,
+            relay_store,
+            contacts,
+            utxo_mgr,
+            self.network,
+        )
+        .map_err(|e| RpcError {
+            code: -32000,
+            message: e,
+        })
+    }
+
+    /// `listblockedsenders` — return all blocked sender addresses/pubkeys.
+    /// Params: `[]`
+    async fn list_blocked_senders(&self) -> Result<Value, RpcError> {
+        let relay_store = self
+            .relay_store
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+        let contacts = self
+            .contacts_book
+            .as_ref()
+            .ok_or_else(Self::messaging_unavailable)?;
+        crate::messaging::rpc::rpc_list_blocked_senders(relay_store, contacts, self.network)
+            .map_err(|e| RpcError {
+                code: -32000,
+                message: e,
+            })
     }
 
     /// `getrawenvelopes` — return CBOR-serialised envelopes for a recipient address without
