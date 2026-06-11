@@ -41,6 +41,7 @@ Commands:
     getwalletinfo          Get wallet information
     getlocalwallet         Get local wallet address (plain string)
     getnewaddress          Generate a new deterministic wallet address (each call returns a fresh address)
+    listaddresses          List all wallet addresses (master + derived) with balances
     getwalletaddress       Get local wallet address with reward forwarding info
     getaddressinfo         Get info about an address (ismine, pubkey, etc.)
     getaddresspubkey       Get the public key for an address
@@ -360,6 +361,14 @@ enum Commands {
     /// Get this node's local wallet address (same as getwalletaddress)
     #[command(next_help_heading = "Wallet")]
     GetNewAddress,
+
+    /// List all wallet addresses (master key + all derived) with balances
+    #[command(next_help_heading = "Wallet")]
+    ListAddresses {
+        /// Only show addresses with a non-zero balance
+        #[arg(short = 'n', long)]
+        nonzero: bool,
+    },
 
     /// Get the wallet's local signing-key address (the address funds are actually held at)
     #[command(next_help_heading = "Wallet")]
@@ -1660,6 +1669,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             maxconf,
         } => ("listunspent", json!([minconf, maxconf, null, limit])),
         Commands::GetNewAddress => ("getnewaddress", json!([])),
+        Commands::ListAddresses { nonzero } => ("listaddresses", json!([nonzero])),
         Commands::GetWalletAddress => ("getwalletaddress", json!([])),
         Commands::GetWalletInfo => ("getwalletinfo", json!([])),
         Commands::GetLocalWallet => ("getlocalwallet", json!([])),
@@ -2090,6 +2100,38 @@ fn print_human_readable(
         }
         Commands::GetNewAddress => {
             println!("Address: {}", result.as_str().unwrap_or("N/A"));
+        }
+        Commands::ListAddresses { .. } => {
+            if let Some(entries) = result.as_array() {
+                if entries.is_empty() {
+                    println!("No addresses found.");
+                } else {
+                    println!(
+                        "{:<8}  {:<48}  {:>16}  {:>6}",
+                        "Index", "Address", "Balance (TIME)", "UTXOs"
+                    );
+                    println!("{}", "-".repeat(84));
+                    for e in entries {
+                        let index = e
+                            .get("index")
+                            .and_then(|v| {
+                                if v.is_string() {
+                                    v.as_str().map(|s| s.to_string())
+                                } else {
+                                    v.as_u64().map(|n| n.to_string())
+                                }
+                            })
+                            .unwrap_or_default();
+                        let addr = e.get("address").and_then(|v| v.as_str()).unwrap_or("");
+                        let balance = e.get("balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let utxos = e.get("utxos").and_then(|v| v.as_u64()).unwrap_or(0);
+                        println!(
+                            "{:<8}  {:<48}  {:>16.8}  {:>6}",
+                            index, addr, balance, utxos
+                        );
+                    }
+                }
+            }
         }
         Commands::GetWalletAddress => {
             println!(

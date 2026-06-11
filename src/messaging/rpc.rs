@@ -98,6 +98,7 @@ pub fn select_relay_peers(
 }
 
 /// `sendmessage` RPC implementation.
+#[allow(clippy::too_many_arguments)]
 pub async fn rpc_send_message(
     params: &Value,
     wallet_key: &SigningKey,
@@ -222,8 +223,7 @@ pub async fn rpc_send_message(
     }
 
     // Wait for 2-of-3 acks within 10 seconds
-    let required = (relay_targets.len() + 1) / 2 + if relay_targets.len() == 1 { 0 } else { 0 };
-    let required = required.max(1).min(2);
+    let required = relay_targets.len().div_ceil(2).clamp(1, 2);
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
     let mut ack_count = 0usize;
 
@@ -240,10 +240,8 @@ pub async fn rpc_send_message(
 
     peer_registry.pending_relay_acks.remove(&msg_id);
 
-    let status = if ack_count >= required {
+    let status = if ack_count > 0 {
         MessageStatus::Pending
-    } else if ack_count > 0 {
-        MessageStatus::Pending // partial — still attempt delivery
     } else {
         MessageStatus::Failed
     };
@@ -351,7 +349,7 @@ pub async fn rpc_get_messages(
                 }
 
                 let msg_json = json!({
-                    "msg_id": hex::encode(&envelope.msg_id),
+                    "msg_id": hex::encode(envelope.msg_id),
                     "from": sender_addr,
                     "subject": String::from_utf8_lossy(&msg.subject),
                     "body": String::from_utf8_lossy(&msg.body),
@@ -364,7 +362,7 @@ pub async fn rpc_get_messages(
             Err(e) => {
                 tracing::debug!(
                     "📨 Could not decrypt envelope {}: {}",
-                    hex::encode(&envelope.msg_id),
+                    hex::encode(envelope.msg_id),
                     e
                 );
             }

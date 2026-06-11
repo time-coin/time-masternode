@@ -2222,6 +2222,17 @@ impl ConsensusEngine {
         }
     }
 
+    /// Return all derived addresses sorted by derivation index.
+    pub fn list_derived_addresses(&self) -> Vec<(u32, String)> {
+        let mut entries: Vec<(u32, String)> = self
+            .derived_address_map
+            .iter()
+            .map(|e| (*e.value(), e.key().clone()))
+            .collect();
+        entries.sort_by_key(|(idx, _)| *idx);
+        entries
+    }
+
     /// Return the signing key that controls the given address.
     /// Checks derived addresses first (O(1)), then falls back to the master wallet key.
     pub fn get_signing_key_for_address(&self, address: &str) -> Option<ed25519_dalek::SigningKey> {

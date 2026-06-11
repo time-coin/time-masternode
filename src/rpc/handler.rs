@@ -282,6 +282,7 @@ impl RpcHandler {
             "getbalance" => self.get_balance(&params_array).await,
             "listunspent" => self.list_unspent(&params_array).await,
             "getnewaddress" => self.get_new_address(&params_array).await,
+            "listaddresses" => self.list_addresses(&params_array).await,
             "getwalletaddress" => self.get_wallet_address().await,
             "getwalletinfo" => self.get_wallet_info().await,
             "getlocalwallet" => self.get_local_wallet().await,
@@ -3705,11 +3706,10 @@ impl RpcHandler {
     async fn restore_data(&self) -> Result<Value, RpcError> {
         Err(RpcError {
             code: -32,
-            message: format!(
-                "Cannot restore while daemon is running. \
+            message: "Cannot restore while daemon is running. \
                  Stop timed first (time-cli stop), then run: \
                  time-cli restoredata <source>"
-            ),
+                .to_string(),
         })
     }
 
@@ -5512,6 +5512,64 @@ impl RpcHandler {
             .register_derived_address(address.to_string(), index);
 
         Ok(json!(address.to_string()))
+    }
+
+    async fn list_addresses(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let nonzero_only = params.first().and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let derived = self.consensus.list_derived_addresses();
+
+        let master_addr = self.wallet_address();
+
+        let mut entries: Vec<Value> = Vec::with_capacity(derived.len() + 1);
+
+        // Master key address (index -1 / "master")
+        if let Some(ref addr) = master_addr {
+            let utxos = self.utxo_manager.list_utxos_by_address(addr).await;
+            let balance: u64 = utxos
+                .iter()
+                .filter(|u| {
+                    matches!(
+                        self.utxo_manager.get_state(&u.outpoint),
+                        Some(crate::types::UTXOState::Unspent)
+                    )
+                })
+                .map(|u| u.value)
+                .sum();
+            if !nonzero_only || balance > 0 {
+                entries.push(json!({
+                    "index": "master",
+                    "address": addr,
+                    "balance": balance as f64 / 100_000_000.0,
+                    "utxos": utxos.len(),
+                }));
+            }
+        }
+
+        // Derived addresses
+        for (idx, addr) in &derived {
+            let utxos = self.utxo_manager.list_utxos_by_address(addr).await;
+            let balance: u64 = utxos
+                .iter()
+                .filter(|u| {
+                    matches!(
+                        self.utxo_manager.get_state(&u.outpoint),
+                        Some(crate::types::UTXOState::Unspent)
+                    )
+                })
+                .map(|u| u.value)
+                .sum();
+            if !nonzero_only || balance > 0 {
+                entries.push(json!({
+                    "index": idx,
+                    "address": addr,
+                    "balance": balance as f64 / 100_000_000.0,
+                    "utxos": utxos.len(),
+                }));
+            }
+        }
+
+        Ok(json!(entries))
     }
 
     async fn get_wallet_address(&self) -> Result<Value, RpcError> {
