@@ -33,6 +33,14 @@ pub async fn handle_msg_submit(
         return Ok(None);
     }
 
+    if store.is_sender_blocked(&envelope.sender_pubkey) {
+        tracing::debug!(
+            "📨 MsgSubmit: sender {} blocked by relay operator, dropping",
+            hex::encode(&envelope.sender_pubkey)
+        );
+        return Ok(None);
+    }
+
     match store.store_envelope(&envelope) {
         Ok(()) => {
             tracing::info!(
@@ -158,9 +166,7 @@ pub async fn handle_pubkey_query(
 ) -> Result<Option<NetworkMessage>, String> {
     let pubkey = utxo_manager
         .get_pubkey_by_address_hash(address_hash)
-        .or_else(|| {
-            contacts_book.and_then(|c| c.get_pubkey_by_address_hash(address_hash))
-        });
+        .or_else(|| contacts_book.and_then(|c| c.get_pubkey_by_address_hash(address_hash)));
     Ok(Some(NetworkMessage::MsgPubkeyResponse {
         address_hash: *address_hash,
         pubkey,
@@ -224,8 +230,7 @@ pub fn handle_pubkey_response(
             ]
             .iter()
             .find_map(|&net| {
-                let addr =
-                    crate::address::Address::from_public_key(&pk, net).as_string();
+                let addr = crate::address::Address::from_public_key(&pk, net).as_string();
                 let h: [u8; 32] = sha2::Sha256::digest(addr.as_bytes()).into();
                 if &h == address_hash {
                     Some(addr)
@@ -247,10 +252,7 @@ pub fn handle_pubkey_response(
                 if let Err(e) = book.upsert(&addr, contact) {
                     tracing::warn!("📨 handle_pubkey_response: failed to persist pubkey: {}", e);
                 } else {
-                    tracing::debug!(
-                        "📨 Persisted pubkey for {} to contacts_book",
-                        addr
-                    );
+                    tracing::debug!("📨 Persisted pubkey for {} to contacts_book", addr);
                 }
             }
         }

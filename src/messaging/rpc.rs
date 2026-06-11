@@ -313,7 +313,7 @@ pub async fn rpc_get_messages(
         .pending_msg_envelopes
         .remove(&recipient_addr_hash);
 
-    // Deduplicate by msg_id
+    // Deduplicate by msg_id, then filter blocked senders.
     let mut seen_ids = std::collections::HashSet::new();
     let unique: Vec<_> = all_envelope_bytes
         .into_iter()
@@ -323,6 +323,7 @@ pub async fn rpc_get_messages(
                 .map(|e| (e, bytes))
         })
         .filter(|(env, _)| seen_ids.insert(env.msg_id))
+        .filter(|(env, _)| !relay_store.is_sender_blocked(&env.sender_pubkey))
         .collect();
 
     let mut messages = Vec::new();
@@ -465,4 +466,86 @@ async fn send_read_ack(
             .await;
     }
     Ok(())
+}
+
+/// `blockmessagesender` RPC — add a sender to the relay block list.
+/// Takes an address, resolves to pubkey via contacts book, then blocks by pubkey.
+pub fn rpc_block_message_sender(
+    address: &str,
+    relay_store: &Arc<RelayStore>,
+    contacts: &ContactsBook,
+    utxo_mgr: &Arc<crate::utxo_manager::UTXOStateManager>,
+    network: crate::network_type::NetworkType,
+) -> Result<Value, String> {
+    let pubkey = resolve_pubkey_sync(address, contacts, utxo_mgr, network)
+        .ok_or_else(|| format!("Pubkey not found for {address} — they must have sent you a message or be in contacts first"))?;
+    relay_store
+        .block_sender(&pubkey)
+        .map_err(|e| e.to_string())?;
+    tracing::info!(
+        "🚫 Blocked message sender {} (pubkey {})",
+        address,
+        hex::encode(pubkey)
+    );
+    Ok(json!({ "blocked": address, "pubkey": hex::encode(pubkey) }))
+}
+
+/// `unblockmessagesender` RPC — remove a sender from the relay block list.
+pub fn rpc_unblock_message_sender(
+    address: &str,
+    relay_store: &Arc<RelayStore>,
+    contacts: &ContactsBook,
+    utxo_mgr: &Arc<crate::utxo_manager::UTXOStateManager>,
+    network: crate::network_type::NetworkType,
+) -> Result<Value, String> {
+    let pubkey = resolve_pubkey_sync(address, contacts, utxo_mgr, network)
+        .ok_or_else(|| format!("Pubkey not found for {address}"))?;
+    relay_store
+        .unblock_sender(&pubkey)
+        .map_err(|e| e.to_string())?;
+    tracing::info!(
+        "✅ Unblocked message sender {} (pubkey {})",
+        address,
+        hex::encode(pubkey)
+    );
+    Ok(json!({ "unblocked": address, "pubkey": hex::encode(pubkey) }))
+}
+
+/// `listblockedsenders` RPC — return all blocked sender pubkeys with their TIME addresses.
+pub fn rpc_list_blocked_senders(
+    relay_store: &Arc<RelayStore>,
+    contacts: &ContactsBook,
+    network: crate::network_type::NetworkType,
+) -> Result<Value, String> {
+    let pubkeys = relay_store.list_blocked_senders();
+    let entries: Vec<serde_json::Value> = pubkeys
+        .iter()
+        .map(|pk| {
+            // Try to resolve pubkey back to an address via contacts book, then fall back
+            // to deriving the TIME address directly from the pubkey.
+            let address = contacts
+                .list()
+                .into_iter()
+                .find(|(_, c)| &c.pubkey == pk)
+                .map(|(addr, _)| addr)
+                .unwrap_or_else(|| {
+                    crate::address::Address::from_public_key(pk, network).to_string()
+                });
+            json!({ "address": address, "pubkey": hex::encode(pk) })
+        })
+        .collect();
+    Ok(json!(entries))
+}
+
+/// Synchronous pubkey resolution (contacts book → UTXO cache only; no P2P).
+fn resolve_pubkey_sync(
+    address: &str,
+    contacts: &ContactsBook,
+    utxo_mgr: &Arc<crate::utxo_manager::UTXOStateManager>,
+    _network: crate::network_type::NetworkType,
+) -> Option<[u8; 32]> {
+    if let Some(c) = contacts.get(address) {
+        return Some(c.pubkey);
+    }
+    utxo_mgr.find_pubkey_for_address(address)
 }

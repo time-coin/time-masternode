@@ -1023,6 +1023,24 @@ enum Commands {
         /// TIME address of the contact to remove
         address: String,
     },
+
+    /// Block a sender — future messages from this address are silently dropped at the relay level
+    #[command(next_help_heading = "Messaging")]
+    BlockMessageSender {
+        /// TIME address of the sender to block
+        address: String,
+    },
+
+    /// Remove a block on a sender
+    #[command(next_help_heading = "Messaging")]
+    UnblockMessageSender {
+        /// TIME address of the sender to unblock
+        address: String,
+    },
+
+    /// List all blocked message senders
+    #[command(next_help_heading = "Messaging")]
+    ListBlockedSenders,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1821,6 +1839,13 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         ),
         Commands::ListContacts => ("listcontacts", json!([])),
         Commands::RemoveContact { address } => ("removecontact", json!([address])),
+        Commands::BlockMessageSender { address } => {
+            ("blockmessagesender", json!([{ "address": address }]))
+        }
+        Commands::UnblockMessageSender { address } => {
+            ("unblockmessagesender", json!([{ "address": address }]))
+        }
+        Commands::ListBlockedSenders => ("listblockedsenders", json!([])),
         // Handled offline before the RPC match — never reached.
         Commands::Backupdata { .. } => unreachable!(),
         Commands::Restoredata { .. } => unreachable!(),

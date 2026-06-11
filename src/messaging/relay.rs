@@ -13,6 +13,8 @@ pub struct RelayStore {
     delivered: sled::Tree,
     expiry: sled::Tree,
     status: sled::Tree,
+    /// Blocked senders — key: sender_pubkey (32 bytes), value: blocked_at (i64 LE).
+    block_list: sled::Tree,
 }
 
 impl RelayStore {
@@ -43,6 +45,9 @@ impl RelayStore {
                 .map_err(|e| MessageError::Storage(e.to_string()))?,
             status: db
                 .open_tree("status")
+                .map_err(|e| MessageError::Storage(e.to_string()))?,
+            block_list: db
+                .open_tree("block_list")
                 .map_err(|e| MessageError::Storage(e.to_string()))?,
             db,
         })
@@ -224,5 +229,38 @@ impl RelayStore {
     pub fn get_status(&self, msg_id: &[u8; 32]) -> Option<MessageStatus> {
         let bytes = self.status.get(msg_id.as_slice()).ok()??;
         serde_cbor::from_slice(&bytes).ok()
+    }
+
+    /// Block a sender by their Ed25519 pubkey.
+    pub fn block_sender(&self, sender_pubkey: &[u8; 32]) -> Result<(), MessageError> {
+        let blocked_at = chrono::Utc::now().timestamp().to_le_bytes();
+        self.block_list
+            .insert(sender_pubkey.as_slice(), blocked_at.as_slice())
+            .map_err(|e| MessageError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Remove a block on a sender.
+    pub fn unblock_sender(&self, sender_pubkey: &[u8; 32]) -> Result<(), MessageError> {
+        self.block_list
+            .remove(sender_pubkey.as_slice())
+            .map_err(|e| MessageError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Returns true if this sender's pubkey is in the block list.
+    pub fn is_sender_blocked(&self, sender_pubkey: &[u8; 32]) -> bool {
+        self.block_list
+            .contains_key(sender_pubkey.as_slice())
+            .unwrap_or(false)
+    }
+
+    /// List all blocked sender pubkeys.
+    pub fn list_blocked_senders(&self) -> Vec<[u8; 32]> {
+        self.block_list
+            .iter()
+            .filter_map(|r| r.ok())
+            .filter_map(|(key, _)| key.as_ref().try_into().ok())
+            .collect()
     }
 }

@@ -1832,10 +1832,9 @@ async fn main() {
             }
             // Pre-seed the pubkey cache so self-sends can encrypt memos immediately.
             let own_pubkey_bytes = wallet.signing_key().verifying_key().to_bytes();
-            consensus_engine.utxo_manager.register_pubkey(
-                &mn.wallet_address,
-                own_pubkey_bytes,
-            );
+            consensus_engine
+                .utxo_manager
+                .register_pubkey(&mn.wallet_address, own_pubkey_bytes);
 
             // Persist own pubkey to the sled contacts_book so lookuppubkey RPC can
             // resolve it across restarts.  Register under both the configured
@@ -1851,10 +1850,9 @@ async fn main() {
                 let _ = contacts_book.upsert(&mn.wallet_address, mk_contact());
                 let local_addr = wallet.address();
                 if local_addr != mn.wallet_address {
-                    consensus_engine.utxo_manager.register_pubkey(
-                        local_addr,
-                        own_pubkey_bytes,
-                    );
+                    consensus_engine
+                        .utxo_manager
+                        .register_pubkey(local_addr, own_pubkey_bytes);
                     let _ = contacts_book.upsert(local_addr, mk_contact());
                 }
             }
