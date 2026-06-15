@@ -4193,7 +4193,16 @@ impl RpcHandler {
 
             // Use the live governance-adjustable fee schedule (may have changed via vote)
             let fee_schedule = self.consensus.current_fee_schedule();
-            let fee = fee_schedule.required_fee(amount_units);
+            // Same-wallet transfers pay only the minimum fee (same as consolidations).
+            let is_self_send = self
+                .consensus
+                .get_signing_key_for_address(to_address)
+                .is_some();
+            let fee = if is_self_send {
+                fee_schedule.min_fee
+            } else {
+                fee_schedule.required_fee(amount_units)
+            };
 
             // Select sufficient UTXOs
             let mut selected_utxos = Vec::new();
@@ -4340,21 +4349,33 @@ impl RpcHandler {
                 }
             }
 
-            let send_amount = if subtract_fee {
+            // When subtracting the fee, the validator checks required_fee(send_amount), not
+            // required_fee(amount_units). Subtracting can cross a tier boundary (e.g. 100 TIME
+            // → 0.5% tier, but 99.5 TIME recipient output falls back into the 1% tier).
+            // Iterate until the fee stabilises against the actual send_amount.
+            let (send_amount, fee) = if subtract_fee {
                 if total_input < amount_units {
                     return Err(RpcError {
                         code: -6,
                         message: "Insufficient funds".to_string(),
                     });
                 }
-                let fee = fee_schedule.required_fee(amount_units);
-                if amount_units <= fee {
+                let mut f = fee_schedule.required_fee(amount_units);
+                for _ in 0..4 {
+                    let sa = amount_units.saturating_sub(f);
+                    let nf = fee_schedule.required_fee(sa);
+                    if nf == f {
+                        break;
+                    }
+                    f = nf;
+                }
+                if amount_units <= f {
                     return Err(RpcError {
                         code: -6,
-                        message: format!("Amount too small to cover fee ({} units fee)", fee),
+                        message: format!("Amount too small to cover fee ({} units fee)", f),
                     });
                 }
-                amount_units - fee
+                (amount_units - f, f)
             } else {
                 if total_input < amount_units + fee {
                     return Err(RpcError {
@@ -4362,7 +4383,7 @@ impl RpcHandler {
                         message: "Insufficient funds".to_string(),
                     });
                 }
-                amount_units
+                (amount_units, fee)
             };
 
             let inputs: Vec<TxInput> = selected_utxos
