@@ -74,6 +74,29 @@ impl FeeSchedule {
         let proportional = send_amount * rate_bps / 10_000;
         proportional.max(self.min_fee)
     }
+
+    /// Fee to deduct from a gross amount so the recipient gets `amount - fee` and the
+    /// fee satisfies `fee >= required_fee(amount - fee)`.
+    ///
+    /// Simple iteration loses 1 satoshi to truncation near tier boundaries. This solves
+    /// it algebraically: for a given rate_bps,
+    ///   fee = ceil(amount × rate_bps / (10_000 + rate_bps))
+    /// guarantees the fee is valid against the actual send_amount in that tier.
+    /// Tiers are tried highest-rate-first; the first one where `amount - fee` falls
+    /// below the tier limit is the correct solution.
+    pub fn required_fee_subtract(&self, amount: u64) -> u64 {
+        for &(tier_limit, rate_bps) in &self.tiers {
+            let divisor = 10_000 + rate_bps;
+            // Ceiling division: ceil(amount * rate_bps / divisor)
+            let f = (amount.saturating_mul(rate_bps) + divisor - 1) / divisor;
+            let f = f.max(self.min_fee);
+            let send_amount = amount.saturating_sub(f);
+            if send_amount < tier_limit {
+                return f;
+            }
+        }
+        self.min_fee
+    }
 }
 
 // §7.6 Liveness Fallback Protocol Parameters

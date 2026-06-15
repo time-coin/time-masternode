@@ -4351,8 +4351,8 @@ impl RpcHandler {
 
             // When subtracting the fee, the validator checks required_fee(send_amount), not
             // required_fee(amount_units). Subtracting can cross a tier boundary (e.g. 100 TIME
-            // → 0.5% tier, but 99.5 TIME recipient output falls back into the 1% tier).
-            // Iterate until the fee stabilises against the actual send_amount.
+            // sits in the 0.5% tier but the 99.5 TIME output falls into the 1% tier).
+            // Use the algebraic ceiling solution to guarantee the fee is always sufficient.
             let (send_amount, fee) = if subtract_fee {
                 if total_input < amount_units {
                     return Err(RpcError {
@@ -4360,15 +4360,11 @@ impl RpcHandler {
                         message: "Insufficient funds".to_string(),
                     });
                 }
-                let mut f = fee_schedule.required_fee(amount_units);
-                for _ in 0..4 {
-                    let sa = amount_units.saturating_sub(f);
-                    let nf = fee_schedule.required_fee(sa);
-                    if nf == f {
-                        break;
-                    }
-                    f = nf;
-                }
+                let f = if is_self_send {
+                    fee_schedule.min_fee
+                } else {
+                    fee_schedule.required_fee_subtract(amount_units)
+                };
                 if amount_units <= f {
                     return Err(RpcError {
                         code: -6,
