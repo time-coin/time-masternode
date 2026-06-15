@@ -21,6 +21,9 @@ Commands:
     getblockheader         Get block header by height or hash
     gettxoutsetinfo        Get information about the UTXO set
     gettxout               Get details about an unspent transaction output [txid] [vout]
+    getsupply              Get circulating supply and dormant coin statistics [dormant_years]
+    getrewardreport        Masternode reward earnings report [blocks] or [start end]
+    findblockbydate        Find the block closest to a Unix timestamp
   Network
     getnetworkinfo         Get network information
     getpeerinfo            Get peer information
@@ -41,7 +44,7 @@ Commands:
     getwalletinfo          Get wallet information
     getlocalwallet         Get local wallet address (plain string)
     getnewaddress          Generate a new deterministic wallet address (each call returns a fresh address)
-    listaddresses          List all wallet addresses (master + derived) with balances
+    listaddresses          List all wallet addresses (master + derived) with balances [--nonzero]
     getwalletaddress       Get local wallet address with reward forwarding info
     getaddressinfo         Get info about an address (ismine, pubkey, etc.)
     getaddresspubkey       Get the public key for an address
@@ -106,6 +109,17 @@ Commands:
     getproposal            Get a specific governance proposal
     submitproposal         Submit a new governance proposal
     voteproposal           Vote on a governance proposal
+  Messaging
+    sendmessage            Send an end-to-end encrypted message to a TIME address
+    getmessages            Fetch encrypted messages sent to your wallet [--since timestamp] [--limit n]
+    getmessagestatus       Get delivery/read-receipt status for a sent message
+    getpubkey              Look up the messaging public key for a TIME address
+    addcontact             Add or update a contact in the local contacts book
+    listcontacts           List all saved contacts
+    removecontact          Remove a contact from the local contacts book
+    blockmessagesender     Block a sender — future messages from this address are silently dropped
+    unblockmessagesender   Remove a block on a sender
+    listblockedsenders     List all blocked message senders
   Utility
     validateaddress        Validate a TIME address
     stop                   Stop the daemon
