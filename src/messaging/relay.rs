@@ -60,7 +60,7 @@ impl RelayStore {
             return Err(MessageError::TooLarge(bytes.len(), MAX_ENVELOPE_BYTES));
         }
         self.envelopes
-            .insert(&envelope.msg_id, bytes.as_slice())
+            .insert(envelope.msg_id, bytes.as_slice())
             .map_err(|e| MessageError::Storage(e.to_string()))?;
 
         // Recipient index key: recipient_addr_hash (32) || msg_id (32)
@@ -68,7 +68,7 @@ impl RelayStore {
         idx_key[..32].copy_from_slice(&envelope.recipient_addr_hash);
         idx_key[32..].copy_from_slice(&envelope.msg_id);
         self.by_recipient
-            .insert(&idx_key, &[])
+            .insert(idx_key, &[])
             .map_err(|e| MessageError::Storage(e.to_string()))?;
 
         Ok(())
@@ -84,7 +84,7 @@ impl RelayStore {
                     return None;
                 }
                 let msg_id: [u8; 32] = key[32..64].try_into().ok()?;
-                let bytes = self.envelopes.get(&msg_id).ok()??;
+                let bytes = self.envelopes.get(msg_id).ok()??;
                 let env = TimeEnvelope::deserialise(&bytes).ok()?;
                 if env.is_expired() {
                     None
@@ -132,7 +132,7 @@ impl RelayStore {
         vk.verify_strict(&sig_bytes, &sig)
             .map_err(|_| MessageError::InvalidSignature)?;
 
-        let key = format!("ack:{}", hex::encode(&ack.msg_id));
+        let key = format!("ack:{}", hex::encode(ack.msg_id));
         let bytes = serde_cbor::to_vec(ack).map_err(|e| MessageError::Storage(e.to_string()))?;
         self.acks
             .insert(key.as_bytes(), bytes)
@@ -182,14 +182,14 @@ impl RelayStore {
                 relay_sig: relay_key.sign(&sig_input).to_bytes(),
             };
             if let Ok(bytes) = serde_cbor::to_vec(&notice) {
-                let exp_key = format!("exp:{}", hex::encode(&env.msg_id));
+                let exp_key = format!("exp:{}", hex::encode(env.msg_id));
                 let _ = self.expiry.insert(exp_key.as_bytes(), bytes);
             }
             let _ = self.envelopes.remove(&key);
             let mut idx_key = [0u8; 64];
             idx_key[..32].copy_from_slice(&env.recipient_addr_hash);
             idx_key[32..].copy_from_slice(&env.msg_id);
-            let _ = self.by_recipient.remove(&idx_key);
+            let _ = self.by_recipient.remove(idx_key);
             notices.push(notice);
         }
         notices

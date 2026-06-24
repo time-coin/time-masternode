@@ -23,7 +23,9 @@ use tokio::net::TcpListener;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RpcRequest {
     pub jsonrpc: String,
-    pub id: String,
+    /// JSON-RPC 2.0 id — may be a string, integer, or null per spec.
+    #[serde(default)]
+    pub id: Value,
     pub method: String,
     pub params: Value,
 }
@@ -31,7 +33,7 @@ pub struct RpcRequest {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RpcResponse {
     pub jsonrpc: String,
-    pub id: String,
+    pub id: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -462,7 +464,7 @@ impl RpcServer {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let response = RpcResponse {
             jsonrpc: "2.0".to_string(),
-            id: "rate-limited".to_string(),
+            id: Value::Null,
             result: None,
             error: Some(RpcError {
                 code,
@@ -552,7 +554,7 @@ impl RpcServer {
             // Invalid request
             RpcResponse {
                 jsonrpc: "2.0".to_string(),
-                id: "unknown".to_string(),
+                id: Value::Null,
                 result: None,
                 error: Some(RpcError {
                     code: -32700,
@@ -609,7 +611,7 @@ impl RpcServer {
                 }
                 Err(e) => RpcResponse {
                     jsonrpc: "2.0".to_string(),
-                    id: "unknown".to_string(),
+                    id: Value::Null,
                     result: None,
                     error: Some(RpcError {
                         code: -32700,

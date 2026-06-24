@@ -36,7 +36,7 @@ pub async fn handle_msg_submit(
     if store.is_sender_blocked(&envelope.sender_pubkey) {
         tracing::debug!(
             "📨 MsgSubmit: sender {} blocked by relay operator, dropping",
-            hex::encode(&envelope.sender_pubkey)
+            hex::encode(envelope.sender_pubkey)
         );
         return Ok(None);
     }
@@ -45,7 +45,7 @@ pub async fn handle_msg_submit(
         Ok(()) => {
             tracing::info!(
                 "📨 Stored message {} for relay",
-                hex::encode(&envelope.msg_id)
+                hex::encode(envelope.msg_id)
             );
             match RelayStore::build_storage_ack(&envelope, node_signing_key) {
                 Ok(ack) => match serde_cbor::to_vec(&ack) {
@@ -127,7 +127,7 @@ pub async fn handle_msg_read_ack(
     };
 
     match store.store_ack(&ack, recipient_pubkey) {
-        Ok(()) => tracing::info!("✅ Stored ReadAck for {}", hex::encode(&ack.msg_id)),
+        Ok(()) => tracing::info!("✅ Stored ReadAck for {}", hex::encode(ack.msg_id)),
         Err(e) => tracing::warn!("📨 MsgReadAck: store failed: {}", e),
     }
     Ok(None)

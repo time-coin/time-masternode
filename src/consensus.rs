@@ -87,8 +87,7 @@ impl FeeSchedule {
     pub fn required_fee_subtract(&self, amount: u64) -> u64 {
         for &(tier_limit, rate_bps) in &self.tiers {
             let divisor = 10_000 + rate_bps;
-            // Ceiling division: ceil(amount * rate_bps / divisor)
-            let f = (amount.saturating_mul(rate_bps) + divisor - 1) / divisor;
+            let f = amount.saturating_mul(rate_bps).div_ceil(divisor);
             let f = f.max(self.min_fee);
             let send_amount = amount.saturating_sub(f);
             if send_amount < tier_limit {
@@ -96,6 +95,70 @@ impl FeeSchedule {
             }
         }
         self.min_fee
+    }
+}
+
+#[cfg(test)]
+mod fee_tests {
+    use super::*;
+
+    fn sched() -> FeeSchedule {
+        FeeSchedule::default()
+    }
+
+    /// For every test amount, assert that the fee returned by required_fee_subtract
+    /// is accepted by the validator (fee >= required_fee(send_amount)) and that
+    /// send_amount + fee == amount exactly.
+    fn assert_subtract_fee_valid(amount: u64) {
+        let s = sched();
+        let fee = s.required_fee_subtract(amount);
+        let send_amount = amount - fee;
+        let required = s.required_fee(send_amount);
+        assert!(
+            fee >= required,
+            "amount={amount}: fee {fee} < required_fee({send_amount})={required}"
+        );
+        assert_eq!(
+            send_amount + fee,
+            amount,
+            "amount={amount}: send+fee != amount"
+        );
+    }
+
+    #[test]
+    fn test_subtract_fee_boundary_100_time() {
+        // 100 TIME sits in the 0.5% tier but recipient output falls into 1% tier.
+        // This was the exact scenario that caused "Insufficient fee" rejections.
+        let amount = 100 * SATOSHIS_PER_TIME; // 10_000_000_000
+        assert_subtract_fee_valid(amount);
+    }
+
+    #[test]
+    fn test_subtract_fee_boundary_1000_time() {
+        // 1000 TIME sits in 0.25% tier; recipient may cross into 0.5% tier.
+        assert_subtract_fee_valid(1_000 * SATOSHIS_PER_TIME);
+    }
+
+    #[test]
+    fn test_subtract_fee_boundary_10000_time() {
+        assert_subtract_fee_valid(10_000 * SATOSHIS_PER_TIME);
+    }
+
+    #[test]
+    fn test_subtract_fee_various_amounts() {
+        for &time in &[
+            1u64, 50, 99, 100, 101, 500, 999, 1000, 1001, 5000, 9999, 10000, 50000,
+        ] {
+            assert_subtract_fee_valid(time * SATOSHIS_PER_TIME);
+        }
+    }
+
+    #[test]
+    fn test_subtract_fee_min_fee_floor() {
+        // Very small amounts should still return at least min_fee.
+        let s = sched();
+        let fee = s.required_fee_subtract(MIN_TX_FEE + 1);
+        assert!(fee >= MIN_TX_FEE);
     }
 }
 
@@ -2266,6 +2329,13 @@ impl ConsensusEngine {
             .get()
             .cloned()
             .or_else(|| self.get_signing_key())
+    }
+
+    /// Return true if `address` is one of this node's derived child addresses.
+    /// Used by `send_coins` as part of the self-send check; the master wallet address
+    /// is handled separately by the caller via `to_address == from_address`.
+    pub fn is_derived_address(&self, address: &str) -> bool {
+        self.derived_address_map.contains_key(address)
     }
 
     /// Sign all transaction inputs with the key that controls `from_address`.

@@ -16,9 +16,7 @@ pub fn ed25519_pubkey_to_x25519(ed_pubkey: &[u8; 32]) -> [u8; 32] {
             // Fallback: use SHA-256 hash (valid key bytes should never reach here)
             let hash: [u8; 32] = sha2::Sha256::digest(ed_pubkey.as_slice()).into();
             let fallback = curve25519_dalek::edwards::CompressedEdwardsY(hash);
-            fallback
-                .decompress()
-                .unwrap_or(curve25519_dalek::EdwardsPoint::default())
+            fallback.decompress().unwrap_or_default()
         });
     point.to_montgomery().to_bytes()
 }

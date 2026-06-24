@@ -1281,12 +1281,8 @@ async fn main() {
             .mode(sled::Mode::LowSpace)
             .open()
             .and_then(|db| {
-                messaging::contacts::ContactsBook::open(&db).map_err(|e| {
-                    sled::Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    ))
-                })
+                messaging::contacts::ContactsBook::open(&db)
+                    .map_err(|e| sled::Error::Io(std::io::Error::other(e.to_string())))
             }) {
             Ok(book) => {
                 tracing::info!("📨 Contacts book initialized");

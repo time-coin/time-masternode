@@ -1812,7 +1812,7 @@ impl MessageHandler {
                 {
                     debug!(
                         "📨 Message {} expired before delivery",
-                        hex::encode(&n.msg_id)
+                        hex::encode(n.msg_id)
                     );
                     if let Some(ref store) = context.relay_store {
                         let _ = store.set_status(

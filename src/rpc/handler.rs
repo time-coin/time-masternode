@@ -276,6 +276,9 @@ impl RpcHandler {
             "getrawtransaction" => self.get_raw_transaction(&params_array).await,
             "gettransaction" => self.get_transaction(&params_array).await,
             "sendrawtransaction" => self.send_raw_transaction(&params_array).await,
+            "signrawtransactionwithwallet" => {
+                self.sign_raw_transaction_with_wallet(&params_array).await
+            }
             "rebroadcasttransaction" => self.rebroadcast_transaction(&params_array).await,
             "createrawtransaction" => self.create_raw_transaction(&params_array).await,
             "decoderawtransaction" => self.decode_raw_transaction(&params_array).await,
@@ -1565,6 +1568,45 @@ impl RpcHandler {
         Ok(json!(txid_hex))
     }
 
+    async fn sign_raw_transaction_with_wallet(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let param = params.first().ok_or_else(|| RpcError {
+            code: -32602,
+            message: "Invalid params: expected hex-encoded transaction".to_string(),
+        })?;
+
+        let hex_tx = param.as_str().ok_or_else(|| RpcError {
+            code: -32602,
+            message: "Invalid params: expected hex string".to_string(),
+        })?;
+
+        let tx_bytes = hex::decode(hex_tx).map_err(|_| RpcError {
+            code: -22,
+            message: "TX decode failed: invalid hex".to_string(),
+        })?;
+
+        let mut tx: Transaction = bincode::deserialize(&tx_bytes).map_err(|_| RpcError {
+            code: -22,
+            message: "TX deserialization failed".to_string(),
+        })?;
+
+        self.consensus
+            .sign_transaction(&mut tx)
+            .map_err(|e| RpcError {
+                code: -4,
+                message: format!("Signing failed: {}", e),
+            })?;
+
+        let signed_bytes = bincode::serialize(&tx).map_err(|_| RpcError {
+            code: -22,
+            message: "TX serialization failed".to_string(),
+        })?;
+
+        Ok(json!({
+            "hex": hex::encode(signed_bytes),
+            "complete": true,
+        }))
+    }
+
     async fn rebroadcast_transaction(&self, params: &[Value]) -> Result<Value, RpcError> {
         let txid_str = params
             .first()
@@ -1978,7 +2020,10 @@ impl RpcHandler {
         let min_conf = params.first().and_then(|v| v.as_u64()).unwrap_or(0);
         let max_conf = params.get(1).and_then(|v| v.as_u64()).unwrap_or(9999999);
         let addresses = params.get(2).and_then(|v| v.as_array());
-        let limit = params.get(3).and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+        // 0 = no limit (default). Explicit positive value caps the result set.
+        // Bitcoin Core's listunspent has no limit; defaulting to 10 caused confusing
+        // balance discrepancies when a wallet held more than 10 UTXOs.
+        let limit = params.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
         let current_height = self.blockchain.get_height();
 
@@ -4194,10 +4239,12 @@ impl RpcHandler {
             // Use the live governance-adjustable fee schedule (may have changed via vote)
             let fee_schedule = self.consensus.current_fee_schedule();
             // Same-wallet transfers pay only the minimum fee (same as consolidations).
-            let is_self_send = self
-                .consensus
-                .get_signing_key_for_address(to_address)
-                .is_some();
+            // Check explicitly: to_address must equal the sender's address OR be one of
+            // this node's derived child addresses.  get_signing_key_for_address must NOT
+            // be used here — its unconditional master-key fallback makes every external
+            // address appear local, causing min_fee to be applied to all sends.
+            let is_self_send =
+                to_address == from_address || self.consensus.is_derived_address(to_address);
             let fee = if is_self_send {
                 fee_schedule.min_fee
             } else {

@@ -402,11 +402,11 @@ enum Commands {
     /// List unspent transaction outputs
     #[command(next_help_heading = "Wallet")]
     ListUnspent {
-        /// Number of UTXOs to display (default: 10, use 0 for all)
-        #[arg(short = 'n', long, default_value = "10")]
+        /// Maximum number of UTXOs to display (0 = no limit)
+        #[arg(short = 'n', long, default_value = "0")]
         limit: usize,
-        /// Minimum confirmations
-        #[arg(default_value = "1")]
+        /// Minimum confirmations (0 includes unconfirmed/finalized UTXOs)
+        #[arg(default_value = "0")]
         minconf: u32,
         /// Maximum confirmations
         #[arg(default_value = "9999999")]
