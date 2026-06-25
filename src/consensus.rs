@@ -2829,13 +2829,30 @@ impl ConsensusEngine {
 
         // 3. Check input values >= output values (no inflation)
         let mut input_sum = 0u64;
+        let mut input_address: Option<String> = None;
+        let mut single_input_address = true;
         for input in &tx.inputs {
             if let Ok(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
                 input_sum += utxo.value;
+                match &input_address {
+                    None => input_address = Some(utxo.address.clone()),
+                    Some(a) if *a != utxo.address => single_input_address = false,
+                    _ => {}
+                }
             } else {
                 return Err("UTXO not found".to_string());
             }
         }
+        // True self-send: all inputs from one address, all outputs back to that same address.
+        // Used to exempt consolidations from the proportional fee check.
+        let is_self_send_consolidation = single_input_address
+            && input_address.as_deref().map_or(false, |addr| {
+                tx.outputs.iter().all(|o| {
+                    std::str::from_utf8(&o.script_pubkey)
+                        .map(|s| s == addr)
+                        .unwrap_or(false)
+                })
+            });
 
         let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
 
@@ -2871,8 +2888,10 @@ impl ConsensusEngine {
             ));
         }
 
-        // Check tiered proportional fee (governance-adjustable schedule)
-        {
+        // Check tiered proportional fee (governance-adjustable schedule).
+        // Consolidations (all inputs and outputs share the same address) are exempt and
+        // only need to cover MIN_TX_FEE — already checked above.
+        if !is_self_send_consolidation {
             let fee_schedule = self.current_fee_schedule();
             let send_amount = tx.outputs.first().map(|o| o.value).unwrap_or(output_sum);
             let min_proportional_fee = fee_schedule.required_fee(send_amount);

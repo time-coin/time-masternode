@@ -4238,13 +4238,11 @@ impl RpcHandler {
 
             // Use the live governance-adjustable fee schedule (may have changed via vote)
             let fee_schedule = self.consensus.current_fee_schedule();
-            // Same-wallet transfers pay only the minimum fee (same as consolidations).
-            // Check explicitly: to_address must equal the sender's address OR be one of
-            // this node's derived child addresses.  get_signing_key_for_address must NOT
-            // be used here — its unconditional master-key fallback makes every external
-            // address appear local, causing min_fee to be applied to all sends.
-            let is_self_send =
-                to_address == from_address || self.consensus.is_derived_address(to_address);
+            // Only strict same-address sends (from_address == to_address) get the min_fee
+            // consolidation discount.  Derived-address sends are indistinguishable from
+            // external sends at the validator level — the validator has no wallet access —
+            // so they must pay the proportional fee or the transaction will be rejected.
+            let is_self_send = to_address == from_address;
             let fee = if is_self_send {
                 fee_schedule.min_fee
             } else {
