@@ -115,6 +115,25 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# ── Singleton guard ────────────────────────────────────────────────────────────
+# Prevents duplicate instances when systemd's Restart=always spawns a new
+# watchdog while the previous one is still running (e.g. after a timed restart
+# causes mn-watchdog to be stopped then immediately restarted by systemd).
+LOCK_FILE="/var/run/mn-watchdog-${NETWORK}.lock"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    logger -t "mn-watchdog" -- "Another mn-watchdog (${NETWORK}) is already running — exiting"
+    exit 0
+fi
+
+# ── Parameter validation ───────────────────────────────────────────────────────
+# Guard against zero/negative threshold values that would cause immediate false
+# restarts. A zero SYNC_STALL_POLLS makes [ streak -ge 0 ] always true.
+[ "$SYNC_STALL_POLLS" -lt 1 ] && { echo "WARN: SYNC_STALL_POLLS=${SYNC_STALL_POLLS} invalid, resetting to 20"; SYNC_STALL_POLLS=20; }
+[ "$ZERO_PEER_POLLS"  -lt 1 ] && { echo "WARN: ZERO_PEER_POLLS=${ZERO_PEER_POLLS} invalid, resetting to 40";  ZERO_PEER_POLLS=40; }
+[ "$FAIL_THRESHOLD"   -lt 1 ] && { echo "WARN: FAIL_THRESHOLD=${FAIL_THRESHOLD} invalid, resetting to 3";     FAIL_THRESHOLD=3; }
+[ "$RPC_BUSY_MAX"     -lt 1 ] && { echo "WARN: RPC_BUSY_MAX=${RPC_BUSY_MAX} invalid, resetting to 5";         RPC_BUSY_MAX=5; }
+
 # ── Logger tag ─────────────────────────────────────────────────────────────────
 TAG="mn-watchdog"
 log()  { logger -t "$TAG" -- "$*"; echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
@@ -286,7 +305,7 @@ check_sync_stall() {
     fi
 
     last_sync_height=$blocks_height
-    [ "$sync_stall_streak" -ge "$SYNC_STALL_POLLS" ]
+    [ "$sync_stall_streak" -gt 0 ] && [ "$sync_stall_streak" -ge "$SYNC_STALL_POLLS" ]
 }
 
 # ── Zero-peer check ───────────────────────────────────────────────────────────
@@ -315,7 +334,7 @@ check_zero_peers() {
         zero_peer_streak=0
     fi
 
-    [ "$zero_peer_streak" -ge "$ZERO_PEER_POLLS" ]
+    [ "$zero_peer_streak" -gt 0 ] && [ "$zero_peer_streak" -ge "$ZERO_PEER_POLLS" ]
 }
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
