@@ -77,8 +77,8 @@ if [ -z "$NETWORK" ]; then
     elif echo "$BACKUP_FILE" | grep -q "mainnet"; then
         NETWORK="mainnet"
     else
-        NETWORK="testnet"
-        log_warn "Could not detect network from filename, defaulting to testnet"
+        NETWORK="mainnet"
+        log_warn "Could not detect network from filename, defaulting to mainnet"
     fi
 fi
 

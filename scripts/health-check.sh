@@ -30,7 +30,7 @@ QUIET=0
 JSON=0
 MAX_BEHIND=5
 MIN_PEERS=2
-NETWORK="testnet"
+NETWORK="mainnet"
 
 # Find CLI
 CLI=""

@@ -8,8 +8,8 @@
 #   bash scripts/reindex.sh [OPTIONS]
 #
 # Options:
-#   --testnet         Use testnet RPC port (default)
-#   --mainnet         Use mainnet RPC port
+#   --testnet         Use testnet RPC port
+#   --mainnet         Use mainnet RPC port (default)
 #   -r, --rpc-url     Custom RPC URL
 #   --tx-only         Only reindex transaction index (faster, non-blocking)
 #   -h, --help        Show this help
@@ -17,7 +17,7 @@
 set -euo pipefail
 
 # Defaults
-NETWORK="testnet"
+NETWORK="mainnet"
 RPC_URL=""
 TX_ONLY=0
 

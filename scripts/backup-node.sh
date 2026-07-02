@@ -8,7 +8,7 @@
 #   sudo bash scripts/backup-node.sh [OPTIONS]
 #
 # Options:
-#   -n, --network     Network: mainnet or testnet (default: testnet)
+#   -n, --network     Network: mainnet or testnet (default: mainnet)
 #   -o, --output      Output directory for backup file (default: /root)
 #   -w, --wallet-only Only backup wallet and config files (skip blockchain DB)
 #   --no-restart      Don't restart the daemon after backup
@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # Defaults
-NETWORK="testnet"
+NETWORK="mainnet"
 OUTPUT_DIR="/root"
 WALLET_ONLY=0
 NO_RESTART=0

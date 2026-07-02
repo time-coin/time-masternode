@@ -20,14 +20,14 @@
 # USAGE:
 #   ./scripts/reset-chain.sh [--testnet] [--mainnet] [--yes]
 #
-#   --testnet    Target testnet data dir (default)
-#   --mainnet    Target mainnet data dir
+#   --testnet    Target testnet data dir
+#   --mainnet    Target mainnet data dir (default)
 #   --yes        Skip confirmation prompt
 
 set -euo pipefail
 
 # ── defaults ─────────────────────────────────────────────────────────────────
-NETWORK="testnet"
+NETWORK="mainnet"
 SKIP_CONFIRM=false
 
 # ── argument parsing ──────────────────────────────────────────────────────────
