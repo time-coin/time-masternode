@@ -47,6 +47,7 @@ See [docs/NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md) for detailed ne
 
 When modifying consensus or UTXO logic:
 
+- **Ask first**: never change anything that affects consensus without explicit user approval, even if the change appears minor or defensive
 - TimeVote consensus must achieve finality in <1 second
 - TimeLock block production every 10 minutes (configurable)
 - UTXO state machine: Unspent → Locked → Voting → Finalized → Archived
