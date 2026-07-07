@@ -186,8 +186,6 @@ pub struct Blockchain {
     peer_registry: Arc<RwLock<Option<Arc<PeerConnectionRegistry>>>>,
     connection_manager:
         Arc<RwLock<Option<Arc<crate::network::connection_manager::ConnectionManager>>>>,
-    /// AI-based peer scoring for intelligent peer selection
-    peer_scoring: Arc<crate::network::peer_scoring::PeerScoringSystem>,
     /// AI-powered fork resolution (decision making)
     fork_resolver: Arc<crate::ai::fork_resolver::ForkResolver>,
     /// Sync coordinator to prevent sync storms and duplicate requests
@@ -290,19 +288,6 @@ impl Blockchain {
         utxo_manager: Arc<UTXOStateManager>,
         network_type: NetworkType,
     ) -> Self {
-        // Initialize AI peer scoring with persistent storage
-        let peer_scoring = match crate::network::peer_scoring::PeerScoringSystem::new(&storage) {
-            Ok(scoring) => Arc::new(scoring),
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to initialize AI peer scoring with persistence: {}. Using fallback.",
-                    e
-                );
-                // Fallback: create without persistence (shouldn't happen but be safe)
-                Arc::new(crate::network::peer_scoring::PeerScoringSystem::new(&storage).unwrap())
-            }
-        };
-
         // Initialize AI fork resolver
         let fork_resolver = Arc::new(crate::ai::fork_resolver::ForkResolver::new(Arc::new(
             storage.clone(),
@@ -391,7 +376,6 @@ impl Blockchain {
             peer_manager: Arc::new(RwLock::new(None)),
             peer_registry: Arc::new(RwLock::new(None)),
             connection_manager: Arc::new(RwLock::new(None)),
-            peer_scoring,
             fork_resolver,
             sync_coordinator,
             cumulative_work: Arc::new(RwLock::new(0)),
@@ -552,6 +536,27 @@ impl Blockchain {
     /// Get the AI system reference
     pub fn ai_system(&self) -> Option<&Arc<crate::ai::AISystem>> {
         self.ai_system.as_ref()
+    }
+
+    fn sync_peer_selector(&self) -> Option<&crate::ai::peer_selector::AIPeerSelector> {
+        self.ai_system.as_ref().map(|ai| ai.peer_selector.as_ref())
+    }
+
+    fn record_sync_peer_success(&self, peer: &str, response_time: std::time::Duration, bytes: u64) {
+        if let Some(selector) = self.sync_peer_selector() {
+            selector.record_sync_success(peer, response_time.as_secs_f64() * 1000.0, bytes);
+        }
+    }
+
+    fn record_sync_peer_failure(&self, peer: &str) {
+        if let Some(selector) = self.sync_peer_selector() {
+            selector.record_failure_addr(peer);
+        }
+    }
+
+    fn select_best_sync_peer(&self, peers: &[String]) -> Option<String> {
+        self.sync_peer_selector()
+            .and_then(|selector| selector.select_best_peer_addr(peers))
     }
 
     /// Build or rebuild transaction index from blockchain
@@ -2487,16 +2492,11 @@ impl Blockchain {
 
                         // Record AI success for all sync peers (they all contributed)
                         for peer in &sync_peers {
-                            self.peer_scoring
-                                .record_success(peer, response_time, blocks_received * 500)
-                                .await;
-                            if let Some(ai) = &self.ai_system {
-                                ai.peer_selector.record_sync_success(
-                                    peer,
-                                    response_time.as_secs_f64() * 1000.0,
-                                    blocks_received * 500,
-                                );
-                            }
+                            self.record_sync_peer_success(
+                                peer,
+                                response_time,
+                                blocks_received * 500,
+                            );
                         }
 
                         last_height = now_height;
@@ -2549,9 +2549,7 @@ impl Blockchain {
                                         .filter(|p| *p != failed_peer)
                                         .collect();
 
-                                    if let Some(alt) =
-                                        self.peer_scoring.select_best_peer(&alt_peers).await
-                                    {
+                                    if let Some(alt) = self.select_best_sync_peer(&alt_peers) {
                                         tracing::info!(
                                             "🔄 Gap detected: blocks {}-{} missing (peer {} didn't respond). Requesting from {}",
                                             next_needed,
@@ -2575,10 +2573,7 @@ impl Blockchain {
                 // If no progress after request, try fallback peers
                 if !made_progress {
                     for peer in &sync_peers {
-                        self.peer_scoring.record_failure(peer).await;
-                        if let Some(ai) = &self.ai_system {
-                            ai.peer_selector.record_failure_addr(peer);
-                        }
+                        self.record_sync_peer_failure(peer);
                         // Mark session-failed so these peers aren't retried below.
                         failed_peers.insert(peer.clone());
                     }
@@ -2668,7 +2663,7 @@ impl Blockchain {
                         // fallback can't stall the sync again. Best-scored first,
                         // then fill with the rest of retry_peers.
                         let mut alt_peers: Vec<String> = Vec::new();
-                        if let Some(best) = self.peer_scoring.select_best_peer(&retry_peers).await {
+                        if let Some(best) = self.select_best_sync_peer(&retry_peers) {
                             alt_peers.push(best);
                         }
                         for p in &retry_peers {
@@ -11724,7 +11719,6 @@ impl Clone for Blockchain {
             peer_manager: self.peer_manager.clone(),
             peer_registry: self.peer_registry.clone(),
             connection_manager: self.connection_manager.clone(),
-            peer_scoring: self.peer_scoring.clone(),
             fork_resolver: self.fork_resolver.clone(),
             sync_coordinator: self.sync_coordinator.clone(),
             cumulative_work: self.cumulative_work.clone(),

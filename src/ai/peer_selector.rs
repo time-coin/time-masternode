@@ -296,29 +296,35 @@ impl AIPeerSelector {
     }
 
     pub fn select_best_peer(&self, candidates: &[SocketAddr]) -> Option<SocketAddr> {
-        if candidates.is_empty() {
+        let addrs: Vec<String> = candidates.iter().map(|c| c.to_string()).collect();
+        self.select_best_peer_addr(&addrs)
+            .and_then(|addr| candidates.iter().find(|c| c.to_string() == addr).copied())
+    }
+
+    /// Select the best peer from address strings using epsilon-greedy scoring.
+    /// 90% exploitation (highest total_score), 10% exploration (random peer).
+    pub fn select_best_peer_addr(&self, available_peers: &[String]) -> Option<String> {
+        if available_peers.is_empty() {
             return None;
         }
 
+        let explore = rand::random::<f64>() < 0.1;
+        if explore && available_peers.len() > 1 {
+            let idx = rand::random::<usize>() % available_peers.len();
+            return Some(available_peers[idx].clone());
+        }
+
         let perf_lock = self.performance.read();
-        let mut best_peer: Option<(SocketAddr, f64)> = None;
-
-        for candidate in candidates {
-            let score = perf_lock
-                .get(&candidate.to_string())
-                .map(|p| p.total_score)
-                .unwrap_or(0.5);
-
-            match best_peer {
-                None => best_peer = Some((*candidate, score)),
-                Some((_, best_score)) if score > best_score => {
-                    best_peer = Some((*candidate, score))
-                }
+        let mut best: Option<(String, f64)> = None;
+        for peer in available_peers {
+            let score = perf_lock.get(peer).map(|p| p.total_score).unwrap_or(0.5);
+            match &best {
+                None => best = Some((peer.clone(), score)),
+                Some((_, best_score)) if score > *best_score => best = Some((peer.clone(), score)),
                 _ => {}
             }
         }
-
-        best_peer.map(|(peer, _)| peer)
+        best.map(|(peer, _)| peer)
     }
 
     pub fn get_peer_score(&self, peer: &SocketAddr) -> f64 {
@@ -360,5 +366,33 @@ impl AIPeerSelector {
         stats.insert("average_score".to_string(), avg_score);
 
         stats
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_selector() -> AIPeerSelector {
+        let db = sled::Config::new().temporary(true).open().unwrap();
+        AIPeerSelector::new(Arc::new(db), 0.1).unwrap()
+    }
+
+    #[test]
+    fn test_select_best_peer_addr_prefers_higher_score() {
+        let selector = test_selector();
+        selector.record_sync_success("peer_a", 100.0, 1000);
+        selector.record_sync_success("peer_a", 100.0, 1000);
+        selector.record_failure_addr("peer_b");
+
+        let peers = vec!["peer_a".to_string(), "peer_b".to_string()];
+        let selected = selector.select_best_peer_addr(&peers);
+        assert_eq!(selected.as_deref(), Some("peer_a"));
+    }
+
+    #[test]
+    fn test_select_best_peer_addr_empty() {
+        let selector = test_selector();
+        assert!(selector.select_best_peer_addr(&[]).is_none());
     }
 }
