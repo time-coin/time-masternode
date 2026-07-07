@@ -2391,6 +2391,15 @@ impl Blockchain {
                 max_sync_time.as_secs()
             );
 
+            if let Some(ai) = &self.ai_system {
+                if ai.predictive_sync.should_prefetch(current) {
+                    tracing::debug!(
+                        "🧠 [AI] Predictive sync recommends prefetch at height {}",
+                        current
+                    );
+                }
+            }
+
             // Track the next height to request (may be ahead of current tip due to pipelining)
             let mut next_request_height = if current == 0 {
                 if self.get_block(0).is_ok() {
@@ -2481,6 +2490,13 @@ impl Blockchain {
                             self.peer_scoring
                                 .record_success(peer, response_time, blocks_received * 500)
                                 .await;
+                            if let Some(ai) = &self.ai_system {
+                                ai.peer_selector.record_sync_success(
+                                    peer,
+                                    response_time.as_secs_f64() * 1000.0,
+                                    blocks_received * 500,
+                                );
+                            }
                         }
 
                         last_height = now_height;
@@ -2560,6 +2576,9 @@ impl Blockchain {
                 if !made_progress {
                     for peer in &sync_peers {
                         self.peer_scoring.record_failure(peer).await;
+                        if let Some(ai) = &self.ai_system {
+                            ai.peer_selector.record_failure_addr(peer);
+                        }
                         // Mark session-failed so these peers aren't retried below.
                         failed_peers.insert(peer.clone());
                     }
@@ -9256,6 +9275,9 @@ impl Blockchain {
 
         // AI Health Prediction: Log warnings if health is degraded
         let health = self.consensus_health.predict_health();
+        if let Some(ai) = &self.ai_system {
+            ai.ingest_consensus_health(health.clone());
+        }
         if health.health_score < 0.7 {
             debug!(
                 "🧠 [AI] Consensus health warning: score={:.2}, fork_prob={:.2}, action={:?}",

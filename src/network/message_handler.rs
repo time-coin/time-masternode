@@ -285,21 +285,7 @@ fn spawn_fork_resolution(
     });
 }
 
-/// Direction of the network connection
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConnectionDirection {
-    Inbound,
-    Outbound,
-}
-
-impl std::fmt::Display for ConnectionDirection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConnectionDirection::Inbound => write!(f, "Inbound"),
-            ConnectionDirection::Outbound => write!(f, "Outbound"),
-        }
-    }
-}
+pub use crate::network::connection_direction::ConnectionDirection;
 
 /// Context containing all dependencies needed for message handling
 pub struct MessageContext {
@@ -1881,6 +1867,9 @@ impl MessageHandler {
                         self.peer_ip,
                         crate::time_sync::DRIFT_PENALTY_THRESHOLD_SECS
                     );
+                    if let Some(ai) = &context.ai_system {
+                        ai.attack_detector.record_timestamp(&self.peer_ip, drift);
+                    }
                 }
             }
         }
@@ -7679,6 +7668,9 @@ impl MessageHandler {
 
                     // Track fork errors (for metrics/debugging)
                     let _error_count = context.peer_registry.increment_fork_errors(&self.peer_ip);
+                    if let Some(ai) = &context.ai_system {
+                        ai.attack_detector.record_fork(&self.peer_ip);
+                    }
 
                     // IMMEDIATE fork resolution - don't wait for multiple errors
                     // If we detect a fork, we need to resolve it right away

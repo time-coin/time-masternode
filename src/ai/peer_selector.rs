@@ -197,13 +197,53 @@ impl AIPeerSelector {
     }
 
     pub fn record_failure(&self, peer: &SocketAddr) {
-        let address = peer.to_string();
+        self.record_failure_addr(&peer.to_string());
+    }
+
+    /// Record a failed sync attempt keyed by peer IP (matches network peer strings).
+    pub fn record_failure_addr(&self, peer_ip: &str) {
         let mut perf_lock = self.performance.write();
         let perf = perf_lock
-            .entry(address.clone())
-            .or_insert_with(|| PeerPerformance::new(address));
+            .entry(peer_ip.to_string())
+            .or_insert_with(|| PeerPerformance::new(peer_ip.to_string()));
 
         perf.failure_count += 1;
+        perf.calculate_scores();
+    }
+
+    /// Record a successful sync keyed by peer IP (matches network peer strings).
+    pub fn record_sync_success(&self, peer_ip: &str, response_time_ms: f64, bytes: u64) {
+        let mut perf_lock = self.performance.write();
+        let perf = perf_lock
+            .entry(peer_ip.to_string())
+            .or_insert_with(|| PeerPerformance::new(peer_ip.to_string()));
+
+        perf.success_count += 1;
+
+        let new_avg = if perf.avg_response_time == 0.0 {
+            response_time_ms
+        } else {
+            perf.avg_response_time * (1.0 - self.learning_rate)
+                + response_time_ms * self.learning_rate
+        };
+        perf.avg_response_time = new_avg;
+
+        perf.last_success = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        if bytes > 0 && response_time_ms > 0.0 {
+            let duration_secs = response_time_ms / 1000.0;
+            let observed_bps = bytes as f64 / duration_secs;
+            perf.bandwidth_bytes_per_sec = if perf.bandwidth_bytes_per_sec == 0.0 {
+                observed_bps
+            } else {
+                perf.bandwidth_bytes_per_sec * (1.0 - self.learning_rate)
+                    + observed_bps * self.learning_rate
+            };
+        }
+
         perf.calculate_scores();
     }
 

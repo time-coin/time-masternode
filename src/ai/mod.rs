@@ -26,6 +26,7 @@ pub use transaction_validator::AITransactionValidator;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +99,8 @@ pub struct AISystem {
     pub predictive_sync: Arc<predictive_sync::PredictiveSync>,
     pub network_optimizer: Arc<network_optimizer::NetworkOptimizer>,
     pub metrics_collector: Arc<metrics_dashboard::AIMetricsCollector>,
+    /// Latest consensus health snapshot from Blockchain (fed each metrics cycle).
+    latest_consensus_health: RwLock<Option<consensus_health::HealthPrediction>>,
 }
 
 impl AISystem {
@@ -125,7 +128,15 @@ impl AISystem {
             predictive_sync,
             network_optimizer,
             metrics_collector,
+            latest_consensus_health: RwLock::new(None),
         })
+    }
+
+    /// Feed consensus health predictions from Blockchain into the metrics dashboard.
+    pub fn ingest_consensus_health(&self, health: consensus_health::HealthPrediction) {
+        if let Ok(mut slot) = self.latest_consensus_health.write() {
+            *slot = Some(health);
+        }
     }
 
     /// Feed live network stats into the optimizer so health scores reflect reality.
@@ -201,6 +212,12 @@ impl AISystem {
         let peer_stats = self.peer_selector.get_statistics();
         let network_stats = self.network_optimizer.get_statistics();
 
+        let consensus_snapshot = self
+            .latest_consensus_health
+            .read()
+            .ok()
+            .and_then(|g| g.clone());
+
         let dashboard = metrics_dashboard::AIMetricsDashboard {
             timestamp: now,
             anomaly_detection: metrics_dashboard::AnomalyMetrics {
@@ -224,11 +241,23 @@ impl AISystem {
                 peer_diversity_score: 0.0,
             },
             consensus_health: metrics_dashboard::ConsensusHealthMetrics {
-                consensus_score: 0.0,
-                fork_probability: 0.0,
-                network_agreement: 0.0,
-                health_predictions_made: 0,
-                prediction_accuracy: 0.0,
+                consensus_score: consensus_snapshot
+                    .as_ref()
+                    .map(|h| h.health_score)
+                    .unwrap_or(0.0),
+                fork_probability: consensus_snapshot
+                    .as_ref()
+                    .map(|h| h.fork_probability)
+                    .unwrap_or(0.0),
+                network_agreement: consensus_snapshot
+                    .as_ref()
+                    .map(|h| h.confidence)
+                    .unwrap_or(0.0),
+                health_predictions_made: if consensus_snapshot.is_some() { 1 } else { 0 },
+                prediction_accuracy: consensus_snapshot
+                    .as_ref()
+                    .map(|h| h.confidence)
+                    .unwrap_or(0.0),
             },
             network_optimization: metrics_dashboard::NetworkOptimizationMetrics {
                 optimizations_applied: 0,

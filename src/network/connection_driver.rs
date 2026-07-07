@@ -8,8 +8,6 @@
 //! `drive_inbound` mirrors the same pattern for inbound peers, consolidating the
 //! 2500-line `handle_peer` body that previously lived in `server.rs`.
 
-#![allow(dead_code)]
-
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -132,6 +130,10 @@ impl ConnectionDriver {
         // Transition Connecting ΓåÆ Connected in the connection-state machine.
         self.connection_manager.mark_connected(&peer_ip);
 
+        if let Some(ref ai) = self.ai_system {
+            ai.attack_detector.record_peer_connect(&peer_ip);
+        }
+
         // Masternodes get relaxed ping timeouts and bypass some backoff checks.
         if is_masternode {
             self.connection_manager.mark_whitelisted(&peer_ip);
@@ -192,6 +194,10 @@ impl ConnectionDriver {
         }
 
         let elapsed = start.elapsed();
+
+        if let Some(ref ai) = self.ai_system {
+            ai.attack_detector.record_peer_disconnect(&peer_ip);
+        }
 
         // If this peer is a registered masternode, mark it inactive so it stops
         // receiving rewards until it reconnects.
@@ -766,6 +772,9 @@ impl ConnectionDriver {
                                             // into PeerConnectionRegistry (the message router).
                                             tracing::info!("≡ƒô¥ Registering {} in PeerConnectionRegistry (peer_addr: {})", ip_str, peer_addr);
                                             self.peer_registry.register_peer(ip_str.clone(), writer_tx.clone()).await;
+                                            if let Some(ref ai) = self.ai_system {
+                                                ai.attack_detector.record_peer_connect(&ip_str);
+                                            }
                                             tracing::debug!("Γ£à Successfully registered {} in registry", ip_str);
 
                                             // Send ACK to confirm handshake was processed
@@ -1026,10 +1035,9 @@ impl ConnectionDriver {
             {
                 tracing::debug!("Note: {} is not a registered masternode ({})", ip_str, e);
             }
-            // Notify AI detector of masternode disconnect for synchronized cycling detection (AV3).
-            // If ΓëÑ5 nodes from the same /24 subnet disconnect within 30s, the AI will recommend
-            // BanSubnet, which the enforcement loop applies on its next 30s tick.
+            // Notify AI detector of disconnect for sybil/eclipse tracking and AV3 subnet storms.
             if let Some(ref ai) = self.ai_system {
+                ai.attack_detector.record_peer_disconnect(&ip_str);
                 ai.attack_detector.record_synchronized_disconnect(&ip_str);
             }
         }
