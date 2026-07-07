@@ -2846,7 +2846,7 @@ impl ConsensusEngine {
         // True self-send: all inputs from one address, all outputs back to that same address.
         // Used to exempt consolidations from the proportional fee check.
         let is_self_send_consolidation = single_input_address
-            && input_address.as_deref().map_or(false, |addr| {
+            && input_address.as_deref().is_some_and(|addr| {
                 tx.outputs.iter().all(|o| {
                     std::str::from_utf8(&o.script_pubkey)
                         .map(|s| s == addr)
@@ -3083,6 +3083,60 @@ impl ConsensusEngine {
         Ok(())
     }
 
+    /// Returns true when another in-pool transaction (pending or confirmed) spends an
+    /// overlapping input, or a peer has locked/spent an input for a different TX.
+    pub fn has_double_spend_conflict(&self, inputs: &[TxInput], exclude_txid: &Hash256) -> bool {
+        if self
+            .tx_pool
+            .has_conflicting_transaction(inputs, exclude_txid)
+        {
+            return true;
+        }
+
+        for input in inputs {
+            let outpoint = &input.previous_output;
+            if matches!(
+                self.utxo_manager.get_state(outpoint),
+                Some(UTXOState::Locked { txid, .. })
+                    | Some(UTXOState::SpentPending { txid, .. })
+                    | Some(UTXOState::SpentFinalized { txid, .. })
+                    | Some(UTXOState::Archived { txid, .. })
+                    if txid != *exclude_txid
+            ) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Returns true when any input is already spent/finalized by a different transaction.
+    /// Unlike `has_double_spend_conflict`, this is a hard reject (no TimeVote resolution).
+    pub fn inputs_already_spent_by_other(&self, inputs: &[TxInput], our_txid: &Hash256) -> bool {
+        for input in inputs {
+            let outpoint = &input.previous_output;
+            match self.utxo_manager.get_state(outpoint) {
+                Some(UTXOState::SpentFinalized { txid, .. })
+                | Some(UTXOState::SpentPending { txid, .. })
+                | Some(UTXOState::Archived { txid, .. })
+                    if txid != *our_txid =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+
+            if self.utxo_manager.is_tombstoned(outpoint) {
+                match self.utxo_manager.get_state(outpoint) {
+                    Some(UTXOState::SpentFinalized { txid, .. }) if txid == *our_txid => {}
+                    _ => return true,
+                }
+            }
+        }
+
+        false
+    }
+
     /// Submit a new transaction to the network with lock-based double-spend prevention.
     /// Returns the validated fee on success.
     ///
@@ -3210,6 +3264,16 @@ impl ConsensusEngine {
         Ok(txid)
     }
 
+    /// Remove a TX from the pending pool, unlock its inputs, and mark it Rejected.
+    pub async fn reject_failed_voting_transaction(&self, txid: Hash256, reason: String) {
+        let tx = self.tx_pool.get_pending(&txid);
+        self.tx_pool.reject_transaction(txid, reason.clone());
+        if let Some(tx) = tx {
+            self.unlock_transaction_inputs(&tx, &txid).await;
+        }
+        self.transition_to_rejected(txid, reason);
+    }
+
     /// Helper to unlock transaction inputs
     async fn unlock_transaction_inputs(&self, tx: &Transaction, txid: &Hash256) {
         for input in &tx.inputs {
@@ -3277,6 +3341,13 @@ impl ConsensusEngine {
             ));
         }
 
+        if !tx.inputs.is_empty() && self.inputs_already_spent_by_other(&tx.inputs, &txid) {
+            return Err(format!(
+                "Transaction {} rejected: input already spent by another transaction",
+                hex::encode(txid)
+            ));
+        }
+
         // UTXOs are already in Locked state - DO NOT transition to SpentPending here
         // That transition happens when voting actually starts (after broadcast)
 
@@ -3332,19 +3403,15 @@ impl ConsensusEngine {
             .map_err(|e| format!("Failed to add to pool: {}", e))?;
 
         // ===== timevote CONSENSUS INTEGRATION =====
-        // Start TimeVote consensus for this transaction
-        // Use validators from consensus engine (which queries masternode registry)
-        let validators_for_consensus = self.timevote.get_validators();
-
-        // Conflict-only voting: check if any other pending TX is spending the same UTXOs.
+        // Conflict-only voting: check pool + UTXO lock/spent state for competing TXs.
         // If no conflict, auto-finalize immediately — 67% consensus is only needed when two
         // transactions compete for the same UTXO (genuine double-spend scenario).
         // Special TXs (masternode ops) have no inputs and are always conflict-free.
-        let has_conflict = self.tx_pool.has_conflicting_transaction(&tx.inputs, &txid);
+        let has_conflict = self.has_double_spend_conflict(&tx.inputs, &txid);
 
         if has_conflict {
             tracing::warn!(
-                "⚠️ TX {} conflicts with a pending double-spend — initiating TimeVote consensus",
+                "⚠️ TX {} conflicts with another double-spend — initiating TimeVote consensus",
                 hex::encode(txid)
             );
         } else {
@@ -3354,26 +3421,9 @@ impl ConsensusEngine {
             );
         }
 
-        // BYPASS: Auto-finalize when:
-        //   (a) No double-spend conflict detected (conflict-only voting)
-        //   (b) Insufficient active validators (<3) for consensus to function
-        //   (c) TIMECOIN_DEV_MODE=1 is set
-        let dev_mode = std::env::var("TIMECOIN_DEV_MODE").unwrap_or_default() == "1";
-
-        if !has_conflict || validators_for_consensus.len() < 3 || dev_mode {
-            if dev_mode {
-                tracing::warn!(
-                    "⚡ DEV MODE: Auto-finalizing TX {} (TIMECOIN_DEV_MODE=1)",
-                    hex::encode(txid)
-                );
-            } else if validators_for_consensus.len() < 3 {
-                tracing::warn!(
-                    "⚡ Auto-finalizing TX {} - insufficient validators ({} < 3) for consensus",
-                    hex::encode(txid),
-                    validators_for_consensus.len()
-                );
-            }
-
+        // Auto-finalize only when uncontested. Conflicts always enter TimeVote even if
+        // validator count is low — never auto-finalize competing TXs.
+        if !has_conflict {
             // Move directly to finalized pool
             // Get TX before finalizing since PoolEntry is private
             let tx_for_broadcast = tx.clone();
@@ -3514,9 +3564,9 @@ impl ConsensusEngine {
 
         // PRIORITY: Spawn with high priority for instant finality
         tokio::spawn(async move {
-            // The TimeVoteResponse handler in server.rs accumulates votes and
-            // finalizes when 51% threshold is met. This loop monitors for that
-            // finalization or auto-finalizes on timeout.
+            // The TimeVoteResponse handler finalizes when the 67% threshold is met.
+            // This loop monitors for that finalization; on timeout it only
+            // auto-finalizes if quorum was actually reached — otherwise rejects.
             let initial_deadline = Duration::from_secs(5);
             let max_deadline = Duration::from_secs(15);
             let poll_interval = Duration::from_millis(50);
@@ -3567,11 +3617,10 @@ impl ConsensusEngine {
                         .iter()
                         .map(|mn| mn.tier.sampling_weight())
                         .sum();
-                    // Liveness fallback: if stalled >30s at 67%, fall back to 51%
                     let elapsed_secs = start.elapsed().as_secs();
                     let q_percent = if elapsed_secs >= 30 { 51u64 } else { 67u64 };
-                    let threshold = (total_avs_weight * q_percent).div_ceil(100);
-                    let min_weight_floor = threshold.div_ceil(4); // 25% of threshold
+                    let (threshold, min_weight_floor) =
+                        vote_finality_threshold(total_avs_weight, elapsed_secs);
 
                     if q_percent == 51 {
                         tracing::warn!(
@@ -3592,119 +3641,135 @@ impl ConsensusEngine {
                         continue;
                     }
 
-                    if preference == Preference::Accept {
-                        // Auto-finalize: UTXOs are locked, double-spend impossible
+                    if preference != Preference::Accept {
                         tracing::warn!(
-                            "⚠️ TX {} timed out after {}s (weight: {}, floor: {}). Auto-finalizing (UTXOs locked)",
+                            "❌ TX {} timed out after {}s with Reject preference — dropping",
+                            hex::encode(txid),
+                            vote_deadline.as_secs()
+                        );
+                        consensus_engine_clone
+                            .reject_failed_voting_transaction(
+                                txid,
+                                "TimeVote rejected by validators".to_string(),
+                            )
+                            .await;
+                        break;
+                    }
+
+                    if weight < threshold {
+                        tracing::warn!(
+                            "❌ TX {} vote timeout after {}s: weight {} < threshold {} ({}%) — rejecting",
                             hex::encode(txid),
                             vote_deadline.as_secs(),
                             weight,
-                            min_weight_floor
+                            threshold,
+                            q_percent
+                        );
+                        consensus_engine_clone
+                            .reject_failed_voting_transaction(
+                                txid,
+                                format!(
+                                    "TimeVote quorum not reached: {} < {} ({}% of AVS)",
+                                    weight, threshold, q_percent
+                                ),
+                            )
+                            .await;
+                        break;
+                    }
+
+                    tracing::warn!(
+                        "⚠️ TX {} timed out after {}s but met quorum (weight: {} >= {}). Auto-finalizing",
+                        hex::encode(txid),
+                        vote_deadline.as_secs(),
+                        weight,
+                        threshold
+                    );
+
+                    let tx_for_broadcast = tx_pool.get_pending(&txid);
+                    tx_pool.finalize_transaction(txid);
+
+                    if tx_pool.is_finalized(&txid) {
+                        tracing::info!(
+                            "✅ TX {} auto-finalized after vote timeout (weight: {})",
+                            hex::encode(txid),
+                            weight
                         );
 
-                        let tx_for_broadcast = tx_pool.get_pending(&txid);
-                        tx_pool.finalize_transaction(txid);
-
-                        if tx_pool.is_finalized(&txid) {
-                            tracing::info!(
-                                "✅ TX {} auto-finalized (UTXO-lock protected, weight: {})",
-                                hex::encode(txid),
-                                weight
-                            );
-
-                            // Transition input UTXOs from Locked → SpentFinalized
-                            // and create output UTXOs as Unspent
-                            if let Some(ref tx_data) = tx_for_broadcast {
-                                for input in &tx_data.inputs {
-                                    consensus_engine_clone
-                                        .utxo_manager
-                                        .mark_timevote_finalized(&input.previous_output, txid)
-                                        .await;
-                                }
-                                for (idx, output) in tx_data.outputs.iter().enumerate() {
-                                    let outpoint = OutPoint {
-                                        txid,
-                                        vout: idx as u32,
-                                    };
-                                    let utxo = UTXO {
-                                        outpoint: outpoint.clone(),
-                                        value: output.value,
-                                        script_pubkey: output.script_pubkey.clone(),
-                                        address: String::from_utf8(output.script_pubkey.clone())
-                                            .unwrap_or_default(),
-                                        masternode_key: None,
-                                    };
-                                    if let Err(e) =
-                                        consensus_engine_clone.utxo_manager.add_utxo(utxo).await
-                                    {
-                                        tracing::warn!(
-                                            "Failed to add output UTXO vout={}: {}",
-                                            idx,
-                                            e
-                                        );
-                                    }
-                                    consensus_engine_clone
-                                        .utxo_manager
-                                        .update_state(&outpoint, UTXOState::Unspent);
-                                }
-                            }
-
-                            // Try to assemble TimeProof from any votes that arrived
-                            match consensus.assemble_timeproof(txid) {
-                                Ok(proof) => {
-                                    tracing::info!(
-                                        "📜 TimeProof assembled for TX {} with {} votes",
-                                        hex::encode(txid),
-                                        proof.votes.len()
-                                    );
-                                    let _ = consensus_engine_clone
-                                        .finality_proof_mgr
-                                        .store_timeproof(proof.clone());
-
-                                    // Only broadcast if proof weight meets threshold;
-                                    // peers reject under-weight proofs with "Insufficient weight"
-                                    if weight >= threshold {
-                                        consensus_engine_clone.broadcast_timeproof(proof).await;
-                                    } else {
-                                        tracing::debug!(
-                                            "⏭️ Skipping TimeProof broadcast for auto-finalized TX {} (weight {} < threshold {})",
-                                            hex::encode(txid), weight, threshold
-                                        );
-                                    }
-                                }
-                                Err(_) => {
-                                    tracing::debug!(
-                                        "No votes available for TimeProof assembly on TX {}",
-                                        hex::encode(txid)
-                                    );
-                                }
-                            }
-
-                            if let Some(tx_data) = tx_for_broadcast {
+                        // Transition input UTXOs from Locked → SpentFinalized
+                        // and create output UTXOs as Unspent
+                        if let Some(ref tx_data) = tx_for_broadcast {
+                            for input in &tx_data.inputs {
                                 consensus_engine_clone
-                                    .broadcast(NetworkMessage::TransactionFinalized {
-                                        txid,
-                                        tx: tx_data,
-                                    })
+                                    .utxo_manager
+                                    .mark_timevote_finalized(&input.previous_output, txid)
                                     .await;
                             }
+                            for (idx, output) in tx_data.outputs.iter().enumerate() {
+                                let outpoint = OutPoint {
+                                    txid,
+                                    vout: idx as u32,
+                                };
+                                let utxo = UTXO {
+                                    outpoint: outpoint.clone(),
+                                    value: output.value,
+                                    script_pubkey: output.script_pubkey.clone(),
+                                    address: String::from_utf8(output.script_pubkey.clone())
+                                        .unwrap_or_default(),
+                                    masternode_key: None,
+                                };
+                                if let Err(e) =
+                                    consensus_engine_clone.utxo_manager.add_utxo(utxo).await
+                                {
+                                    tracing::warn!("Failed to add output UTXO vout={}: {}", idx, e);
+                                }
+                                consensus_engine_clone
+                                    .utxo_manager
+                                    .update_state(&outpoint, UTXOState::Unspent);
+                            }
                         }
-                        consensus
-                            .finalized_txs
-                            .insert(txid, (Preference::Accept, Instant::now()));
 
-                        // Update status
-                        tx_status_map.insert(
-                            txid,
-                            TransactionStatus::Finalized {
-                                finalized_at: chrono::Utc::now().timestamp_millis(),
-                                vfp_weight: weight,
-                            },
-                        );
+                        match consensus.assemble_timeproof(txid) {
+                            Ok(proof) => {
+                                tracing::info!(
+                                    "📜 TimeProof assembled for TX {} with {} votes",
+                                    hex::encode(txid),
+                                    proof.votes.len()
+                                );
+                                let _ = consensus_engine_clone
+                                    .finality_proof_mgr
+                                    .store_timeproof(proof.clone());
+                                consensus_engine_clone.broadcast_timeproof(proof).await;
+                            }
+                            Err(_) => {
+                                tracing::debug!(
+                                    "No votes available for TimeProof assembly on TX {}",
+                                    hex::encode(txid)
+                                );
+                            }
+                        }
 
-                        // Notify WS subscribers about finalized transaction
-                        let _ = finalized_signal.send(txid);
+                        if let Some(tx_data) = tx_for_broadcast {
+                            consensus_engine_clone
+                                .broadcast(NetworkMessage::TransactionFinalized {
+                                    txid,
+                                    tx: tx_data,
+                                })
+                                .await;
+                        }
                     }
+                    consensus
+                        .finalized_txs
+                        .insert(txid, (Preference::Accept, Instant::now()));
+
+                    tx_status_map.insert(
+                        txid,
+                        TransactionStatus::Finalized {
+                            finalized_at: chrono::Utc::now().timestamp_millis(),
+                            vfp_weight: weight,
+                        },
+                    );
+
+                    let _ = finalized_signal.send(txid);
                     break;
                 }
 
@@ -5836,6 +5901,14 @@ pub fn partition_non_conflicting(txs: Vec<Transaction>) -> Vec<Vec<Transaction>>
     groups
 }
 
+/// Returns `(finality_threshold, min_weight_floor)` for TimeVote timeout handling.
+/// Uses 67% of AVS weight; falls back to 51% after 30s stall (Protocol §7.6).
+pub(crate) fn vote_finality_threshold(total_avs_weight: u64, elapsed_secs: u64) -> (u64, u64) {
+    let q_percent = if elapsed_secs >= 30 { 51u64 } else { 67u64 };
+    let threshold = (total_avs_weight * q_percent).div_ceil(100);
+    (threshold, threshold.div_ceil(4))
+}
+
 #[cfg(test)]
 fn create_test_registry() -> Arc<MasternodeRegistry> {
     let db = Arc::new(sled::Config::new().temporary(true).open().unwrap());
@@ -5924,6 +5997,19 @@ mod tests {
         let tx_b = make_tx(&[(2, 0)]);
         let groups = partition_non_conflicting(vec![tx_a, tx_b]);
         assert_eq!(groups.len(), 2);
+    }
+
+    #[test]
+    fn test_vote_finality_threshold_requires_quorum() {
+        let (threshold, floor) = vote_finality_threshold(1000, 0);
+        assert_eq!(threshold, 670);
+        assert_eq!(floor, 168);
+        assert!(0 < threshold, "zero votes must not satisfy quorum");
+        assert!(669 < threshold);
+        assert!(670 >= threshold);
+
+        let (fallback, _) = vote_finality_threshold(1000, 30);
+        assert_eq!(fallback, 510);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -3545,56 +3545,87 @@ impl MessageHandler {
                 .record_transaction(&hex::encode(&txid[..8]), &self.peer_ip);
         }
 
-        // Process transaction through consensus
+        // Lock, validate, then process — same path as submit_transaction (not raw process_transaction).
         if let Some(consensus) = &context.consensus {
-            match consensus.process_transaction(tx.clone(), None).await {
-                Ok(_) => {
-                    debug!(
-                        "✅ [{}] Transaction {} processed",
-                        self.direction,
-                        hex::encode(&txid[..8])
-                    );
+            if consensus.tx_pool.has_transaction(&txid) {
+                debug!(
+                    "🔁 [{}] Transaction {} already in pool",
+                    self.direction,
+                    hex::encode(&txid[..8])
+                );
+                return Ok(None);
+            }
 
-                    // Gossip to other peers
-                    if let Some(broadcast_tx) = &context.broadcast_tx {
-                        let msg = NetworkMessage::TransactionBroadcast(tx.clone());
-                        if let Ok(receivers) = broadcast_tx.send(msg) {
-                            debug!(
-                                "🔄 [{}] Gossiped transaction to {} peer(s)",
-                                self.direction, receivers
-                            );
+            if consensus.inputs_already_spent_by_other(&tx.inputs, &txid) {
+                debug!(
+                    "🚫 [{}] Transaction {} rejected: input already spent",
+                    self.direction,
+                    hex::encode(&txid[..8])
+                );
+                return Ok(None);
+            }
+
+            match consensus.lock_and_validate_transaction(&tx).await {
+                Ok(validated_fee) => match consensus
+                    .process_transaction(tx.clone(), Some(validated_fee))
+                    .await
+                {
+                    Ok(_) => {
+                        debug!(
+                            "✅ [{}] Transaction {} processed",
+                            self.direction,
+                            hex::encode(&txid[..8])
+                        );
+
+                        // Gossip to other peers
+                        if let Some(broadcast_tx) = &context.broadcast_tx {
+                            let msg = NetworkMessage::TransactionBroadcast(tx.clone());
+                            if let Ok(receivers) = broadcast_tx.send(msg) {
+                                debug!(
+                                    "🔄 [{}] Gossiped transaction to {} peer(s)",
+                                    self.direction, receivers
+                                );
+                            }
+                        }
+
+                        // Emit WebSocket notification for subscribed wallets
+                        if let Some(ref tx_sender) = context.tx_event_sender {
+                            let outputs: Vec<crate::rpc::websocket::TxOutputInfo> = tx
+                                .outputs
+                                .iter()
+                                .enumerate()
+                                .map(|(i, out)| {
+                                    let address = String::from_utf8(out.script_pubkey.clone())
+                                        .unwrap_or_else(|_| hex::encode(&out.script_pubkey));
+                                    crate::rpc::websocket::TxOutputInfo {
+                                        address,
+                                        amount: out.value as f64 / 100_000_000.0,
+                                        index: i as u32,
+                                    }
+                                })
+                                .collect();
+
+                            let event = crate::rpc::websocket::TransactionEvent {
+                                txid: hex::encode(txid),
+                                outputs,
+                                timestamp: chrono::Utc::now().timestamp(),
+                                status: crate::rpc::websocket::TxEventStatus::Pending,
+                            };
+                            let _ = tx_sender.send(event);
                         }
                     }
-
-                    // Emit WebSocket notification for subscribed wallets
-                    if let Some(ref tx_sender) = context.tx_event_sender {
-                        let outputs: Vec<crate::rpc::websocket::TxOutputInfo> = tx
-                            .outputs
-                            .iter()
-                            .enumerate()
-                            .map(|(i, out)| {
-                                let address = String::from_utf8(out.script_pubkey.clone())
-                                    .unwrap_or_else(|_| hex::encode(&out.script_pubkey));
-                                crate::rpc::websocket::TxOutputInfo {
-                                    address,
-                                    amount: out.value as f64 / 100_000_000.0,
-                                    index: i as u32,
-                                }
-                            })
-                            .collect();
-
-                        let event = crate::rpc::websocket::TransactionEvent {
-                            txid: hex::encode(txid),
-                            outputs,
-                            timestamp: chrono::Utc::now().timestamp(),
-                            status: crate::rpc::websocket::TxEventStatus::Pending,
-                        };
-                        let _ = tx_sender.send(event);
+                    Err(e) => {
+                        debug!(
+                            "⚠️ [{}] Transaction {} rejected: {}",
+                            self.direction,
+                            hex::encode(&txid[..8]),
+                            e
+                        );
                     }
-                }
+                },
                 Err(e) => {
                     debug!(
-                        "⚠️ [{}] Transaction {} rejected: {}",
+                        "🚫 [{}] Transaction {} failed lock/validation: {}",
                         self.direction,
                         hex::encode(&txid[..8]),
                         e
@@ -3780,20 +3811,68 @@ impl MessageHandler {
             return Ok(None);
         }
 
-        // Add to pool if not present — use add_pending (NOT process_transaction) to avoid
-        // AV38: Finality Injection amplification (process_transaction would broadcast a
-        // TimeVoteRequest to all validators, giving ~49x amplification to the attacker).
-        if !consensus.tx_pool.has_transaction(&txid) {
+        if consensus.inputs_already_spent_by_other(&tx.inputs, &txid) {
             tracing::warn!(
-                "⚠️ TransactionFinalized for unknown TX {} from {} — \
-                 adding to pool without consensus re-broadcast (AV38 guard)",
+                "🚫 TransactionFinalized {} from {} dropped — input already spent by another TX",
                 hex::encode(txid),
                 self.peer_ip
             );
             if let Some(ref ai) = context.ai_system {
                 ai.attack_detector.record_finality_injection(&self.peer_ip);
             }
-            let _ = consensus.tx_pool.add_pending(tx.clone(), 0);
+            return Ok(None);
+        }
+
+        if consensus.has_double_spend_conflict(&tx.inputs, &txid) {
+            tracing::warn!(
+                "🚫 TransactionFinalized {} from {} dropped — competes with another in-pool TX",
+                hex::encode(txid),
+                self.peer_ip
+            );
+            if let Some(ref ai) = context.ai_system {
+                ai.attack_detector.record_finality_injection(&self.peer_ip);
+            }
+            return Ok(None);
+        }
+
+        // Add to pool if not present — lock/validate first (AV38: never call process_transaction).
+        if !consensus.tx_pool.has_transaction(&txid) {
+            tracing::warn!(
+                "⚠️ TransactionFinalized for unknown TX {} from {} — \
+                 validating before pool add (AV38 guard)",
+                hex::encode(txid),
+                self.peer_ip
+            );
+            if let Some(ref ai) = context.ai_system {
+                ai.attack_detector.record_finality_injection(&self.peer_ip);
+            }
+            let validated_fee = match consensus.lock_and_validate_transaction(&tx).await {
+                Ok(fee) => fee,
+                Err(e) => {
+                    tracing::warn!(
+                        "🚫 TransactionFinalized {} from {} dropped — validation failed: {}",
+                        hex::encode(txid),
+                        self.peer_ip,
+                        e
+                    );
+                    return Ok(None);
+                }
+            };
+            if let Err(e) = consensus.tx_pool.add_pending(tx.clone(), validated_fee) {
+                tracing::debug!(
+                    "TransactionFinalized {} pool add skipped: {}",
+                    hex::encode(txid),
+                    e
+                );
+            }
+        } else if let Err(e) = consensus.validate_transaction(&tx).await {
+            tracing::warn!(
+                "🚫 TransactionFinalized {} from {} dropped — re-validation failed: {}",
+                hex::encode(txid),
+                self.peer_ip,
+                e
+            );
+            return Ok(None);
         }
 
         // Manual finalization: move TX to finalized pool and update UTXO states
@@ -8691,32 +8770,41 @@ impl MessageHandler {
             state
         );
 
-        // Apply the state update from remote node
+        // Apply peer lock gossip only — never accept spend/unlock state from remote nodes.
         if let Some(consensus) = &context.consensus {
-            consensus
-                .utxo_manager
-                .update_state(&outpoint, state.clone());
-
-            // Individual UTXO lock state changes are debug-only — a single TX with many inputs
-            // would otherwise spam INFO logs and starve the async runtime.
             match state {
                 UTXOState::Locked { txid, .. } => {
+                    match consensus.utxo_manager.lock_utxo(&outpoint, txid) {
+                        Ok(()) => {
+                            tracing::debug!(
+                                "🔒 [{}] Locked UTXO {} for TX {} (peer gossip)",
+                                self.direction,
+                                outpoint,
+                                hex::encode(txid)
+                            );
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                "🚫 [{}] Rejected peer lock on {} for TX {}: {}",
+                                self.direction,
+                                outpoint,
+                                hex::encode(txid),
+                                e
+                            );
+                        }
+                    }
+                }
+                UTXOState::Unspent
+                | UTXOState::SpentPending { .. }
+                | UTXOState::SpentFinalized { .. }
+                | UTXOState::Archived { .. } => {
                     tracing::debug!(
-                        "🔒 [{}] Locked UTXO {} for TX {}",
+                        "🚫 [{}] Rejected peer UTXO state update {} -> {:?}",
                         self.direction,
                         outpoint,
-                        hex::encode(txid)
+                        state
                     );
                 }
-                UTXOState::SpentPending { txid, .. } | UTXOState::SpentFinalized { txid, .. } => {
-                    tracing::debug!(
-                        "💸 [{}] Marked UTXO {} as spent by TX {}",
-                        self.direction,
-                        outpoint,
-                        hex::encode(txid)
-                    );
-                }
-                _ => {}
             }
         }
 

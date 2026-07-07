@@ -475,7 +475,25 @@ impl TransactionPool {
             .collect()
     }
 
-    /// Check if any other pending transaction spends the same UTXOs as `inputs`.
+    fn pool_inputs_overlap(
+        pool: &DashMap<Hash256, PoolEntry>,
+        input_set: &std::collections::HashSet<(Hash256, u32)>,
+        exclude_txid: &Hash256,
+    ) -> bool {
+        pool.iter().any(|entry| {
+            if entry.key() == exclude_txid {
+                return false;
+            }
+            entry
+                .value()
+                .tx
+                .inputs
+                .iter()
+                .any(|i| input_set.contains(&(i.previous_output.txid, i.previous_output.vout)))
+        })
+    }
+
+    /// Check if any other pending or confirmed transaction spends the same UTXOs as `inputs`.
     /// `exclude_txid` is the current transaction — excluded so it doesn't match itself.
     /// Returns `true` when a double-spend conflict exists, `false` when inputs are uncontested.
     pub fn has_conflicting_transaction(
@@ -490,17 +508,8 @@ impl TransactionPool {
             .iter()
             .map(|i| (i.previous_output.txid, i.previous_output.vout))
             .collect();
-        self.pending.iter().any(|entry| {
-            if entry.key() == exclude_txid {
-                return false;
-            }
-            entry
-                .value()
-                .tx
-                .inputs
-                .iter()
-                .any(|i| input_set.contains(&(i.previous_output.txid, i.previous_output.vout)))
-        })
+        Self::pool_inputs_overlap(&self.pending, &input_set, exclude_txid)
+            || Self::pool_inputs_overlap(&self.confirmed, &input_set, exclude_txid)
     }
 
     /// Check if transaction is pending
@@ -1326,6 +1335,25 @@ mod tests {
         assert_eq!(metrics.pending_count, 50);
         assert!(metrics.pending_bytes > 0);
         assert!(metrics.total_fees_pending > 0);
+    }
+
+    #[test]
+    fn test_has_conflicting_transaction_detects_confirmed_pool() {
+        let pool = TransactionPool::new();
+
+        let mut tx_a = create_test_transaction(1000);
+        tx_a.inputs[0].previous_output.txid[0] = 0xAA;
+        let tx_a_id = tx_a.txid();
+        pool.add_pending(tx_a, 100).unwrap();
+        pool.finalize_transaction(tx_a_id);
+        assert!(pool.is_finalized(&tx_a_id));
+
+        let mut tx_b = create_test_transaction(2000);
+        tx_b.inputs[0].previous_output.txid[0] = 0xAA;
+        let tx_b_id = tx_b.txid();
+
+        assert!(pool.has_conflicting_transaction(&tx_b.inputs, &tx_b_id));
+        assert!(!pool.has_conflicting_transaction(&tx_b.inputs, &tx_a_id));
     }
 
     #[test]

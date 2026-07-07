@@ -716,6 +716,44 @@ impl UTXOStateManager {
     /// storage and the address index so that, after a node restart,
     /// `initialize_states` does not resurrect it as `Unspent`.
     pub async fn mark_timevote_finalized(&self, outpoint: &OutPoint, txid: Hash256) {
+        if let Some(state) = self.get_state(outpoint) {
+            match state {
+                UTXOState::SpentFinalized { txid: existing, .. }
+                | UTXOState::SpentPending { txid: existing, .. }
+                | UTXOState::Archived { txid: existing, .. }
+                    if existing != txid =>
+                {
+                    tracing::warn!(
+                        "Refusing to finalize {} for TX {} — already spent by {}",
+                        outpoint,
+                        hex::encode(txid),
+                        hex::encode(existing)
+                    );
+                    return;
+                }
+                UTXOState::Locked { txid: existing, .. } if existing != txid => {
+                    tracing::warn!(
+                        "Refusing to finalize {} for TX {} — locked by {}",
+                        outpoint,
+                        hex::encode(txid),
+                        hex::encode(existing)
+                    );
+                    return;
+                }
+                UTXOState::SpentFinalized { txid: existing, .. } if existing == txid => {
+                    return;
+                }
+                _ => {}
+            }
+        } else if self.is_tombstoned(outpoint) {
+            tracing::warn!(
+                "Refusing to finalize tombstoned {} for TX {}",
+                outpoint,
+                hex::encode(txid)
+            );
+            return;
+        }
+
         // Remove from address index first (needs storage lookup for address)
         if let Some(utxo) = self.storage.get_utxo(outpoint).await {
             self.remove_from_address_index(&utxo.address, outpoint);
@@ -1333,6 +1371,25 @@ mod tests {
 
     fn create_test_txid(seed: u8) -> Hash256 {
         [seed; 32]
+    }
+
+    #[tokio::test]
+    async fn test_mark_timevote_finalized_refuses_overwrite() {
+        let manager = UTXOStateManager::new();
+        let outpoint = create_test_outpoint(1);
+        let utxo = create_test_utxo(1);
+        manager.add_utxo(utxo).await.unwrap();
+
+        let tx_a = create_test_txid(10);
+        let tx_b = create_test_txid(20);
+
+        manager.mark_timevote_finalized(&outpoint, tx_a).await;
+        manager.mark_timevote_finalized(&outpoint, tx_b).await;
+
+        match manager.get_state(&outpoint) {
+            Some(UTXOState::SpentFinalized { txid, .. }) => assert_eq!(txid, tx_a),
+            other => panic!("expected SpentFinalized by tx_a, got {:?}", other),
+        }
     }
 
     /// Phase 1.4 Test 1: Basic double-spend prevention
