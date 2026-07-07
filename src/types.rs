@@ -1141,9 +1141,11 @@ impl AVSSnapshot {
         }
     }
 
-    /// Calculate voting threshold (51% of total weight)
+    /// Calculate voting threshold (67% of total weight, rounded up).
+    /// Used only by `check_timeproof_finality` (monitoring); on-chain proof
+    /// verification uses `TimeProof::verify`, which applies the same ceiling rule.
     pub fn voting_threshold(&self) -> u64 {
-        (self.total_weight * 67) / 100
+        (self.total_weight * 67).div_ceil(100)
     }
 }
 
@@ -1375,6 +1377,15 @@ mod tests {
             special_data: None,
             encrypted_memo: None,
         }
+    }
+
+    #[test]
+    fn test_avs_voting_threshold_uses_ceil() {
+        let snapshot = AVSSnapshot::new(0, vec![("mn1".to_string(), 10)]);
+        // 67% of 10 = 6.7 → ceiling 7 (not floor 6)
+        assert_eq!(snapshot.voting_threshold(), 7);
+        let large = AVSSnapshot::new(1, vec![("mn1".to_string(), 1000)]);
+        assert_eq!(large.voting_threshold(), 670);
     }
 
     #[test]

@@ -5263,6 +5263,7 @@ async fn main() {
     let status_registry = registry.clone();
     let status_production_trigger = production_trigger.clone(); // Trigger to wake up block production
     let status_ai_system = ai_system.clone();
+    let status_peer_registry = peer_connection_registry.clone();
     let shutdown_token_status = shutdown_token.clone();
     let status_handle = tokio::spawn(async move {
         let mut tick_count = 0u64; // Track ticks for cache monitoring
@@ -5369,6 +5370,10 @@ async fn main() {
                             );
                         }
                     }
+
+                    // Feed live peer count into network optimizer every minute
+                    let connected_peers = status_peer_registry.connected_count();
+                    status_ai_system.record_network_snapshot(connected_peers);
 
                     // AI System periodic reporting (every 5 ticks / ~5 minutes)
                     if tick_count % 5 == 0 && tick_count > 0 {
@@ -6098,6 +6103,7 @@ async fn main() {
             network_client.set_reconnection_ai(ai_system.reconnection_ai.clone());
             // Share attack detector so outbound disconnects are tracked for AV3 detection
             network_client.set_attack_detector(ai_system.attack_detector.clone());
+            network_client.set_ai_system(ai_system.clone());
             if let Some(ref tls) = tls_config {
                 network_client.set_tls_config(tls.clone());
             }

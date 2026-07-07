@@ -48,6 +48,8 @@ pub struct NetworkClient {
     network_type: NetworkType,
     /// Attack detector for recording coordinated disconnect events (outbound side of AV3).
     attack_detector: Option<Arc<crate::ai::attack_detector::AttackDetector>>,
+    /// Full AI system for connection-level detection (frame bombs, TLS failures, etc.).
+    ai_system: Option<Arc<crate::ai::AISystem>>,
     /// Discovered peer IPs from time-coin.io.  When non-empty, the daemon
     /// connects to these first on startup (Phase 0); if there is no local
     /// genesis the pyramid expansion in Phase 1 is gated until initial
@@ -105,6 +107,7 @@ impl NetworkClient {
             tls_config: None,
             network_type,
             attack_detector: None,
+            ai_system: None,
             discovered_peer_ips: Vec::new(),
             relay_store: None,
             relay_signing_key: None,
@@ -126,6 +129,11 @@ impl NetworkClient {
     /// Set the attack detector so outbound disconnects are recorded for AV3 detection.
     pub fn set_attack_detector(&mut self, ad: Arc<crate::ai::attack_detector::AttackDetector>) {
         self.attack_detector = Some(ad);
+    }
+
+    /// Wire the full AI system for outbound connection-level attack detection.
+    pub fn set_ai_system(&mut self, ai: Arc<crate::ai::AISystem>) {
+        self.ai_system = Some(ai);
     }
 
     /// Wire the secure messaging relay store so outbound connections can handle MSG_* messages.
@@ -176,6 +184,7 @@ impl NetworkClient {
             tls_config: self.tls_config.clone(),
             network_type: self.network_type,
             attack_detector: self.attack_detector.clone(),
+            ai_system: self.ai_system.clone(),
             relay_store: self.relay_store.clone(),
             relay_signing_key: self.relay_signing_key.clone(),
             contacts_book: self.contacts_book.clone(),
@@ -864,6 +873,7 @@ struct ConnectionResources {
     tls_config: Option<Arc<TlsConfig>>,
     network_type: NetworkType,
     attack_detector: Option<Arc<crate::ai::attack_detector::AttackDetector>>,
+    ai_system: Option<Arc<crate::ai::AISystem>>,
     relay_store: Option<Arc<crate::messaging::relay::RelayStore>>,
     relay_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
     contacts_book: Option<Arc<crate::messaging::contacts::ContactsBook>>,
@@ -916,7 +926,7 @@ impl ConnectionResources {
                 banlist: res.ip_banlist.clone(),
                 tls_config: res.tls_config.clone(),
                 network_type: res.network_type,
-                ai_system: None,
+                ai_system: res.ai_system.clone(),
                 relay_store: res.relay_store.clone(),
                 relay_signing_key: res.relay_signing_key.clone(),
                 contacts_book: res.contacts_book.clone(),

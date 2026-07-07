@@ -1287,7 +1287,16 @@ impl PeerConnection {
                                         if let Some(ref bl) = config.banlist {
                                             bl.write().await.record_frame_bomb_violation(ip, &e);
                                         }
-                                        if let Some(ref ai) = config.ai_system {
+                                        let ai_ref = config
+                                            .ai_system
+                                            .as_ref()
+                                            .or_else(|| {
+                                                config
+                                                    .blockchain
+                                                    .as_ref()
+                                                    .and_then(|b| b.ai_system())
+                                            });
+                                        if let Some(ai) = ai_ref {
                                             ai.attack_detector.record_frame_bomb(&self.peer_ip);
                                         }
                                     }

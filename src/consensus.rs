@@ -1063,7 +1063,9 @@ impl TimeVoteConsensus {
         // Step 4: Update accumulated weight (only for Accept votes)
         let new_weight = if vote.decision == VoteDecision::Accept {
             let mut weight_entry = self.accumulated_weight.entry(txid).or_insert(0);
-            *weight_entry += vote.voter_weight;
+            *weight_entry = weight_entry
+                .checked_add(vote.voter_weight)
+                .ok_or_else(|| "Accumulated vote weight overflow".to_string())?;
             *weight_entry
         } else {
             // Reject votes are tracked but don't contribute to weight
@@ -1106,8 +1108,10 @@ impl TimeVoteConsensus {
         self.accumulated_weight.get(txid).map(|w| *w).unwrap_or(0)
     }
 
-    /// Check if transaction meets TimeProof finality threshold (Protocol §8.3)
-    /// Returns Ok(true) if accumulated weight >= 51% of AVS weight (simple majority)
+    /// Check if transaction meets TimeProof finality threshold (Protocol §8.3).
+    /// Monitoring/helper path only — live finalization uses `TimeProof::verify` and
+    /// `handle_timevote_response`, which apply the same 67% ceiling rule.
+    /// Returns Ok(true) if accumulated Accept weight >= 67% of AVS weight.
     pub fn check_timeproof_finality(
         &self,
         txid: &Hash256,
@@ -1119,11 +1123,15 @@ impl TimeVoteConsensus {
             return Ok(false);
         }
 
-        // Calculate total weight of valid votes
+        // Calculate total weight of valid Accept votes (matches assemble_timeproof)
         let mut total_weight = 0u64;
         let mut seen_voters = std::collections::HashSet::new();
 
         for vote in &votes {
+            if vote.decision != VoteDecision::Accept {
+                continue;
+            }
+
             // Voter must be in snapshot
             if !snapshot.contains_validator(&vote.voter_mn_id) {
                 continue; // Skip votes from non-AVS validators
@@ -1136,11 +1144,12 @@ impl TimeVoteConsensus {
             seen_voters.insert(vote.voter_mn_id.clone());
 
             if let Some(weight) = snapshot.get_validator_weight(&vote.voter_mn_id) {
-                total_weight += weight;
+                total_weight = total_weight
+                    .checked_add(weight)
+                    .ok_or_else(|| "TimeProof finality weight overflow".to_string())?;
             }
         }
 
-        // Check threshold: 51% of total weight
         let threshold = snapshot.voting_threshold();
         Ok(total_weight >= threshold)
     }
@@ -1197,23 +1206,22 @@ impl TimeVoteConsensus {
         // Get or create competing proofs vector for this transaction
         let mut proofs = self.competing_timeproofs.entry(txid).or_default();
 
-        let mut weights = Vec::new();
-        let mut max_weight = new_proof_weight;
-        let mut winning_index = proofs.len(); // New proof is index = current length
+        let mut weights = Vec::with_capacity(proofs.len() + 1);
 
         // Collect weights of existing proofs
         for existing_proof in proofs.iter() {
-            let existing_weight = self.calculate_timeproof_weight(existing_proof)?;
-            weights.push(existing_weight);
-            if existing_weight > max_weight {
-                max_weight = existing_weight;
-                winning_index = proofs.len() - 1;
-            }
+            weights.push(self.calculate_timeproof_weight(existing_proof)?);
         }
 
         // Add new proof
         proofs.push(new_proof);
         weights.push(new_proof_weight);
+
+        let (winning_index, &max_weight) = weights
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, w)| *w)
+            .ok_or_else(|| "No competing proof weights".to_string())?;
 
         // Conflict detected if 2+ proofs exist
         if proofs.len() >= 2 {

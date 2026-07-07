@@ -128,6 +128,31 @@ impl AISystem {
         })
     }
 
+    /// Feed live network stats into the optimizer so health scores reflect reality.
+    pub fn record_network_snapshot(&self, active_connections: usize) {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let reconnect_stats = self.reconnection_ai.get_stats();
+        let avg_latency_ms = if reconnect_stats.total_peers > 0 {
+            // Proxy latency from per-peer connect-time profiles until ping RTT is aggregated.
+            1000.0 * (1.0 - reconnect_stats.avg_reliability).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        self.network_optimizer
+            .record_metrics(network_optimizer::NetworkMetrics {
+                timestamp: now,
+                active_connections,
+                bandwidth_usage: 0,
+                avg_latency_ms,
+                message_rate: self.anomaly_detector.get_anomaly_count() as f64,
+            });
+    }
+
     /// Propagate signals between AI modules so they inform each other.
     ///
     /// Called periodically to let cross-module intelligence flow:

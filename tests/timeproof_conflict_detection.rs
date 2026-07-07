@@ -192,6 +192,31 @@ async fn test_stale_proof_detection_from_partition() {
     assert_eq!(conflict.winning_proof_index, 0, "Canonical should win");
 }
 
+#[tokio::test]
+async fn test_winning_index_with_three_existing_proofs() {
+    // Regression: winner must be the highest-weight proof, not the last existing entry.
+    let consensus = create_test_consensus();
+    let txid = create_dummy_hash(102);
+
+    for (i, weight) in [1000u64, 500, 800].iter().enumerate() {
+        let vote = create_test_vote(&format!("v{}", i), *weight, txid, VoteDecision::Accept);
+        let proof = create_test_timeproof(txid, vec![vote], 5);
+        consensus.detect_competing_timeproof(proof, *weight).ok();
+    }
+
+    let vote = create_test_vote("v_new", 300, txid, VoteDecision::Accept);
+    let proof = create_test_timeproof(txid, vec![vote], 5);
+    let winning = consensus
+        .detect_competing_timeproof(proof, 300)
+        .expect("Detection");
+
+    assert_eq!(winning, 0, "Proof at index 0 (weight 1000) should win");
+
+    let conflict = consensus.get_conflict_info(txid, 5).unwrap();
+    assert_eq!(conflict.winning_proof_index, 0);
+    assert_eq!(conflict.max_weight, 1000);
+}
+
 // ============================================================================
 // Metrics and Monitoring Tests
 // ============================================================================
