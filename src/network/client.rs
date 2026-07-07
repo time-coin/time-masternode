@@ -1,13 +1,7 @@
-//! Alternative network client implementation.
+//! Outbound P2P connection manager.
 //!
-//! Note: This module provides a structured NetworkClient abstraction but is
-//! currently unused. Connection management is handled directly in main.rs
-//! with more fine-grained control over the connection lifecycle.
-//!
-//! This implementation could be used in the future if we want to:
-//! - Encapsulate all outbound connection logic in one place
-//! - Provide a cleaner API for connection management
-//! - Simplify main.rs by delegating to NetworkClient
+//! `NetworkClient::start()` runs phased peer discovery and dials outbound peers.
+//! Per-connection lifecycle is delegated to `ConnectionDriver::drive_outbound`.
 
 #![allow(dead_code)]
 

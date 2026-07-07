@@ -15,35 +15,14 @@ use crate::network::peer_connection::PeerStateManager;
 use crate::network::rate_limiter::RateLimiter;
 use crate::types::OutPoint;
 use crate::utxo_manager::UTXOStateManager;
-use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::IpAddr;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::net::{TcpListener, TcpStream};
+use std::time::Duration;
+use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
-
-// Phase 2 Enhancement: Track peers on different forks
-// NOTE: Currently unused after fork resolution consolidation, but kept for potential future use
-#[allow(dead_code)]
-#[derive(Clone, Debug)]
-pub struct PeerForkStatus {
-    consecutive_invalid_blocks: u32,
-    last_invalid_at: Instant,
-    on_incompatible_fork: bool,
-}
-
-impl Default for PeerForkStatus {
-    fn default() -> Self {
-        Self {
-            consecutive_invalid_blocks: 0,
-            last_invalid_at: Instant::now(),
-            on_incompatible_fork: false,
-        }
-    }
-}
 
 #[allow(dead_code)]
 pub struct NetworkServer {
@@ -68,7 +47,6 @@ pub struct NetworkServer {
     pub peer_state: Arc<PeerStateManager>,
     pub local_ip: Option<String>, // Our own public IP (without port) to avoid self-connection
     pub block_cache: Arc<BlockCache>, // Phase 3E.1: Bounded cache for TimeLock voting
-    pub peer_fork_status: Arc<DashMap<String, PeerForkStatus>>, // Track peers on incompatible forks
     pub ai_system: Option<Arc<crate::ai::AISystem>>, // AI attack detection & mitigation
     pub tls_config: Option<Arc<crate::network::tls::TlsConfig>>, // TLS for encrypted connections
     pub network_type: crate::network_type::NetworkType,
@@ -191,7 +169,6 @@ impl NetworkServer {
                 1000,                     // Max 1000 blocks
                 Duration::from_secs(300), // 5 minute expiration
             )), // Phase 3E.1: Bounded LRU cache
-            peer_fork_status: Arc::new(DashMap::new()), // Phase 2: Track fork status
             ai_system: None,
             tls_config: None,
             network_type,
@@ -673,12 +650,10 @@ impl NetworkServer {
                 is_masternode: false,
             };
 
-            let peers = self.peers.clone();
             let subs = self.subscriptions.clone();
             let notifier = self.tx_notifier.subscribe();
             let utxo_mgr = self.utxo_manager.clone();
             let consensus = self.consensus.clone();
-            let rate_limiter = self.rate_limiter.clone();
             let banlist = self.banlist.clone();
             let mn_registry = self.masternode_registry.clone();
             let blockchain = self.blockchain.clone();
@@ -692,7 +667,6 @@ impl NetworkServer {
             let peer_reg = self.peer_registry.clone();
             let local_ip = self.local_ip.clone();
             let block_cache = self.block_cache.clone();
-            let fork_status = self.peer_fork_status.clone();
             let tls_config = self.tls_config.clone();
             let network_type = self.network_type;
             let ai_system = self.ai_system.clone();
@@ -701,38 +675,39 @@ impl NetworkServer {
             let contacts_book = self.contacts_book.clone();
 
             tokio::spawn(async move {
-                let _ = handle_peer(
-                    stream,
-                    peer,
-                    peers,
-                    subs,
-                    notifier,
-                    utxo_mgr,
-                    consensus,
-                    rate_limiter,
-                    banlist,
-                    mn_registry,
+                let driver = crate::network::connection_driver::ConnectionDriver {
+                    connection_manager: conn_mgr,
+                    masternode_registry: mn_registry,
                     blockchain,
-                    peer_mgr,
-                    broadcast_tx,
-                    seen_blocks,
-                    seen_txs,
-                    seen_tx_fin,
-                    seen_locks,
-                    conn_mgr,
-                    peer_reg,
-                    local_ip,
-                    block_cache,
-                    fork_status,
-                    is_whitelisted,
+                    peer_registry: peer_reg,
+                    banlist: Some(banlist.clone()),
                     tls_config,
                     network_type,
                     ai_system,
+                    relay_store: relay_store.clone(),
+                    relay_signing_key: relay_signing_key.clone(),
+                    contacts_book: contacts_book.clone(),
+                };
+                let resources = crate::network::connection_driver::InboundResources {
+                    consensus,
+                    peer_manager: peer_mgr,
+                    banlist,
+                    broadcast_tx,
+                    seen_blocks,
+                    seen_transactions: seen_txs,
+                    seen_tx_finalized: seen_tx_fin,
+                    seen_utxo_locks: seen_locks,
+                    local_ip,
+                    block_cache,
+                    utxo_mgr,
+                    subs,
                     relay_store,
                     relay_signing_key,
                     contacts_book,
-                )
-                .await;
+                };
+                let _ = driver
+                    .drive_inbound(stream, peer.addr, is_whitelisted, notifier, resources)
+                    .await;
             });
         }
     }
@@ -768,74 +743,6 @@ const MAX_TX_SIZE: usize = 100_000;
 const MAX_VOTE_SIZE: usize = 1_000;
 #[allow(dead_code)]
 const MAX_GENERAL_SIZE: usize = 50_000;
-
-#[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // Called by NetworkServer::run which is used by binary
-async fn handle_peer(
-    stream: TcpStream,
-    peer: PeerInfo,
-    _peers: Arc<RwLock<HashMap<String, PeerInfo>>>,
-    subs: Arc<RwLock<HashMap<String, Subscription>>>,
-    notifier: broadcast::Receiver<NetworkMessage>,
-    utxo_mgr: Arc<UTXOStateManager>,
-    consensus: Arc<ConsensusEngine>,
-    _rate_limiter: Arc<RwLock<RateLimiter>>,
-    banlist: Arc<RwLock<IPBanlist>>,
-    masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
-    blockchain: Arc<crate::blockchain::Blockchain>,
-    peer_manager: Arc<crate::peer_manager::PeerManager>,
-    broadcast_tx: broadcast::Sender<NetworkMessage>,
-    seen_blocks: Arc<DeduplicationFilter>,
-    seen_transactions: Arc<DeduplicationFilter>,
-    seen_tx_finalized: Arc<DeduplicationFilter>,
-    seen_utxo_locks: Arc<DeduplicationFilter>,
-    connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
-    peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
-    local_ip: Option<String>,
-    block_cache: Arc<BlockCache>, // Phase 3E.1: Block cache parameter
-    _peer_fork_status: Arc<DashMap<String, PeerForkStatus>>, // Phase 2: Fork status tracker (no longer used - periodic resolution handles forks)
-    is_whitelisted: bool,
-    tls_config: Option<Arc<crate::network::tls::TlsConfig>>,
-    network_type: crate::network_type::NetworkType,
-    ai_system: Option<Arc<crate::ai::AISystem>>,
-    relay_store: Option<Arc<crate::messaging::relay::RelayStore>>,
-    relay_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
-    contacts_book: Option<Arc<crate::messaging::contacts::ContactsBook>>,
-) -> Result<(), std::io::Error> {
-    let driver = crate::network::connection_driver::ConnectionDriver {
-        connection_manager,
-        masternode_registry,
-        blockchain,
-        peer_registry,
-        banlist: Some(banlist.clone()),
-        tls_config,
-        network_type,
-        ai_system,
-        relay_store: relay_store.clone(),
-        relay_signing_key: relay_signing_key.clone(),
-        contacts_book: contacts_book.clone(),
-    };
-    let resources = crate::network::connection_driver::InboundResources {
-        consensus,
-        peer_manager,
-        banlist,
-        broadcast_tx,
-        seen_blocks,
-        seen_transactions,
-        seen_tx_finalized,
-        seen_utxo_locks,
-        local_ip,
-        block_cache,
-        utxo_mgr,
-        subs,
-        relay_store,
-        relay_signing_key,
-        contacts_book,
-    };
-    driver
-        .drive_inbound(stream, peer.addr, is_whitelisted, notifier, resources)
-        .await
-}
 
 #[cfg(test)]
 mod tests {

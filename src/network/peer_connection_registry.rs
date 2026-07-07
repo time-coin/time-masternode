@@ -7,6 +7,7 @@
 type PendingPingMap = HashMap<String, Vec<(u64, std::time::Instant)>>;
 
 use crate::consensus::ConsensusEngine;
+use crate::network::connection_direction::ConnectionDirection;
 use crate::network::message::NetworkMessage;
 use dashmap::DashMap;
 use std::collections::{HashMap, HashSet};
@@ -24,12 +25,6 @@ use tracing::{debug, info, warn};
 pub type PeerWriterTx = mpsc::UnboundedSender<Vec<u8>>;
 type ResponseSender = oneshot::Sender<NetworkMessage>;
 type ChainTip = (u64, [u8; 32]); // (height, block_hash)
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ConnectionDirection {
-    Inbound,
-    Outbound,
-}
 
 #[derive(Clone)]
 struct ConnectionState {
@@ -316,50 +311,6 @@ impl PeerConnectionRegistry {
             .is_some()
         {
             tracing::info!("✅ Peer {} is now compatible - blocks accepted", ip_only);
-        }
-    }
-
-    /// Threshold of persistent fork errors before triggering deep fork resolution
-    /// Note: Fork errors alone do NOT mean incompatibility - only genesis hash mismatch does
-    const FORK_ERROR_THRESHOLD: u32 = 3;
-
-    /// Record a fork error for a peer (persistent across requests)
-    /// Returns true if fork resolution should be triggered (NOT incompatibility)
-    ///
-    /// IMPORTANT: Fork errors are NORMAL when nodes are on different forks of the same chain.
-    /// This does NOT mark peers as incompatible - only genesis hash mismatch does that.
-    /// Instead, this triggers fork resolution to find common ancestor and reconcile.
-    pub async fn record_fork_error(&self, peer_ip: &str) -> bool {
-        let ip_only = extract_ip(peer_ip).to_string();
-
-        // Increment the error count
-        let count = self
-            .fork_error_counts
-            .entry(ip_only.clone())
-            .and_modify(|c| *c += 1)
-            .or_insert(1);
-
-        let current_count = *count;
-
-        if current_count >= Self::FORK_ERROR_THRESHOLD {
-            // Don't mark as incompatible - forks are normal!
-            // Instead, log that deep fork resolution is needed
-            tracing::warn!(
-                "🔀 Persistent fork with peer {} ({} errors) - needs fork resolution (finding common ancestor)",
-                ip_only,
-                current_count
-            );
-            // Return true to signal that fork resolution should be triggered
-            // But do NOT mark as incompatible - that's only for genesis hash mismatch
-            true
-        } else {
-            tracing::info!(
-                "🔀 Fork error {} of {} for peer {} (will trigger resolution at threshold)",
-                current_count,
-                Self::FORK_ERROR_THRESHOLD,
-                ip_only
-            );
-            false
         }
     }
 

@@ -5,6 +5,7 @@
 
 #![allow(dead_code)] // Public API - methods will be used by server and monitoring
 
+use crate::network::connection_direction::ConnectionDirection;
 use dashmap::DashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -43,12 +44,6 @@ struct ConnectionInfo {
     messages_sent: u64,
     messages_received: u64,
     is_whitelisted: bool, // NEW: Track if this is a whitelisted masternode
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ConnectionDirection {
-    Inbound,
-    Outbound,
 }
 
 /// Manages the lifecycle of peer connections (inbound/outbound)
