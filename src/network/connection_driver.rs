@@ -74,14 +74,7 @@ impl ConnectionDriver {
     ) -> Result<std::time::Duration, String> {
         let start = std::time::Instant::now();
 
-        // Mark in peer_registry BEFORE attempting the connection to prevent a race with
-        // a concurrent inbound from the same peer.
-        if !self.peer_registry.mark_connecting(ip) {
-            return Err(format!(
-                "Already connecting/connected to {} in peer_registry",
-                ip
-            ));
-        }
+        // ConnectionManager.mark_connecting() is called by NetworkClient before spawn.
 
         // Create outbound connection.  Try TLS first; fall back to plaintext when the
         // remote rejects the handshake (e.g. an older build running plain TCP).
@@ -181,14 +174,13 @@ impl ConnectionDriver {
         // Only clean up peer_registry if we're still the active outbound connection.
         // If the connection was superseded by an inbound (IP tiebreaker in
         // try_register_inbound), skip cleanup to avoid corrupting the new inbound.
-        if self.peer_registry.is_outbound(&peer_ip) {
-            self.peer_registry.mark_disconnected(&peer_ip);
-            self.peer_registry.unregister_peer(&peer_ip).await;
-        } else if !self.peer_registry.is_connected(&peer_ip) {
+        if self.connection_manager.has_outbound_connection(&peer_ip)
+            || !self.peer_registry.is_connected(&peer_ip)
+        {
             self.peer_registry.unregister_peer(&peer_ip).await;
         } else {
             tracing::info!(
-                "≡ƒöä Outbound to {} superseded by inbound ΓÇö skipping cleanup",
+                "🔄 Outbound to {} superseded by inbound — skipping cleanup",
                 peer_ip
             );
         }

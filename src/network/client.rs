@@ -10,7 +10,7 @@ use crate::blockchain::Blockchain;
 use crate::masternode_registry::MasternodeRegistry;
 use crate::network::banlist::IPBanlist;
 use crate::network::connection_manager::ConnectionManager;
-use crate::network::peer_connection::PeerStateManager;
+
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
 use crate::network::tls::TlsConfig;
 use crate::peer_manager::PeerManager;
@@ -25,7 +25,6 @@ pub struct NetworkClient {
     masternode_registry: Arc<MasternodeRegistry>,
     blockchain: Arc<Blockchain>,
     peer_connection_registry: Arc<PeerConnectionRegistry>,
-    peer_state: Arc<PeerStateManager>,
     connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
     p2p_port: u16,
     max_peers: usize,
@@ -63,7 +62,6 @@ impl NetworkClient {
         network_type: NetworkType,
         max_peers: usize,
         peer_connection_registry: Arc<PeerConnectionRegistry>,
-        peer_state: Arc<PeerStateManager>,
         connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
         local_ip: Option<String>,
         banned_peers: Vec<String>,
@@ -89,7 +87,6 @@ impl NetworkClient {
             masternode_registry,
             blockchain,
             peer_connection_registry,
-            peer_state,
             connection_manager,
             p2p_port: network_type.default_p2p_port(),
             max_peers,

@@ -11,7 +11,7 @@ use crate::network::block_cache::BlockCache;
 use crate::network::ddos_guard::DDoSGuard;
 use crate::network::dedup_filter::DeduplicationFilter;
 use crate::network::message::{NetworkMessage, Subscription, UTXOStateChange};
-use crate::network::peer_connection::PeerStateManager;
+
 use crate::network::rate_limiter::RateLimiter;
 use crate::types::OutPoint;
 use crate::utxo_manager::UTXOStateManager;
@@ -43,8 +43,6 @@ pub struct NetworkServer {
     pub seen_utxo_locks: Arc<DeduplicationFilter>, // Bloom filter for UTXO lock updates
     pub connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
     pub peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
-    #[allow(dead_code)]
-    pub peer_state: Arc<PeerStateManager>,
     pub local_ip: Option<String>, // Our own public IP (without port) to avoid self-connection
     pub block_cache: Arc<BlockCache>, // Phase 3E.1: Bounded cache for TimeLock voting
     pub ai_system: Option<Arc<crate::ai::AISystem>>, // AI attack detection & mitigation
@@ -75,7 +73,6 @@ impl NetworkServer {
         peer_manager: Arc<crate::peer_manager::PeerManager>,
         connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
         peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
-        peer_state: Arc<PeerStateManager>,
         local_ip: Option<String>,
         network_type: crate::network_type::NetworkType,
     ) -> Result<Self, std::io::Error> {
@@ -88,7 +85,6 @@ impl NetworkServer {
             peer_manager,
             connection_manager,
             peer_registry,
-            peer_state,
             local_ip,
             vec![],
             vec![],
@@ -109,7 +105,6 @@ impl NetworkServer {
         peer_manager: Arc<crate::peer_manager::PeerManager>,
         connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
         peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
-        peer_state: Arc<PeerStateManager>,
         local_ip: Option<String>,
         banned_peers: Vec<String>,
         banned_subnets: Vec<String>,
@@ -163,7 +158,6 @@ impl NetworkServer {
             seen_utxo_locks: Arc::new(DeduplicationFilter::new(Duration::from_secs(300))), // 5 min rotation
             connection_manager,
             peer_registry,
-            peer_state,
             local_ip,
             block_cache: Arc::new(BlockCache::new_with_expiration(
                 1000,                     // Max 1000 blocks

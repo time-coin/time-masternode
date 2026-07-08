@@ -44,7 +44,7 @@ use consensus::ConsensusEngine;
 use masternode_registry::MasternodeRegistry;
 use network::connection_manager::ConnectionManager;
 use network::message::NetworkMessage;
-use network::peer_connection::PeerStateManager;
+
 use network::peer_connection_registry::PeerConnectionRegistry;
 use network::server::NetworkServer;
 use network_type::NetworkType;
@@ -1639,9 +1639,8 @@ async fn main() {
             .as_secs(),
     ));
 
-    // Create unified peer state manager for connection tracking
-    let peer_state = Arc::new(PeerStateManager::new());
     let connection_manager = Arc::new(ConnectionManager::new());
+    peer_connection_registry.set_connection_manager(connection_manager.clone());
 
     // Set peer registry on blockchain for request/response queries
     blockchain
@@ -1670,9 +1669,8 @@ async fn main() {
 
     if let Some(ref ip) = local_ip {
         tracing::info!("🏠 Local public IP detected: {}", ip);
-        // Set local IP in peer connection registry for deterministic direction
-        peer_connection_registry.set_local_ip(ip.clone());
         connection_manager.set_local_ip(ip.clone());
+        peer_connection_registry.set_local_ip(ip.clone());
     }
 
     // Network client will be started after server is created so we can share resources
@@ -5717,7 +5715,6 @@ async fn main() {
         peer_manager.clone(),
         connection_manager.clone(),
         peer_connection_registry.clone(),
-        peer_state.clone(),
         local_ip.clone(),
         config.network.banned_peers.clone(),
         config.network.banned_subnets.clone(),
@@ -6093,7 +6090,6 @@ async fn main() {
                 network_type,
                 config.network.max_peers as usize,
                 peer_connection_registry.clone(),
-                peer_state.clone(),
                 connection_manager.clone(),
                 local_ip.clone(),
                 config.network.banned_peers.clone(),

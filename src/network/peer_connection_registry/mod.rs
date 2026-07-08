@@ -17,27 +17,18 @@ pub use types::{PeerWriterTx, SharedPeerWriter};
 pub type ChainTip = types::ChainTip;
 
 use crate::consensus::ConsensusEngine;
+use crate::network::connection_manager::ConnectionManager;
 use crate::network::message::NetworkMessage;
 use dashmap::DashMap;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::{broadcast, mpsc, RwLock};
 
-use types::{
-    ConnectionState, IncompatiblePeerInfo, PendingPingMap, ReconnectionState, ResponseSender,
-};
+use types::{IncompatiblePeerInfo, PendingPingMap, ResponseSender};
 
 pub struct PeerConnectionRegistry {
-    // Connection state tracking (lock-free with DashMap)
-    connections: DashMap<String, ConnectionState>,
-    // Track reconnection backoff
-    reconnecting: DashMap<String, ReconnectionState>,
-    // Local IP - set once, read many
-    local_ip: OnceLock<String>,
-    // Metrics (atomic, no locks)
-    inbound_count: AtomicUsize,
-    outbound_count: AtomicUsize,
+    /// Authoritative connection lifecycle tracker (admission + direction + counts).
+    connection_manager: OnceLock<Arc<ConnectionManager>>,
     // Map of peer IP to their write channel (sends pre-serialized frame bytes to I/O task)
     peer_writers: Arc<RwLock<HashMap<String, PeerWriterTx>>>,
     // Map of peer IP to their reported blockchain height
@@ -120,11 +111,7 @@ pub struct PeerConnectionRegistry {
 impl PeerConnectionRegistry {
     pub fn new() -> Self {
         Self {
-            connections: DashMap::new(),
-            reconnecting: DashMap::new(),
-            local_ip: OnceLock::new(),
-            inbound_count: AtomicUsize::new(0),
-            outbound_count: AtomicUsize::new(0),
+            connection_manager: OnceLock::new(),
             peer_writers: Arc::new(RwLock::new(HashMap::new())),
             peer_heights: Arc::new(RwLock::new(HashMap::new())),
             peer_ping_times: Arc::new(RwLock::new(HashMap::new())),

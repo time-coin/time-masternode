@@ -8,9 +8,6 @@ impl PeerConnectionRegistry {
     // ===== Peer Writer Registry (formerly peer_connection_registry.rs) =====
 
     pub async fn register_peer(&self, peer_ip: String, writer: PeerWriterTx) {
-        // Mark as connected in the connections map for get_connected_peers()
-        self.mark_inbound(&peer_ip);
-
         let mut writers = self.peer_writers.write().await;
         // Only overwrite if no existing live writer (defensive, mirrors register_peer_shared)
         if let Some(existing) = writers.get(&peer_ip) {
@@ -29,9 +26,6 @@ impl PeerConnectionRegistry {
 
     /// Register an outbound peer with a channel-based writer
     pub async fn register_peer_shared(&self, peer_ip: String, writer: SharedPeerWriter) {
-        // Also mark as connected in the connections map for get_connected_peers()
-        self.mark_connecting(&peer_ip);
-
         let mut writers = self.peer_writers.write().await;
         // Only overwrite if the existing writer is dead (channel closed).
         // A live writer (e.g., from an accepted inbound connection) must not be
@@ -51,9 +45,6 @@ impl PeerConnectionRegistry {
     }
 
     pub async fn unregister_peer(&self, peer_ip: &str) {
-        // Remove from connections map
-        self.mark_disconnected(peer_ip);
-
         // Drop each write lock before acquiring the next to avoid holding
         // multiple locks across await points.  The old code held all 6 write
         // locks simultaneously (variables lived until end-of-scope), which
@@ -109,7 +100,9 @@ impl PeerConnectionRegistry {
             let mut writers = self.peer_writers.write().await;
             writers.remove(ip_only);
         }
-        self.remove(ip_only);
+        if let Some(cm) = self.connection_manager() {
+            cm.mark_disconnected(ip_only);
+        }
         tracing::info!("🦵 Kicked zombie peer {} (writer channel closed)", ip_only);
     }
 
@@ -277,40 +270,23 @@ impl PeerConnectionRegistry {
     /// writer channel — i.e. truly connected, not just in the Connecting state.
     pub async fn get_connected_peers(&self) -> Vec<String> {
         let writers = self.peer_writers.read().await;
-        self.connections
+        writers
             .iter()
-            .filter(|entry| {
-                // Only include peers that have a live writer (post-handshake)
-                writers
-                    .get(entry.key())
-                    .map(|w| !w.is_closed())
-                    .unwrap_or(false)
-            })
-            .map(|entry| entry.key().clone())
+            .filter(|(_, w)| !w.is_closed())
+            .map(|(ip, _)| ip.clone())
             .collect()
     }
 
     /// Get count of connected peers (post-handshake only)
     pub async fn peer_count(&self) -> usize {
         let writers = self.peer_writers.read().await;
-        self.connections
-            .iter()
-            .filter(|entry| {
-                writers
-                    .get(entry.key())
-                    .map(|w| !w.is_closed())
-                    .unwrap_or(false)
-            })
-            .count()
+        writers.values().filter(|w| !w.is_closed()).count()
     }
 
     /// Get a snapshot of connected peer IPs (for stats/monitoring)
     #[allow(dead_code)]
     pub async fn get_connected_peers_list(&self) -> Vec<String> {
-        self.connections
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect()
+        self.get_connected_peers().await
     }
 
     /// Get statistics about pending responses (for monitoring)

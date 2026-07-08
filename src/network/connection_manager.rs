@@ -76,6 +76,15 @@ impl ConnectionManager {
         let _ = self.local_ip.set(ip);
     }
 
+    pub fn get_local_ip(&self) -> Option<String> {
+        self.local_ip.get().cloned()
+    }
+
+    /// Returns the direction of an active or in-progress connection, if tracked.
+    pub fn connection_direction(&self, peer_ip: &str) -> Option<ConnectionDirection> {
+        self.connections.get(peer_ip).map(|info| info.direction)
+    }
+
     fn should_keep_outbound(&self, peer_ip: &str) -> bool {
         if let Some(local_ip) = self.local_ip.get() {
             if let (Ok(local_addr), Ok(peer_addr)) =
