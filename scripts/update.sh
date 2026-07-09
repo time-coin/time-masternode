@@ -111,6 +111,13 @@ for NET in mainnet testnet; do
 done
 
 if systemctl is-enabled --quiet mn-watchdog 2>/dev/null; then
+    # Always refresh the installed watchdog binary so script fixes ship with
+    # node updates (git pull alone does not update /usr/local/bin/mn-watchdog).
+    if [ -f "$PWD/scripts/mn-watchdog.sh" ]; then
+        echo "==> Installing updated mn-watchdog..."
+        cp "$PWD/scripts/mn-watchdog.sh" /usr/local/bin/mn-watchdog
+        chmod +x /usr/local/bin/mn-watchdog
+    fi
     echo "==> Restarting mn-watchdog..."
-    systemctl start mn-watchdog
+    systemctl restart mn-watchdog 2>/dev/null || systemctl start mn-watchdog
 fi

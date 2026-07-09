@@ -254,18 +254,24 @@ log_stall_diagnostics() {
 
 # ── Sync-stall check ──────────────────────────────────────────────────────────
 # Calls getblockchaininfo and tracks whether local block height is advancing.
-# Returns 1 (stalled) when the node has been >= SYNC_STALL_BLOCKS behind its
-# peers for SYNC_STALL_POLLS consecutive polls without making progress.
-# Returns 0 (healthy or check disabled).
+#
+# Bash truthiness for `if check_sync_stall; then restart`:
+#   return 0  → true  → stalled (caller should restart)
+#   return 1  → false → healthy / check disabled / inconclusive
+#
+# IMPORTANT: early "not a stall" paths MUST return 1.  Returning 0 on those
+# paths was a critical bug that restarted timed every poll when RPC was briefly
+# busy or headers were 0, logging "Sync stalled for 0s (0 polls)".
 check_sync_stall() {
-    [ "$SYNC_CHECK" -eq 0 ] && return 0
+    # Disabled → not stalled
+    [ "$SYNC_CHECK" -eq 0 ] && return 1
 
     local info_json blocks_height headers_height
     info_json=$(timeout "$RPC_TIMEOUT" $CLI_CMD getblockchaininfo 2>/dev/null) || info_json=""
 
     if [ -z "$info_json" ]; then
         # RPC unavailable — the masternodestatus path handles this; don't double-count.
-        return 0
+        return 1
     fi
 
     if command -v jq &>/dev/null; then
@@ -275,14 +281,15 @@ check_sync_stall() {
         blocks_height=$(echo  "$info_json" | grep -oP '"blocks"\s*:\s*\K[0-9]+' | head -1)
         headers_height=$(echo "$info_json" | grep -oP '"headers"\s*:\s*\K[0-9]+' | head -1)
     fi
-    blocks_height="${blocks_height:-0}"
-    headers_height="${headers_height:-0}"
+    # Non-numeric parse results must not reach arithmetic (would abort under set -u/-e patterns)
+    [[ "$blocks_height"  =~ ^[0-9]+$ ]] || blocks_height=0
+    [[ "$headers_height" =~ ^[0-9]+$ ]] || headers_height=0
 
     # headers=0 means no peers yet — don't flag as stalled during isolation.
     if [ "$headers_height" -le 0 ]; then
         sync_stall_streak=0
         last_sync_height=$blocks_height
-        return 0
+        return 1
     fi
 
     local behind=$(( headers_height - blocks_height ))
@@ -305,23 +312,32 @@ check_sync_stall() {
     fi
 
     last_sync_height=$blocks_height
-    [ "$sync_stall_streak" -gt 0 ] && [ "$sync_stall_streak" -ge "$SYNC_STALL_POLLS" ]
+
+    if [ "$sync_stall_streak" -gt 0 ] && [ "$sync_stall_streak" -ge "$SYNC_STALL_POLLS" ]; then
+        return 0  # stalled
+    fi
+    return 1  # healthy
 }
 
 # ── Zero-peer check ───────────────────────────────────────────────────────────
-# Calls getconnectioncount; returns 1 when the node has had 0 peers for
-# ZERO_PEER_POLLS consecutive polls.  Returns 0 (healthy or check disabled).
+# Calls getconnectioncount.
+#
+# Bash truthiness for `if check_zero_peers; then restart`:
+#   return 0  → true  → zero peers long enough (caller should restart)
+#   return 1  → false → healthy / check disabled / inconclusive
+#
 # A longer default threshold (120s) gives the outbound dialer time to
 # reconnect after a brief network hiccup without causing false restarts.
 check_zero_peers() {
-    [ "$PEER_CHECK" -eq 0 ] && return 0
+    # Disabled → not a zero-peer failure
+    [ "$PEER_CHECK" -eq 0 ] && return 1
 
     local count
     count=$(timeout "$RPC_TIMEOUT" $CLI_CMD getconnectioncount 2>/dev/null) || count=""
 
     if [ -z "$count" ] || ! [[ "$count" =~ ^[0-9]+$ ]]; then
         # RPC unavailable — masternodestatus path handles this.
-        return 0
+        return 1
     fi
 
     if [ "$count" -eq 0 ]; then
@@ -334,7 +350,10 @@ check_zero_peers() {
         zero_peer_streak=0
     fi
 
-    [ "$zero_peer_streak" -gt 0 ] && [ "$zero_peer_streak" -ge "$ZERO_PEER_POLLS" ]
+    if [ "$zero_peer_streak" -gt 0 ] && [ "$zero_peer_streak" -ge "$ZERO_PEER_POLLS" ]; then
+        return 0  # zero peers long enough
+    fi
+    return 1  # healthy
 }
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
@@ -511,7 +530,8 @@ while true; do
     fi
 
     # 3b. Sync-stall check — runs every poll independently of masternode status.
-    if check_sync_stall; then
+    # Guard: never restart on a zero streak (defensive against return-code bugs).
+    if check_sync_stall && [ "$sync_stall_streak" -ge "$SYNC_STALL_POLLS" ]; then
         now=$(date +%s)
         since_last=$(( now - last_restart_ts ))
         if [ "$since_last" -ge "$RESTART_COOLDOWN" ]; then
@@ -537,7 +557,8 @@ while true; do
     fi
 
     # 3c. Zero-peer check — runs every poll independently of other checks.
-    if check_zero_peers; then
+    # Guard: never restart on a zero streak (defensive against return-code bugs).
+    if check_zero_peers && [ "$zero_peer_streak" -ge "$ZERO_PEER_POLLS" ]; then
         now=$(date +%s)
         since_last=$(( now - last_restart_ts ))
         if [ "$since_last" -ge "$RESTART_COOLDOWN" ]; then
