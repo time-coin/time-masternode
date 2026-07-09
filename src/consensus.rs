@@ -4055,6 +4055,218 @@ impl ConsensusEngine {
         touched
     }
 
+    /// Reprocess pending transactions that never completed finality.
+    ///
+    /// Common causes of stuck pending entries:
+    /// 1. Restored from sled on startup without re-running `process_transaction`
+    ///    (locks are in-memory only; after restart UTXOs are Unspent again)
+    /// 2. Inserted via TimeVoteRequest with `add_pending` only (no auto-finalize)
+    /// 3. Zero/invalid fee or spent inputs that can never finalize
+    ///
+    /// For each pending TX this method will:
+    /// - Reject if validation fails or inputs are already spent by another TX
+    /// - Auto-finalize if uncontested (same path as conflict-free submit)
+    /// - Leave contested TXs alone so TimeVote / rebroadcast can resolve them
+    ///
+    /// Returns `(finalized_count, rejected_count)`.
+    pub async fn retry_stuck_pending_transactions(&self) -> (usize, usize) {
+        let mut pending = self.tx_pool.get_all_pending_with_metadata();
+        if pending.is_empty() {
+            return (0, 0);
+        }
+
+        // Higher fee first, then older first — prefer better / earlier TXs when
+        // multiple pending entries compete for the same inputs.
+        pending.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.3.cmp(&b.3)));
+
+        let mut finalized = 0usize;
+        let mut rejected = 0usize;
+
+        for (tx, stored_fee, _, _) in pending {
+            let txid = tx.txid();
+
+            // May have been finalized/rejected by an earlier iteration
+            if !self.tx_pool.is_pending(&txid) {
+                continue;
+            }
+
+            // Hard reject: inputs already spent/finalized by a different TX
+            if self.inputs_already_spent_by_other(&tx.inputs, &txid) {
+                tracing::warn!(
+                    "🧹 Stuck pending TX {} — inputs already spent by another TX; rejecting",
+                    hex::encode(txid)
+                );
+                self.reject_failed_voting_transaction(
+                    txid,
+                    "Inputs already spent by another transaction".to_string(),
+                )
+                .await;
+                rejected += 1;
+                continue;
+            }
+
+            // Re-lock Unspent inputs so finalization can mark them SpentFinalized.
+            // After a restart locks are lost (in-memory only).
+            for input in &tx.inputs {
+                match self.utxo_manager.get_state(&input.previous_output) {
+                    Some(UTXOState::Unspent) | None => {
+                        if let Err(e) = self.utxo_manager.lock_utxo(&input.previous_output, txid) {
+                            tracing::debug!(
+                                "Could not re-lock {} for stuck TX {}: {}",
+                                input.previous_output,
+                                hex::encode(txid),
+                                e
+                            );
+                        }
+                    }
+                    Some(UTXOState::Locked {
+                        txid: locked_txid, ..
+                    }) if locked_txid == txid => {}
+                    Some(UTXOState::SpentPending {
+                        txid: pending_txid, ..
+                    }) if pending_txid == txid => {}
+                    _ => {}
+                }
+            }
+
+            // Re-validate (fee, signatures, UTXO availability)
+            let validated_fee = match self.validate_transaction_with_locks(&tx, txid).await {
+                Ok(fee) => fee,
+                Err(e) => {
+                    tracing::warn!(
+                        "🧹 Stuck pending TX {} failed re-validation: {} — rejecting",
+                        hex::encode(txid),
+                        e
+                    );
+                    self.reject_failed_voting_transaction(txid, e).await;
+                    rejected += 1;
+                    continue;
+                }
+            };
+
+            // Repair fee recorded as 0 (TimeVoteRequest path / missing UTXOs at insert)
+            if stored_fee == 0 && validated_fee > 0 {
+                self.tx_pool.update_pending_fee(&txid, validated_fee);
+            }
+
+            // External conflict: another TX already owns the UTXO lock/spend state,
+            // or a confirmed pool entry already spends these inputs — cannot finalize.
+            let utxo_owned_by_other = tx.inputs.iter().any(|input| {
+                matches!(
+                    self.utxo_manager.get_state(&input.previous_output),
+                    Some(UTXOState::Locked { txid: other, .. })
+                        | Some(UTXOState::SpentPending { txid: other, .. })
+                        | Some(UTXOState::SpentFinalized { txid: other, .. })
+                        | Some(UTXOState::Archived { txid: other, .. })
+                        if other != txid
+                )
+            });
+            if utxo_owned_by_other || self.tx_pool.has_conflicting_confirmed(&tx.inputs, &txid) {
+                tracing::debug!(
+                    "⏳ Stuck pending TX {} has external double-spend conflict — skipping",
+                    hex::encode(txid)
+                );
+                continue;
+            }
+
+            // Pending-vs-pending conflict: we process highest fee first, so this TX
+            // wins. Reject lower-fee / later competitors so they cannot block forever.
+            let competitors = self.tx_pool.get_conflicting_pending(&tx.inputs, &txid);
+            for (comp_txid, _) in competitors {
+                tracing::warn!(
+                    "🧹 Rejecting pending TX {} — superseded by higher-priority stuck TX {}",
+                    hex::encode(comp_txid),
+                    hex::encode(txid)
+                );
+                self.reject_failed_voting_transaction(
+                    comp_txid,
+                    format!(
+                        "Superseded by higher-priority pending transaction {}",
+                        hex::encode(txid)
+                    ),
+                )
+                .await;
+                rejected += 1;
+            }
+
+            // Uncontested (or won pending conflict) — auto-finalize
+            let tx_for_broadcast = tx.clone();
+            if !self.tx_pool.finalize_transaction(txid) {
+                tracing::warn!(
+                    "⚠️ Stuck pending TX {} disappeared before finalize",
+                    hex::encode(txid)
+                );
+                continue;
+            }
+
+            for input in &tx.inputs {
+                self.utxo_manager
+                    .mark_timevote_finalized(&input.previous_output, txid)
+                    .await;
+            }
+
+            for (idx, output) in tx.outputs.iter().enumerate() {
+                let outpoint = OutPoint {
+                    txid,
+                    vout: idx as u32,
+                };
+                let utxo = UTXO {
+                    outpoint: outpoint.clone(),
+                    value: output.value,
+                    script_pubkey: output.script_pubkey.clone(),
+                    address: String::from_utf8(output.script_pubkey.clone()).unwrap_or_default(),
+                    masternode_key: None,
+                };
+                if let Err(e) = self.utxo_manager.add_utxo(utxo).await {
+                    tracing::warn!(
+                        "Failed to add output UTXO vout={} for recovered TX {}: {}",
+                        idx,
+                        hex::encode(txid),
+                        e
+                    );
+                }
+                self.utxo_manager
+                    .update_state(&outpoint, UTXOState::Unspent);
+            }
+
+            self.broadcast(NetworkMessage::TransactionFinalized {
+                txid,
+                tx: tx_for_broadcast,
+            })
+            .await;
+
+            self.timevote
+                .finalized_txs
+                .insert(txid, (Preference::Accept, Instant::now()));
+            self.timevote.tx_status.insert(
+                txid,
+                TransactionStatus::Finalized {
+                    finalized_at: chrono::Utc::now().timestamp_millis(),
+                    vfp_weight: 0,
+                },
+            );
+            self.signal_tx_finalized(txid);
+
+            tracing::info!(
+                "✅ Recovered stuck pending TX {} — auto-finalized (fee={})",
+                hex::encode(txid),
+                validated_fee
+            );
+            finalized += 1;
+        }
+
+        if finalized > 0 || rejected > 0 {
+            tracing::info!(
+                "🧹 Pending TX recovery: finalized={}, rejected={}, remaining={}",
+                finalized,
+                rejected,
+                self.tx_pool.pending_count()
+            );
+        }
+
+        (finalized, rejected)
+    }
+
     /// Evict pending transactions that have been stuck longer than `max_age`.
     ///
     /// This is a policy/mempool cleanup path only: it releases local UTXO reservations

@@ -5452,7 +5452,22 @@ async fn main() {
         const STALE_PENDING_EVICTION_AGE: std::time::Duration =
             std::time::Duration::from_secs(24 * 60 * 60);
 
+        // Wait for network/broadcast callback to wire up, then immediately
+        // recover any pending TXs restored from sled without re-finalization.
         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+        {
+            let (recovered, rejected_pending) = rebroadcast_consensus
+                .retry_stuck_pending_transactions()
+                .await;
+            if recovered > 0 || rejected_pending > 0 {
+                tracing::info!(
+                    "🔄 Startup pending TX recovery: finalized={}, rejected={}",
+                    recovered,
+                    rejected_pending
+                );
+            }
+        }
+
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120));
         interval.tick().await; // consume first immediate tick
         loop {
@@ -5469,6 +5484,21 @@ async fn main() {
                         tracing::warn!(
                             "🧹 Evicted {} stale pending transaction(s) older than one day",
                             evicted_stale_pending
+                        );
+                    }
+
+                    // Reprocess stuck pending TXs: restored-from-sled and vote-path
+                    // inserts never re-enter process_transaction, so they sit pending
+                    // forever without this recovery pass. Auto-finalizes uncontested
+                    // TXs and rejects invalid/zero-fee/spent-input ones.
+                    let (recovered, rejected_pending) = rebroadcast_consensus
+                        .retry_stuck_pending_transactions()
+                        .await;
+                    if recovered > 0 || rejected_pending > 0 {
+                        tracing::info!(
+                            "🔄 Pending TX recovery pass: finalized={}, rejected={}",
+                            recovered,
+                            rejected_pending
                         );
                     }
 

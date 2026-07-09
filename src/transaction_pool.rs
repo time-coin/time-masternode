@@ -512,6 +512,48 @@ impl TransactionPool {
             || Self::pool_inputs_overlap(&self.confirmed, &input_set, exclude_txid)
     }
 
+    /// Return other pending transactions that spend any of the same inputs.
+    /// Used by stuck-pending recovery to pick a winner and reject losers.
+    pub fn get_conflicting_pending(
+        &self,
+        inputs: &[crate::types::TxInput],
+        exclude_txid: &Hash256,
+    ) -> Vec<(Hash256, Transaction)> {
+        if inputs.is_empty() {
+            return Vec::new();
+        }
+        let input_set: std::collections::HashSet<(Hash256, u32)> = inputs
+            .iter()
+            .map(|i| (i.previous_output.txid, i.previous_output.vout))
+            .collect();
+        self.pending
+            .iter()
+            .filter(|entry| {
+                entry.key() != exclude_txid
+                    && entry.value().tx.inputs.iter().any(|i| {
+                        input_set.contains(&(i.previous_output.txid, i.previous_output.vout))
+                    })
+            })
+            .map(|entry| (*entry.key(), entry.value().tx.clone()))
+            .collect()
+    }
+
+    /// True when a confirmed (finalized-but-not-archived) pool entry spends any input.
+    pub fn has_conflicting_confirmed(
+        &self,
+        inputs: &[crate::types::TxInput],
+        exclude_txid: &Hash256,
+    ) -> bool {
+        if inputs.is_empty() {
+            return false;
+        }
+        let input_set: std::collections::HashSet<(Hash256, u32)> = inputs
+            .iter()
+            .map(|i| (i.previous_output.txid, i.previous_output.vout))
+            .collect();
+        Self::pool_inputs_overlap(&self.confirmed, &input_set, exclude_txid)
+    }
+
     /// Check if transaction is pending
     pub fn is_pending(&self, txid: &Hash256) -> bool {
         self.pending.contains_key(txid)
@@ -543,6 +585,21 @@ impl TransactionPool {
     /// Get a specific pending transaction by ID (O(1), no full pool clone)
     pub fn get_pending(&self, txid: &Hash256) -> Option<Transaction> {
         self.pending.get(txid).map(|e| e.tx.clone())
+    }
+
+    /// Update the recorded fee for a pending transaction (and sled if enabled).
+    /// Used when a restored/vote-path entry was stored with fee=0 but UTXOs
+    /// are now available to recompute the correct fee.
+    pub fn update_pending_fee(&self, txid: &Hash256, fee: u64) -> bool {
+        if let Some(mut entry) = self.pending.get_mut(txid) {
+            if entry.fee != fee {
+                entry.fee = fee;
+                self.sled_persist(txid, &entry.tx, fee, false);
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// Get a transaction from either pending or finalized pool
@@ -1382,6 +1439,27 @@ mod tests {
         assert_eq!(evicted[0].txid(), stale_txid);
         assert!(!pool.is_pending(&stale_txid));
         assert!(pool.is_pending(&fresh_txid));
+    }
+
+    #[test]
+    fn test_get_conflicting_pending_and_update_fee() {
+        let pool = TransactionPool::new();
+
+        let mut tx_a = create_test_transaction(1000);
+        tx_a.inputs[0].previous_output.txid[0] = 0xBB;
+        let tx_a_id = tx_a.txid();
+        pool.add_pending(tx_a.clone(), 0).unwrap();
+        assert!(pool.update_pending_fee(&tx_a_id, 500));
+
+        let mut tx_b = create_test_transaction(2000);
+        tx_b.inputs[0].previous_output.txid[0] = 0xBB;
+        let tx_b_id = tx_b.txid();
+        pool.add_pending(tx_b, 50).unwrap();
+
+        let conflicts = pool.get_conflicting_pending(&tx_a.inputs, &tx_a_id);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].0, tx_b_id);
+        assert!(!pool.has_conflicting_confirmed(&tx_a.inputs, &tx_a_id));
     }
 }
 

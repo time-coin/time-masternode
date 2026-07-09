@@ -1515,28 +1515,25 @@ impl MessageHandler {
 
         if tx_opt.is_none() {
             if let Some(tx_from_req) = tx_from_request {
-                let input_sum: u64 = {
-                    let mut sum = 0u64;
-                    for input in &tx_from_req.inputs {
-                        if let Ok(utxo) = consensus
-                            .utxo_manager
-                            .get_utxo(&input.previous_output)
-                            .await
+                // Validate + lock before pool insert so we never store fee=0 ghost
+                // entries that can never finalize (stuck pending forever).
+                match consensus.lock_and_validate_transaction(&tx_from_req).await {
+                    Ok(fee) => {
+                        if consensus
+                            .tx_pool
+                            .add_pending(tx_from_req.clone(), fee)
+                            .is_ok()
                         {
-                            sum += utxo.value;
+                            tx_opt = Some(tx_from_req);
                         }
                     }
-                    sum
-                };
-                let output_sum: u64 = tx_from_req.outputs.iter().map(|o| o.value).sum();
-                let fee = input_sum.saturating_sub(output_sum);
-
-                if consensus
-                    .tx_pool
-                    .add_pending(tx_from_req.clone(), fee)
-                    .is_ok()
-                {
-                    tx_opt = Some(tx_from_req);
+                    Err(e) => {
+                        tracing::warn!(
+                            "⚠️ TimeVoteRequest TX {} rejected at insert: {}",
+                            hex::encode(txid),
+                            e
+                        );
+                    }
                 }
             }
         }

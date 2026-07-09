@@ -6,6 +6,19 @@ use crate::network::message::NetworkMessage;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+/// Fields shared by MasternodeAnnouncement V2/V3/V4 handlers.
+/// Grouped to keep `handle_masternode_announcement` under Clippy's argument limit.
+pub(super) struct MasternodeAnnouncementParams {
+    pub announced_address: String,
+    pub reward_address: String,
+    pub tier: crate::types::MasternodeTier,
+    pub public_key: ed25519_dalek::VerifyingKey,
+    pub collateral_outpoint: Option<crate::types::OutPoint>,
+    pub certificate: Vec<u8>,
+    pub started_at: u64,
+    pub collateral_proof: Vec<u8>,
+}
+
 impl MessageHandler {
     pub(super) async fn handle_get_masternodes(
         &self,
@@ -138,16 +151,20 @@ impl MessageHandler {
     /// Handle TimeLock Block Proposal - cache and vote
     pub(super) async fn handle_masternode_announcement(
         &self,
-        announced_address: String,
-        reward_address: String,
-        tier: crate::types::MasternodeTier,
-        public_key: ed25519_dalek::VerifyingKey,
-        collateral_outpoint: Option<crate::types::OutPoint>,
-        certificate: Vec<u8>,
-        started_at: u64,
-        collateral_proof: Vec<u8>,
+        params: MasternodeAnnouncementParams,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
+        let MasternodeAnnouncementParams {
+            announced_address,
+            reward_address,
+            tier,
+            public_key,
+            collateral_outpoint,
+            certificate,
+            started_at,
+            collateral_proof,
+        } = params;
+
         let peer_ip = self.peer_ip.clone();
         // `announced_address` is the IP the masternode claims to operate on.
         // For direct connections this matches `peer_ip`; for relayed announcements

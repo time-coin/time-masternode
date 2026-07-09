@@ -488,14 +488,16 @@ impl MessageHandler {
             } => {
                 // V2 without certificate — treat as empty certificate, no proof
                 self.handle_masternode_announcement(
-                    address.clone(),
-                    reward_address.clone(),
-                    *tier,
-                    *public_key,
-                    collateral_outpoint.clone(),
-                    vec![0u8; 64],
-                    0, // V2 has no started_at
-                    vec![],
+                    super::masternode::MasternodeAnnouncementParams {
+                        announced_address: address.clone(),
+                        reward_address: reward_address.clone(),
+                        tier: *tier,
+                        public_key: *public_key,
+                        collateral_outpoint: collateral_outpoint.clone(),
+                        certificate: vec![0u8; 64],
+                        started_at: 0, // V2 has no started_at
+                        collateral_proof: vec![],
+                    },
                     context,
                 )
                 .await
@@ -510,14 +512,16 @@ impl MessageHandler {
                 started_at,
             } => {
                 self.handle_masternode_announcement(
-                    address.clone(),
-                    reward_address.clone(),
-                    *tier,
-                    *public_key,
-                    collateral_outpoint.clone(),
-                    certificate.clone(),
-                    *started_at,
-                    vec![],
+                    super::masternode::MasternodeAnnouncementParams {
+                        announced_address: address.clone(),
+                        reward_address: reward_address.clone(),
+                        tier: *tier,
+                        public_key: *public_key,
+                        collateral_outpoint: collateral_outpoint.clone(),
+                        certificate: certificate.clone(),
+                        started_at: *started_at,
+                        collateral_proof: vec![],
+                    },
                     context,
                 )
                 .await
@@ -533,14 +537,16 @@ impl MessageHandler {
                 collateral_proof,
             } => {
                 self.handle_masternode_announcement(
-                    address.clone(),
-                    reward_address.clone(),
-                    *tier,
-                    *public_key,
-                    collateral_outpoint.clone(),
-                    certificate.clone(),
-                    *started_at,
-                    collateral_proof.clone(),
+                    super::masternode::MasternodeAnnouncementParams {
+                        announced_address: address.clone(),
+                        reward_address: reward_address.clone(),
+                        tier: *tier,
+                        public_key: *public_key,
+                        collateral_outpoint: collateral_outpoint.clone(),
+                        certificate: certificate.clone(),
+                        started_at: *started_at,
+                        collateral_proof: collateral_proof.clone(),
+                    },
                     context,
                 )
                 .await
