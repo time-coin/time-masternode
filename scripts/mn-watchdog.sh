@@ -62,6 +62,8 @@
 #   --sync-stall-polls N     Consecutive stall polls before restart (default: 20, ~60s at 3s poll)
 #   --no-peer-check          Disable zero-peer detection
 #   --zero-peer-polls N      Consecutive zero-peer polls before restart (default: 40, ~120s at 3s poll)
+#                            Note: getconnectioncount=0 is ignored when recent timed journal lines
+#                            show live peer traffic (avoids false restarts from counter desync)
 #   --dry-run                Log what would happen but do not restart
 #   -h, --help               Show this help
 
@@ -320,7 +322,7 @@ check_sync_stall() {
 }
 
 # ── Zero-peer check ───────────────────────────────────────────────────────────
-# Calls getconnectioncount.
+# Calls getconnectioncount, with journal corroboration before treating 0 as real.
 #
 # Bash truthiness for `if check_zero_peers; then restart`:
 #   return 0  → true  → zero peers long enough (caller should restart)
@@ -328,6 +330,12 @@ check_sync_stall() {
 #
 # A longer default threshold (120s) gives the outbound dialer time to
 # reconnect after a brief network hiccup without causing false restarts.
+#
+# IMPORTANT — getconnectioncount false zeros (2026-07-10):
+#   ConnectionManager state can report 0 while message loops still have live
+#   peers (ping/pong, registration). Restarting on that false zero interrupts
+#   a healthy node. When count is 0 we require that recent timed journal lines
+#   show no live peer traffic before counting toward the streak.
 check_zero_peers() {
     # Disabled → not a zero-peer failure
     [ "$PEER_CHECK" -eq 0 ] && return 1
@@ -341,6 +349,19 @@ check_zero_peers() {
     fi
 
     if [ "$count" -eq 0 ]; then
+        # Corroborate: if timed recently logged live peer I/O, treat count=0 as
+        # a desynced counter, not isolation. Patterns match common inbound/outbound
+        # success paths (pong, registration, handshake accepted).
+        if journalctl -u timed --since "45 seconds ago" --no-pager 2>/dev/null \
+            | grep -qE 'Sent pong|Registering .+ in PeerConnectionRegistry|Handshake accepted|Genesis hash verified'; then
+            # Counter desync: daemon has live peers. Clear any partial streak; stay quiet
+            # when already healthy so we do not spam the journal every poll.
+            if [ "$zero_peer_streak" -gt 0 ]; then
+                logw "getconnectioncount=0 but journal shows live peer traffic — clearing false zero-peer streak (was ${zero_peer_streak})"
+            fi
+            zero_peer_streak=0
+            return 1
+        fi
         zero_peer_streak=$(( zero_peer_streak + 1 ))
         logw "🔌 No peers connected (streak: ${zero_peer_streak}/${ZERO_PEER_POLLS})"
     else

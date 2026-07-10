@@ -821,9 +821,9 @@ impl RpcHandler {
             NetworkType::Testnet => "testnet",
         };
 
-        // Count actual live TCP connections from the peer connection registry.
+        // Count live post-handshake peer writers (not ConnectionManager alone).
         let connections = if let Some(pr) = self.blockchain.get_peer_registry().await {
-            pr.connected_count()
+            pr.peer_count().await
         } else {
             0
         };
@@ -8326,10 +8326,14 @@ impl RpcHandler {
 
     /// `getconnectioncount`
     ///
-    /// Returns the number of currently active masternode connections.
+    /// Returns the number of currently active peer connections (post-handshake
+    /// writer channels). Prefer this over ConnectionManager state alone — CM can
+    /// under-report during races and previously caused false zero-peer restarts.
     async fn get_connection_count(&self) -> Result<Value, RpcError> {
         let count = if let Some(pr) = self.blockchain.get_peer_registry().await {
-            pr.connected_count()
+            // peer_count() awaits the writer lock; connected_count() is the sync
+            // equivalent (try_read + CM fallback) used by status/network paths.
+            pr.peer_count().await
         } else {
             0
         };

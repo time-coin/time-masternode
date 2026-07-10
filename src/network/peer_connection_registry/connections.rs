@@ -47,7 +47,18 @@ impl PeerConnectionRegistry {
             .and_then(|cm| cm.connection_direction(ip))
     }
 
+    /// Number of currently connected peers.
+    ///
+    /// Uses post-handshake writer channels as the source of truth (same basis as
+    /// [`PeerConnectionRegistry::peer_count`]). ConnectionManager state can lag or
+    /// desync under connection races; under-reporting as 0 previously caused
+    /// false-positive zero-peer watchdog restarts while message loops were live.
+    ///
+    /// Falls back to ConnectionManager only if the writer lock is busy.
     pub fn connected_count(&self) -> usize {
+        if let Ok(writers) = self.peer_writers.try_read() {
+            return writers.values().filter(|w| !w.is_closed()).count();
+        }
         self.connection_manager()
             .map(|cm| cm.connected_count())
             .unwrap_or(0)
