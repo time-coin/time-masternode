@@ -46,7 +46,14 @@ impl RateLimiter {
                     "masternode_announce".to_string(),
                     (Duration::from_secs(60), 3),
                 ), // 3 announcements/min - allows reconnection scenarios
-                ("ping".to_string(), (Duration::from_secs(10), 6)),         // 6 pings/10sec
+                // Peer exchange is expensive to process (O(entries) register attempts).
+                // Cap request/response rate so a peer cannot force repeated full-list scans.
+                ("get_masternodes".to_string(), (Duration::from_secs(60), 6)), // 6 GetMasternodes/min
+                (
+                    "masternodes_response".to_string(),
+                    (Duration::from_secs(60), 12),
+                ), // 12 responses/min (covers rotating samples + handshake discovery)
+                ("ping".to_string(), (Duration::from_secs(10), 6)),            // 6 pings/10sec
                 ("pong".to_string(), (Duration::from_secs(10), 6)), // 6 pongs/10sec (replies to our pings)
                 ("general".to_string(), (Duration::from_secs(1), 100)), // 100 general msgs/sec
                 // Bulk sync responses (BlocksResponse, UTXO chunks) arrive in bursts by design.

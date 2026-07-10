@@ -376,6 +376,8 @@ fn rate_limit_key(msg: &NetworkMessage) -> &'static str {
         NetworkMessage::TransactionFinalized { .. } => "tx_finalized",
         NetworkMessage::GetBlocks(..) => "get_blocks",
         NetworkMessage::GetPeers => "get_peers",
+        NetworkMessage::GetMasternodes => "get_masternodes",
+        NetworkMessage::MasternodesResponse(_) => "masternodes_response",
         NetworkMessage::MasternodeAnnouncement { .. }
         | NetworkMessage::MasternodeAnnouncementV2 { .. }
         | NetworkMessage::MasternodeAnnouncementV3 { .. }

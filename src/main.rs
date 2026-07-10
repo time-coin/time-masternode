@@ -1906,12 +1906,20 @@ async fn main() {
             }
         } // end if registration_ok
 
-        // Start peer exchange task (for masternode discovery)
+        // Start peer exchange task (for masternode discovery).
+        // Query a rotating subset of peers each tick — broadcasting GetMasternodes to
+        // every peer at once caused concurrent MasternodesResponse processing that
+        // could wedge the process under registry lock + log pressure.
         let peer_connection_registry_clone = peer_connection_registry.clone();
         let shutdown_token_clone = shutdown_token.clone();
         let peer_exchange_blockchain = blockchain.clone();
         let peer_exchange_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+            use crate::constants::peer_exchange::{INTERVAL_SECS, PEER_SAMPLE_SIZE};
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static PEER_EXCHANGE_OFFSET: AtomicUsize = AtomicUsize::new(0);
+
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(INTERVAL_SECS));
             loop {
                 tokio::select! {
                     _ = shutdown_token_clone.cancelled() => {
@@ -1923,11 +1931,36 @@ async fn main() {
                         if peer_exchange_blockchain.is_syncing() {
                             continue;
                         }
-                        // Request masternodes from all connected peers for peer exchange
-                        tracing::debug!("📤 Broadcasting GetMasternodes to all peers");
-                        peer_connection_registry_clone
-                            .broadcast(NetworkMessage::GetMasternodes)
-                            .await;
+
+                        let mut peers = peer_connection_registry_clone.get_connected_peers().await;
+                        if peers.is_empty() {
+                            continue;
+                        }
+                        peers.sort(); // stable rotation order
+                        let n = peers.len();
+                        let sample_n = PEER_SAMPLE_SIZE.min(n);
+                        let offset = PEER_EXCHANGE_OFFSET.fetch_add(sample_n, Ordering::Relaxed);
+                        let sample: Vec<String> = (0..sample_n)
+                            .map(|i| peers[(offset + i) % n].clone())
+                            .collect();
+
+                        tracing::debug!(
+                            "📤 Peer exchange: GetMasternodes to {}/{} peers (rotating sample)",
+                            sample.len(),
+                            n
+                        );
+                        for peer in sample {
+                            if let Err(e) = peer_connection_registry_clone
+                                .send_to_peer(&peer, NetworkMessage::GetMasternodes)
+                                .await
+                            {
+                                tracing::trace!(
+                                    "Peer exchange GetMasternodes to {} failed: {}",
+                                    peer,
+                                    e
+                                );
+                            }
+                        }
                     }
                 }
             }

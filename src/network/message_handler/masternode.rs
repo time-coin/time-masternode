@@ -29,8 +29,11 @@ impl MessageHandler {
             self.direction, self.peer_ip
         );
 
+        let max_relay = crate::constants::peer_exchange::MAX_RELAY_ENTRIES;
         let all_masternodes = context.masternode_registry.list_all().await;
-        let mn_data: Vec<crate::network::message::MasternodeAnnouncementData> = all_masternodes
+
+        // Prefer paid / active / recently-seen entries when we must truncate.
+        let mut candidates: Vec<&crate::masternode_registry::MasternodeInfo> = all_masternodes
             .iter()
             .filter(|mn_info| {
                 // Only relay masternodes that have been verified via a direct TCP
@@ -66,6 +69,34 @@ impl MessageHandler {
                 }
                 true
             })
+            .collect();
+
+        candidates.sort_by(|a, b| {
+            use crate::types::MasternodeTier;
+            let tier_rank = |t: MasternodeTier| match t {
+                MasternodeTier::Gold => 0u8,
+                MasternodeTier::Silver => 1,
+                MasternodeTier::Bronze => 2,
+                MasternodeTier::Free => 3,
+            };
+            // Active first, then higher tier, then most recently seen.
+            b.is_active
+                .cmp(&a.is_active)
+                .then_with(|| tier_rank(a.masternode.tier).cmp(&tier_rank(b.masternode.tier)))
+                .then_with(|| b.last_seen_at.cmp(&a.last_seen_at))
+        });
+
+        let total_candidates = candidates.len();
+        if total_candidates > max_relay {
+            debug!(
+                "📤 [{}] Truncating MasternodesResponse for {}: {} → {} (anti-pollution cap)",
+                self.direction, self.peer_ip, total_candidates, max_relay
+            );
+            candidates.truncate(max_relay);
+        }
+
+        let mn_data: Vec<crate::network::message::MasternodeAnnouncementData> = candidates
+            .into_iter()
             .map(|mn_info| {
                 // Strip port from address to ensure consistency
                 let ip_only = mn_info
@@ -89,7 +120,7 @@ impl MessageHandler {
         debug!(
             "📤 [{}] Responded with {} masternode(s) to {}",
             self.direction,
-            all_masternodes.len(),
+            mn_data.len(),
             self.peer_ip
         );
 
@@ -1961,15 +1992,37 @@ impl MessageHandler {
     /// Handle MasternodesResponse
     pub(super) async fn handle_masternodes_response(
         &self,
-        masternodes: Vec<crate::network::message::MasternodeAnnouncementData>,
+        mut masternodes: Vec<crate::network::message::MasternodeAnnouncementData>,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
-        debug!(
-            "📥 [{}] Received MasternodesResponse from {} with {} masternode(s)",
-            self.direction,
-            self.peer_ip,
-            masternodes.len()
-        );
+        let raw_len = masternodes.len();
+        let max_entries = crate::constants::peer_exchange::MAX_RESPONSE_ENTRIES;
+
+        // Bound processing cost: oversized lists (polluted peer registries) previously
+        // drove thousands of register_internal attempts per exchange tick.
+        if raw_len > max_entries {
+            // Prefer paid tiers when truncating so discovery still finds real nodes.
+            use crate::types::MasternodeTier;
+            masternodes.sort_by(|a, b| {
+                let rank = |t: MasternodeTier| match t {
+                    MasternodeTier::Gold => 0u8,
+                    MasternodeTier::Silver => 1,
+                    MasternodeTier::Bronze => 2,
+                    MasternodeTier::Free => 3,
+                };
+                rank(a.tier).cmp(&rank(b.tier))
+            });
+            masternodes.truncate(max_entries);
+            debug!(
+                "📥 [{}] Truncated MasternodesResponse from {}: {} → {} entries (cap)",
+                self.direction, self.peer_ip, raw_len, max_entries
+            );
+        } else {
+            debug!(
+                "📥 [{}] Received MasternodesResponse from {} with {} masternode(s)",
+                self.direction, self.peer_ip, raw_len
+            );
+        }
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1985,6 +2038,10 @@ impl MessageHandler {
         let local_address = context.masternode_registry.get_local_address().await;
 
         let mut registered = 0;
+        let mut gossip_guard_skips = 0u32;
+        let mut other_rejects = 0u32;
+        let mut already_known = 0u32;
+
         for mn_data in masternodes {
             // Don't let peer gossip overwrite our own masternode entry
             if let Some(ref local_addr) = local_address {
@@ -1997,6 +2054,16 @@ impl MessageHandler {
                 if mn_ip == local_ip {
                     continue;
                 }
+            }
+
+            // Cheap pre-filter: skip register_internal entirely when gossip-guard
+            // would reject (avoids Masternode construction + lock work + per-IP logs).
+            if context
+                .masternode_registry
+                .is_gossip_removal_cooldown_active(&mn_data.address)
+            {
+                gossip_guard_skips += 1;
+                continue;
             }
 
             // Deferred-tier nodes announce as Free + collateral_outpoint during
@@ -2041,9 +2108,23 @@ impl MessageHandler {
                 .await
             {
                 Ok(true) => registered += 1, // truly new masternode discovered
-                Ok(false) => {}              // already known, no-op
-                Err(_) => {}                 // rejected (cooldown, collateral conflict, etc.)
+                Ok(false) => already_known += 1,
+                Err(_) => other_rejects += 1,
             }
+        }
+
+        if gossip_guard_skips > 0 || raw_len > max_entries {
+            debug!(
+                "📥 [{}] Peer exchange from {}: processed up to {}, \
+                 new={}, known={}, gossip-guard skips={}, other rejects={}",
+                self.direction,
+                self.peer_ip,
+                max_entries.min(raw_len),
+                registered,
+                already_known,
+                gossip_guard_skips,
+                other_rejects
+            );
         }
 
         if registered > 0 {

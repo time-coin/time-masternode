@@ -894,28 +894,23 @@ impl MasternodeRegistry {
         // messages can't immediately resurrect a node we just pruned, resetting its
         // eviction clock.  Direct TCP connections bypass this guard — if the node is
         // actually online and connecting to us, we want it back.
+        //
+        // Per-IP TRACE only — handlers should pre-filter and log a single summary line
+        // to avoid debug.log storms when peers advertise large stale lists.
+        if !is_direct && self.is_gossip_removal_cooldown_active(&masternode.address) {
+            return Err(RegistryError::IpCyclingRejected);
+        }
         if !is_direct {
-            let guard_now = Self::now();
-            if let Some(removed_at) = self.gossip_removal_cooldown.get(&masternode.address) {
-                // Use the same 1-hour cooldown for all tiers.  The Free-tier eviction
-                // window (300s) is much shorter than the cooldown so that a dead node
-                // pruned after 5 min of failed connections can't return via gossip for
-                // a full hour.  This stops the prune→resurrect→prune cycle that caused
-                // stale node counts to stay artificially high.
-                let tier_cooldown = AUTO_REMOVE_AFTER_SECS; // 1 hour for all tiers
-                let elapsed = guard_now.saturating_sub(*removed_at);
-                if elapsed < tier_cooldown {
-                    tracing::debug!(
-                        "⏳ [gossip-guard] Skipping peer-exchange re-registration for {} \
-                         (removed {}s ago, cooldown {}s)",
-                        masternode.address,
-                        elapsed,
-                        tier_cooldown
-                    );
-                    return Err(RegistryError::IpCyclingRejected);
-                } else {
-                    // Cooldown expired — allow and clear the entry.
-                    self.gossip_removal_cooldown.remove(&masternode.address);
+            // Cooldown expired (or never set) — drop a stale map entry if present.
+            let ip_only = masternode
+                .address
+                .split(':')
+                .next()
+                .unwrap_or(&masternode.address);
+            if let Some(removed_at) = self.gossip_removal_cooldown.get(ip_only) {
+                let elapsed = Self::now().saturating_sub(*removed_at);
+                if elapsed >= AUTO_REMOVE_AFTER_SECS {
+                    self.gossip_removal_cooldown.remove(ip_only);
                 }
             }
         }
@@ -3051,6 +3046,19 @@ impl MasternodeRegistry {
     #[allow(dead_code)]
     pub async fn is_registered(&self, address: &str) -> bool {
         self.masternodes.read().await.contains_key(address)
+    }
+
+    /// True when peer-exchange / gossip must not re-register this address
+    /// (recently auto-removed; 1-hour cooldown). Direct TCP connections bypass this.
+    /// Address is normalized to IP-only (port stripped) to match cooldown keys.
+    pub fn is_gossip_removal_cooldown_active(&self, address: &str) -> bool {
+        let ip_only = address.split(':').next().unwrap_or(address);
+        if let Some(removed_at) = self.gossip_removal_cooldown.get(ip_only) {
+            let elapsed = Self::now().saturating_sub(*removed_at);
+            elapsed < AUTO_REMOVE_AFTER_SECS
+        } else {
+            false
+        }
     }
 
     pub async fn broadcast_block(&self, block: crate::block::types::Block) {

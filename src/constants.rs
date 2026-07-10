@@ -228,3 +228,26 @@ pub mod performance {
     /// Number of database operations to batch together
     pub const DB_BATCH_SIZE: usize = 100;
 }
+
+/// Peer-exchange / GetMasternodes hardening (non-consensus, availability only).
+///
+/// Oversized `MasternodesResponse` lists from polluted peer registries, combined with
+/// broadcasting `GetMasternodes` to every connected peer every 30s, can lock the node
+/// under registry lock contention and log storms. These caps keep discovery working
+/// while bounding CPU / lock / log cost per exchange tick.
+pub mod peer_exchange {
+    /// How often the local node requests masternode lists from peers (seconds).
+    pub const INTERVAL_SECS: u64 = 30;
+
+    /// Max peers to query with `GetMasternodes` per exchange tick (rotating sample).
+    /// Covers the full peer set over successive ticks without stampeding all at once.
+    pub const PEER_SAMPLE_SIZE: usize = 5;
+
+    /// Max masternode entries accepted/processed from a single `MasternodesResponse`.
+    /// Healthy lists are ~25–30; polluted registries have been observed at 150+.
+    pub const MAX_RESPONSE_ENTRIES: usize = 64;
+
+    /// Max masternode entries we include when answering `GetMasternodes` (anti-pollution).
+    /// Prefer paid / active / recently-seen entries when truncating.
+    pub const MAX_RELAY_ENTRIES: usize = 64;
+}
