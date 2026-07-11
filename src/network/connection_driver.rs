@@ -63,7 +63,7 @@ pub struct ConnectionDriver {
 impl ConnectionDriver {
     /// Establish an outbound connection to `ip:port`, run its message loop, then clean up.
     ///
-    /// Returns `Ok(elapsed)` ΓÇö the wall-clock duration the connection was live ΓÇö so that
+    /// Returns `Ok(elapsed)` — the wall-clock duration the connection was live — so that
     /// the caller can feed the value to reconnection-AI success/failure recording.
     /// Returns `Err(reason)` when the connection could not be established at all.
     pub async fn drive_outbound(
@@ -91,7 +91,7 @@ impl ConnectionDriver {
             Ok(conn) => conn,
             Err(e) if e.contains("TLS handshake failed") => {
                 tracing::debug!(
-                    "≡ƒöä [OUTBOUND] TLS rejected by {}, retrying in plaintext",
+                    "🔄 [OUTBOUND] TLS rejected by {}, retrying in plaintext",
                     ip
                 );
                 match PeerConnection::new_outbound(
@@ -116,11 +116,11 @@ impl ConnectionDriver {
             }
         };
 
-        tracing::info!("Γ£ô Connected to peer: {}", ip);
+        tracing::info!("✓ Connected to peer: {}", ip);
 
         let peer_ip = peer_conn.peer_ip().to_string();
 
-        // Transition Connecting ΓåÆ Connected in the connection-state machine.
+        // Transition Connecting → Connected in the connection-state machine.
         self.connection_manager.mark_connected(&peer_ip);
 
         if let Some(ref ai) = self.ai_system {
@@ -131,7 +131,7 @@ impl ConnectionDriver {
         if is_masternode {
             self.connection_manager.mark_whitelisted(&peer_ip);
             tracing::debug!(
-                "≡ƒ¢í∩╕Å Marked {} as whitelisted masternode with enhanced protection",
+                "🛡️ Marked {} as whitelisted masternode with enhanced protection",
                 peer_ip
             );
         }
@@ -161,13 +161,13 @@ impl ConnectionDriver {
             config = config.with_contacts_book(cb.clone());
         }
 
-        // Fresh per-connection rate limiter ΓÇö mirrors the inbound check_rate_limit! path.
+        // Fresh per-connection rate limiter — mirrors the inbound check_rate_limit! path.
         let rate_limiter = Arc::new(RwLock::new(crate::network::rate_limiter::RateLimiter::new()));
         config = config.with_rate_limiter(rate_limiter);
 
         let result = peer_conn.run_message_loop_unified(config).await;
 
-        // ΓöÇΓöÇ Cleanup ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        // ── Cleanup ─────────────────────────────────────────────────────────────────
 
         self.connection_manager.mark_outbound_disconnected(&peer_ip);
 
@@ -203,7 +203,7 @@ impl ConnectionDriver {
             }
         }
 
-        tracing::debug!("≡ƒöî Unregistered peer {}", peer_ip);
+        tracing::debug!("🔌 Unregistered peer {}", peer_ip);
 
         match result {
             Ok(_) => Ok(elapsed),
@@ -229,7 +229,7 @@ impl ConnectionDriver {
 
         // Per-connection rate limiter: each peer gets its own instance, eliminating
         // the write-lock contention that the shared NetworkServer RateLimiter caused
-        // under load (50+ peers ├ù multiple msg/s = constant write-lock contention).
+        // under load (50+ peers × multiple msg/s = constant write-lock contention).
         // The shared `rate_limiter` parameter is intentionally shadowed here.
         let _rate_limiter = Arc::new(RwLock::new(RateLimiter::new()));
 
@@ -245,8 +245,8 @@ impl ConnectionDriver {
         // is documented as not cancellation-safe.  When a write became ready mid-frame the
         // select! branch would cancel `read_message` after consuming some bytes from the
         // stream, leaving the stream at an inconsistent offset.  The next `read_message`
-        // call then read mid-payload bytes as a frame-length prefix ΓÇö producing the
-        // deterministic 100 MBΓÇô3 GB "FrameBomb" sizes seen in production logs.
+        // call then read mid-payload bytes as a frame-length prefix — producing the
+        // deterministic 100 MB–3 GB "FrameBomb" sizes seen in production logs.
         // `tokio::io::split()` is safe here because rustls uses TLS 1.3 exclusively
         // (no renegotiation), so neither half ever needs cross-direction TLS I/O after
         // the handshake completes.
@@ -262,9 +262,9 @@ impl ConnectionDriver {
                     // Enforce SNI = "timecoin.local": every legitimate TIME node sets this
                     // exact SNI when opening an outbound TLS connection (peer_connection.rs).
                     // Any connection with a missing, blank, or different SNI (e.g. an IP
-                    // address literal) is provably not one of our nodes ΓÇö it's a scanner,
+                    // address literal) is provably not one of our nodes — it's a scanner,
                     // prober, or attacker.  Record an immediate violation so the IP
-                    // escalates through temp ΓåÆ permanent ban (sled-persisted).
+                    // escalates through temp → permanent ban (sled-persisted).
                     {
                         let sni = tls_stream.get_ref().1.server_name();
                         if sni != Some("timecoin.local") {
@@ -274,7 +274,7 @@ impl ConnectionDriver {
                                 // SNI from one of them is almost certainly an older client
                                 // build, not a probe. Log and continue.
                                 tracing::warn!(
-                                "ΓÜá∩╕Å  Whitelisted peer {} sent unexpected SNI {:?} ΓÇö accepting connection",
+                                "⚠️  Whitelisted peer {} sent unexpected SNI {:?} — accepting connection",
                                 ip, sni_desc
                             );
                             } else {
@@ -286,7 +286,7 @@ impl ConnectionDriver {
                                     ai.attack_detector.record_tls_failure(&ip_str);
                                 }
                                 tracing::debug!(
-                                    "≡ƒÜ½ Rejected {} ΓÇö invalid SNI {:?} (not a TIME node)",
+                                    "🚫 Rejected {} — invalid SNI {:?} (not a TIME node)",
                                     ip,
                                     sni_desc
                                 );
@@ -294,13 +294,13 @@ impl ConnectionDriver {
                             }
                         }
                     }
-                    // Log only after TLS succeeds ΓÇö plain TCP probes (reachability checks)
+                    // Log only after TLS succeeds — plain TCP probes (reachability checks)
                     // would otherwise spam the log with connections that immediately fail TLS.
-                    tracing::info!("≡ƒöî New peer connection from: {}", peer_addr);
-                    tracing::debug!("≡ƒöÆ TLS established for inbound {}", peer_addr);
+                    tracing::info!("🔌 New peer connection from: {}", peer_addr);
+                    tracing::debug!("🔒 TLS established for inbound {}", peer_addr);
                     let gate_is_whitelisted = is_whitelisted;
                     let (mut tls_read, mut tls_write) = tokio::io::split(tls_stream);
-                    // Spawn dedicated reader task ΓÇö reads without competing with writes,
+                    // Spawn dedicated reader task — reads without competing with writes,
                     // eliminating the cancellation-safety hazard of the old select! bridge.
                     let peer_addr_r = peer_addr.clone();
                     tokio::spawn(async move {
@@ -308,13 +308,13 @@ impl ConnectionDriver {
                         // Refills at GATE_RATE tokens/s; burst up to GATE_BURST.
                         // Soft-drops messages while tokens are exhausted; after
                         // GATE_HARD_DROPS consecutive soft-drops the peer is disconnected.
-                        // Whitelisted peers get elevated limits AND never hard-kick ΓÇö a
+                        // Whitelisted peers get elevated limits AND never hard-kick — a
                         // friendly node that briefly exceeds rate (e.g. mempool replay after
                         // reconnect, fork-resolution bursts) must stay connected so block
                         // production doesn't lose resources.consensus quorum.
                         let gate_rate: f64 = if gate_is_whitelisted { 5000.0 } else { 500.0 };
                         let gate_burst: f64 = if gate_is_whitelisted { 10000.0 } else { 1000.0 };
-                        const GATE_HARD_DROPS: u32 = 500; // consecutive drops ΓåÆ hard kick
+                        const GATE_HARD_DROPS: u32 = 500; // consecutive drops → hard kick
                         let mut gate_tokens: f64 = gate_burst;
                         let mut gate_last = std::time::Instant::now();
                         let mut gate_drop_streak: u32 = 0;
@@ -348,7 +348,7 @@ impl ConnectionDriver {
                                 break;
                             }
                         }
-                        tracing::debug!("≡ƒöÆ TLS reader task exiting for {}", peer_addr_r);
+                        tracing::debug!("🔒 TLS reader task exiting for {}", peer_addr_r);
                     });
                     // Spawn dedicated writer task.
                     let peer_addr_w = peer_addr.clone();
@@ -356,39 +356,39 @@ impl ConnectionDriver {
                         use tokio::io::AsyncWriteExt;
                         while let Some(data) = write_rx.recv().await {
                             if let Err(e) = tls_write.write_all(&data).await {
-                                tracing::debug!("≡ƒöÆ TLS write error for {}: {}", peer_addr_w, e);
+                                tracing::debug!("🔒 TLS write error for {}: {}", peer_addr_w, e);
                                 break;
                             }
                             if let Err(e) = tls_write.flush().await {
-                                tracing::debug!("≡ƒöÆ TLS flush error for {}: {}", peer_addr_w, e);
+                                tracing::debug!("🔒 TLS flush error for {}: {}", peer_addr_w, e);
                                 break;
                             }
                         }
-                        tracing::debug!("≡ƒöÆ TLS writer task exiting for {}", peer_addr_w);
+                        tracing::debug!("🔒 TLS writer task exiting for {}", peer_addr_w);
                     });
                 }
                 Err(e) => {
-                    // "handshake eof" is sent by old plain-TCP peers that don't speak TLS ΓÇö
+                    // "handshake eof" is sent by old plain-TCP peers that don't speak TLS —
                     // demote to DEBUG since it's expected noise from pre-TLS nodes and port scanners.
                     let e_str = e.to_string();
                     if e_str.contains("eof") || e_str.contains("early eof") {
                         tracing::debug!(
-                            "≡ƒöô TLS handshake eof from {} (plain-TCP client?)",
+                            "🔓 TLS handshake eof from {} (plain-TCP client?)",
                             peer_addr
                         );
                     } else {
-                        tracing::warn!("≡ƒÜ½ TLS handshake failed for {}: {}", peer_addr, e);
+                        tracing::warn!("🚫 TLS handshake failed for {}: {}", peer_addr, e);
                     }
                     // Charge a violation so repeat offenders accumulate bans.
-                    // Without this, an attacker can flood TLS connections at zero cost ΓÇö
+                    // Without this, an attacker can flood TLS connections at zero cost —
                     // each attempt consumes a tokio task + TLS negotiation with no penalty.
-                    // Never record violations against our own IP ΓÇö self-connections (the node
+                    // Never record violations against our own IP — self-connections (the node
                     // briefly attempting to connect to itself via the peer list) must not
                     // cause the node to permanently ban itself.
                     let is_self = resources.local_ip.as_deref().is_some_and(|l| l == ip_str);
                     if !is_self {
                         // Use the TLS-specific counter: much higher threshold, never permanent.
-                        // TLS mode mismatches are operator config errors, not attacks ΓÇö using
+                        // TLS mode mismatches are operator config errors, not attacks — using
                         // the standard record_violation path would permanently ban legitimate
                         // nodes after only 10 retries.
                         resources
@@ -396,7 +396,7 @@ impl ConnectionDriver {
                             .write()
                             .await
                             .record_tls_violation(ip, &format!("TLS handshake failed: {}", e));
-                        // Also feed into the AI detector ΓÇö it tracks distributed TLS floods
+                        // Also feed into the AI detector — it tracks distributed TLS floods
                         // from multiple IPs in the same /24 that each stay below the per-IP
                         // resources.banlist threshold (AV13 subnet variant).
                         if let Some(ref ai) = self.ai_system {
@@ -404,7 +404,7 @@ impl ConnectionDriver {
                         }
                     } else {
                         tracing::debug!(
-                            "≡ƒöä Ignoring TLS failure from own IP {} (self-connection)",
+                            "🔄 Ignoring TLS failure from own IP {} (self-connection)",
                             ip_str
                         );
                     }
@@ -412,7 +412,7 @@ impl ConnectionDriver {
                 }
             }
         } else {
-            tracing::debug!("≡ƒöô Plaintext connection from {}", peer_addr);
+            tracing::debug!("🔓 Plaintext connection from {}", peer_addr);
             let (r, w) = stream.into_split();
             // Spawn reader task for non-TLS
             let peer_addr_saved = peer_addr.clone();
@@ -424,13 +424,13 @@ impl ConnectionDriver {
                 // Refills at gate_rate tokens/s; burst up to gate_burst.
                 // Soft-drops messages while tokens are exhausted; after
                 // GATE_HARD_DROPS consecutive soft-drops the peer is disconnected.
-                // Whitelisted peers get elevated limits AND never hard-kick ΓÇö a
+                // Whitelisted peers get elevated limits AND never hard-kick — a
                 // friendly node that briefly exceeds rate (e.g. mempool replay after
                 // reconnect, fork-resolution bursts) must stay connected so block
                 // production doesn't lose resources.consensus quorum.
                 let gate_rate: f64 = if gate_is_whitelisted { 5000.0 } else { 500.0 };
                 let gate_burst: f64 = if gate_is_whitelisted { 10000.0 } else { 1000.0 };
-                const GATE_HARD_DROPS: u32 = 500; // consecutive drops ΓåÆ hard kick
+                const GATE_HARD_DROPS: u32 = 500; // consecutive drops → hard kick
                 let mut gate_tokens: f64 = gate_burst;
                 let mut gate_last = std::time::Instant::now();
                 let mut gate_drop_streak: u32 = 0;
@@ -463,7 +463,7 @@ impl ConnectionDriver {
                         break;
                     }
                 }
-                tracing::debug!("≡ƒôû Reader task exiting for {}", peer_addr);
+                tracing::debug!("📖 Reader task exiting for {}", peer_addr);
             });
             // Spawn writer task for non-TLS
             let peer_addr2 = peer_addr_saved.clone();
@@ -472,20 +472,20 @@ impl ConnectionDriver {
                 let mut writer = w;
                 while let Some(data) = write_rx.recv().await {
                     if let Err(e) = writer.write_all(&data).await {
-                        tracing::debug!("≡ƒô¥ Write error for {}: {}", peer_addr2, e);
+                        tracing::debug!("📝 Write error for {}: {}", peer_addr2, e);
                         break;
                     }
                     if let Err(e) = writer.flush().await {
-                        tracing::debug!("≡ƒô¥ Flush error for {}: {}", peer_addr2, e);
+                        tracing::debug!("📝 Flush error for {}: {}", peer_addr2, e);
                         break;
                     }
                 }
-                tracing::debug!("≡ƒô¥ Writer task exiting for {}", peer_addr2);
+                tracing::debug!("📝 Writer task exiting for {}", peer_addr2);
             });
         }
 
         // ConnectionManager is the single authority for both inbound and outbound state.
-        // Reject here ΓÇö after TLS succeeds but before any message work ΓÇö so that:
+        // Reject here — after TLS succeeds but before any message work — so that:
         //   (a) TLS failures / SNI rejections never consume a CM slot
         //   (b) duplicate connections are dropped before the writer channel is registered
         //   (c) can_accept_inbound (capacity only) in the accept loop stays a fast pre-check
@@ -494,7 +494,7 @@ impl ConnectionDriver {
             .accept_inbound(&ip_str, is_whitelisted)
         {
             tracing::debug!(
-            "≡ƒöä Dropping duplicate inbound from {} ΓÇö ConnectionManager already has a connection",
+            "🔄 Dropping duplicate inbound from {} — ConnectionManager already has a connection",
             peer_addr
         );
             return Ok(());
@@ -504,7 +504,7 @@ impl ConnectionDriver {
 
         // Per-connection UTXO lock flood counter: tracks how many UTXOStateUpdate (Locked)
         // messages this peer has sent for each TX.  A legitimate TX with N inputs produces
-        // exactly N lock messages ΓÇö an attacker who sends far more is DoS-flooding us.
+        // exactly N lock messages — an attacker who sends far more is DoS-flooding us.
         let magic_bytes = self.network_type.magic_bytes();
 
         // A connection that completes TLS but never sends a Handshake message holds an open
@@ -519,9 +519,9 @@ impl ConnectionDriver {
                         Some(r) => r,
                         None => {
                             if handshake_done {
-                                tracing::info!("≡ƒöî Peer {} reader channel closed", peer_addr);
+                                tracing::info!("🔌 Peer {} reader channel closed", peer_addr);
                             } else {
-                                tracing::debug!("≡ƒöî Peer {} reader channel closed (pre-handshake)", peer_addr);
+                                tracing::debug!("🔌 Peer {} reader channel closed (pre-handshake)", peer_addr);
                             }
                             break;
                         }
@@ -529,14 +529,14 @@ impl ConnectionDriver {
                     match result {
                         Ok(None) => {
                             if handshake_done {
-                                tracing::info!("≡ƒöî Peer {} disconnected (EOF)", peer_addr);
+                                tracing::info!("🔌 Peer {} disconnected (EOF)", peer_addr);
                             } else {
-                                tracing::debug!("≡ƒöî Peer {} disconnected before handshake (EOF)", peer_addr);
+                                tracing::debug!("🔌 Peer {} disconnected before handshake (EOF)", peer_addr);
                             }
                             break;
                         }
                         Err(e) => {
-                            // Pre-handshake oversized frame: trivial 4-byte DoS ΓÇö penalise.
+                            // Pre-handshake oversized frame: trivial 4-byte DoS — penalise.
                             // Post-handshake frames > 100 MB are clearly malicious (e.g. 926 MB
                             // frames from fork-attack peers); penalise those too. Smaller
                             // post-handshake overflows may be a framing mismatch with older nodes
@@ -556,9 +556,9 @@ impl ConnectionDriver {
                             let suppress_generic_close_log = is_large_frame && is_whitelisted;
                             if !suppress_generic_close_log {
                                 if handshake_done {
-                                    tracing::info!("≡ƒöî Connection from {} ended: {}", peer_addr, e);
+                                    tracing::info!("🔌 Connection from {} ended: {}", peer_addr, e);
                                 } else {
-                                    tracing::debug!("≡ƒöî Connection from {} ended before handshake: {}", peer_addr, e);
+                                    tracing::debug!("🔌 Connection from {} ended before handshake: {}", peer_addr, e);
                                 }
                             }
                             if is_large_frame && (!handshake_done || clearly_malicious) {
@@ -580,28 +580,28 @@ impl ConnectionDriver {
                                 }
                             } else if e.contains("Message flood detected") {
                                 // Distinguish legitimate burst traffic from raw flooding attacks:
-                                // - Pre-handshake flood: the peer never authenticated ΓÇö raw TCP/protocol
+                                // - Pre-handshake flood: the peer never authenticated — raw TCP/protocol
                                 //   flood (attacker). Record a violation so repeat offenders get banned.
                                 // - Post-handshake burst: peer authenticated successfully and then sent
                                 //   a large burst (e.g. syncing many blocks, retail checkout processing
                                 //   many simultaneous transactions, mempool replay after reconnect).
-                                //   This is normal network operation ΓÇö just disconnect and let them
+                                //   This is normal network operation — just disconnect and let them
                                 //   reconnect.  Recording a banning violation would permanently cut
                                 //   legitimate masternodes off from resources.consensus and rewards.
                                 if is_whitelisted {
-                                    tracing::debug!("≡ƒöî Message burst from whitelisted peer {} tripped pre-channel gate ΓÇö skipping penalty", peer_addr);
+                                    tracing::debug!("🔌 Message burst from whitelisted peer {} tripped pre-channel gate — skipping penalty", peer_addr);
                                 } else if !handshake_done {
-                                    // Raw flood before any handshake ΓÇö likely an attacker.
-                                    tracing::warn!("≡ƒîè Pre-handshake flood from {} ΓÇö recording violation", peer_addr);
+                                    // Raw flood before any handshake — likely an attacker.
+                                    tracing::warn!("🌊 Pre-handshake flood from {} — recording violation", peer_addr);
                                     resources.banlist.write().await.record_violation(ip, "Message flood: pre-handshake flood");
                                     if let Some(ai) = &self.ai_system {
                                         ai.attack_detector.record_message_flood(&ip_str);
                                     }
                                 } else {
-                                    // Burst from authenticated peer ΓÇö normal operation (sync, commerce, etc.).
+                                    // Burst from authenticated peer — normal operation (sync, commerce, etc.).
                                     // Do NOT feed record_message_flood() here: the AI enforcement loop
                                     // would call record_violation() and issue a ban despite the intent.
-                                    tracing::info!("≡ƒîè Message burst from {} tripped pre-channel gate ΓÇö disconnecting (no ban, peer was authenticated)", peer_addr);
+                                    tracing::info!("🌊 Message burst from {} tripped pre-channel gate — disconnecting (no ban, peer was authenticated)", peer_addr);
                                 }
                             }
                             break;
@@ -614,11 +614,11 @@ impl ConnectionDriver {
                                             if magic != &magic_bytes {
                                                 if is_whitelisted {
                                                     tracing::warn!(
-                                                        "ΓÜá∩╕Å  Whitelisted peer {} sent unexpected magic {:?} ΓÇö accepting anyway (operator-trusted)",
+                                                        "⚠️  Whitelisted peer {} sent unexpected magic {:?} — accepting anyway (operator-trusted)",
                                                         peer_addr, magic
                                                     );
                                                 } else {
-                                                    tracing::warn!("≡ƒÜ½ Rejecting {} - invalid magic bytes: {:?}", peer_addr, magic);
+                                                    tracing::warn!("🚫 Rejecting {} - invalid magic bytes: {:?}", peer_addr, magic);
                                                     resources.banlist.write().await.record_violation(
                                                         ip,
                                                         &format!("Invalid magic bytes: {:?}", magic)
@@ -632,12 +632,12 @@ impl ConnectionDriver {
                                             if *protocol_version < 2 {
                                                 if is_whitelisted {
                                                     tracing::warn!(
-                                                        "ΓÜá∩╕Å  Whitelisted peer {} on protocol version {} (minimum 2) ΓÇö accepting anyway",
+                                                        "⚠️  Whitelisted peer {} on protocol version {} (minimum 2) — accepting anyway",
                                                         peer_addr, protocol_version
                                                     );
                                                 } else {
                                                     tracing::warn!(
-                                                        "≡ƒÜ½ Rejecting {} ΓÇö protocol version {} is too old (minimum: 2). \
+                                                        "🚫 Rejecting {} — protocol version {} is too old (minimum: 2). \
                                                         Please upgrade: https://github.com/time-coin/time-masternode",
                                                         peer_addr, protocol_version
                                                     );
@@ -657,7 +657,7 @@ impl ConnectionDriver {
                                                     if let Ok(frame) = crate::network::wire::serialize_frame(&upgrade_msg) {
                                                         let _ = writer_tx.send(frame);
                                                     }
-                                                    // Old software is not an attack ΓÇö do NOT record a violation.
+                                                    // Old software is not an attack — do NOT record a violation.
                                                     // Recording violations here would permanently ban legitimate users
                                                     // who just haven't updated yet.
                                                     let _ = self.masternode_registry
@@ -674,12 +674,12 @@ impl ConnectionDriver {
                                             // Nodes running old code cannot participate in resources.consensus
                                             // and must not be counted toward our peer quorum.
                                             // Whitelisted peers are operator-trusted infrastructure: never
-                                            // close them on a version check ΓÇö even if they're behind, we
+                                            // close them on a version check — even if they're behind, we
                                             // still want them in the peer set (they may still serve blocks
                                             // and votes in a degraded mode while the operator upgrades).
                                             if *commit_count < crate::constants::MIN_PEER_COMMIT_VERSION && !is_whitelisted {
                                                 tracing::warn!(
-                                                    "≡ƒÜ½ Rejecting {} ΓÇö running obsolete software \
+                                                    "🚫 Rejecting {} — running obsolete software \
                                                     (commit {}, minimum required: {}). \
                                                     Please upgrade: https://github.com/time-coin/time-masternode",
                                                     peer_addr, commit_count, crate::constants::MIN_PEER_COMMIT_VERSION
@@ -701,7 +701,7 @@ impl ConnectionDriver {
                                                 if let Ok(frame) = crate::network::wire::serialize_frame(&upgrade_msg) {
                                                     let _ = writer_tx.send(frame);
                                                 }
-                                                // Old software is not an attack ΓÇö do NOT record a violation
+                                                // Old software is not an attack — do NOT record a violation
                                                 // (that escalates to a permanent ban). Instead, add a short
                                                 // temp ban so the peer stops hammering us every ~30 s while
                                                 // they haven't upgraded yet.  PHASE3 also checks the resources.banlist
@@ -727,22 +727,22 @@ impl ConnectionDriver {
                                             }
                                             if *commit_count < crate::constants::MIN_PEER_COMMIT_VERSION && is_whitelisted {
                                                 tracing::warn!(
-                                                    "ΓÜá∩╕Å  Whitelisted peer {} below minimum commit ({} < {}) ΓÇö accepting anyway (operator-trusted)",
+                                                    "⚠️  Whitelisted peer {} below minimum commit ({} < {}) — accepting anyway (operator-trusted)",
                                                     peer_addr, commit_count, crate::constants::MIN_PEER_COMMIT_VERSION
                                                 );
                                             }
                                             if *commit_count < our_commits {
                                                 tracing::warn!(
-                                                    "ΓÜá∩╕Å Peer {} is running outdated software \
+                                                    "⚠️ Peer {} is running outdated software \
                                                     (commit {}, we are at commit {}). \
                                                     Please upgrade: https://github.com/time-coin/time-masternode",
                                                     peer_addr, commit_count, our_commits
                                                 );
                                             }
-                                            // Check if the peer is ahead of us ΓÇö we may be outdated.
+                                            // Check if the peer is ahead of us — we may be outdated.
                                             if *commit_count > our_commits && our_commits > 0 {
                                                 tracing::warn!(
-                                                    "Γ¼å∩╕Å  Peer {} is running newer software \
+                                                    "⬆️  Peer {} is running newer software \
                                                     (commit {}, we are at commit {}). \
                                                     Consider upgrading: https://github.com/time-coin/time-masternode",
                                                     peer_addr, commit_count, our_commits
@@ -753,21 +753,21 @@ impl ConnectionDriver {
                                                 .clear_consensus_suspension(&ip_str)
                                                 .await;
                                             tracing::info!(
-                                                "Γ£à Handshake accepted from {} (network: {}, commit: {})",
+                                                "✅ Handshake accepted from {} (network: {}, commit: {})",
                                                 peer_addr, network, commit_count
                                             );
                                             handshake_done = true;
 
-                                            // ConnectionManager is the single authority ΓÇö accept_inbound()
+                                            // ConnectionManager is the single authority — accept_inbound()
                                             // already ran at the top of handle_peer() and is the only
                                             // gate needed.  register_peer() below wires the writer channel
                                             // into PeerConnectionRegistry (the message router).
-                                            tracing::info!("≡ƒô¥ Registering {} in PeerConnectionRegistry (peer_addr: {})", ip_str, peer_addr);
+                                            tracing::info!("📝 Registering {} in PeerConnectionRegistry (peer_addr: {})", ip_str, peer_addr);
                                             self.peer_registry.register_peer(ip_str.clone(), writer_tx.clone()).await;
                                             if let Some(ref ai) = self.ai_system {
                                                 ai.attack_detector.record_peer_connect(&ip_str);
                                             }
-                                            tracing::debug!("Γ£à Successfully registered {} in registry", ip_str);
+                                            tracing::debug!("✅ Successfully registered {} in registry", ip_str);
 
                                             // Send ACK to confirm handshake was processed
                                             let ack_msg = NetworkMessage::Ack {
@@ -779,8 +779,8 @@ impl ConnectionDriver {
                                             // inbound limit and this is not a whitelisted peer,
                                             // send a PeerExchange of less-loaded alternatives and
                                             // close.  MIN_CONNECTIONS ensures the network never
-                                            // fractures ΓÇö we always keep at least that many inbound.
-                                            // Registered masternodes are never redirected ΓÇö they
+                                            // fractures — we always keep at least that many inbound.
+                                            // Registered masternodes are never redirected — they
                                             // are trusted peers that must stay connected for resources.consensus.
                                             const INBOUND_REDIRECT_THRESHOLD: usize = 175; // 70 % of MAX_INBOUND_CONNECTIONS
                                             const MIN_CONNECTIONS: usize = 8;
@@ -797,7 +797,7 @@ impl ConnectionDriver {
                                                     && cur_inbound > MIN_CONNECTIONS
                                                 {
                                                     tracing::info!(
-                                                        "Γå⌐∩╕Å  Redirecting {} to {} less-loaded peers (inbound: {})",
+                                                        "↩️  Redirecting {} to {} less-loaded peers (inbound: {})",
                                                         ip_str, alternatives.len(), cur_inbound
                                                     );
                                                     let redirect = NetworkMessage::PeerExchange(alternatives);
@@ -846,7 +846,7 @@ impl ConnectionDriver {
                                                     };
                                                     let version = if proof.is_empty() { "V3" } else { "V4 (with collateral proof)" };
                                                     let _ = self.peer_registry.send_to_peer(&ip_str, announcement).await;
-                                                    tracing::info!("≡ƒôó Sent masternode announcement ({}) to peer {}", version, ip_str);
+                                                    tracing::info!("📢 Sent masternode announcement ({}) to peer {}", version, ip_str);
                                                 }
                                             }
 
@@ -862,7 +862,7 @@ impl ConnectionDriver {
                                             // so the peer can bootstrap its pool in one frame.  Using
                                             // individual TransactionFinalized messages here trips the
                                             // peer's tx_finalized rate limiter on every connect when the
-                                            // mempool has ΓëÑ20 entries.
+                                            // mempool has ≥20 entries.
                                             {
                                                 let entries = resources.consensus.get_all_for_sync();
                                                 if !entries.is_empty() {
@@ -884,14 +884,14 @@ impl ConnectionDriver {
                                                 let get_genesis_msg = NetworkMessage::GetGenesisHash;
                                                 let _ = self.peer_registry.send_to_peer(&ip_str, get_genesis_msg).await;
                                                 tracing::debug!(
-                                                    "≡ƒôñ Requesting genesis hash from {} for compatibility check (our genesis: {})",
+                                                    "📤 Requesting genesis hash from {} for compatibility check (our genesis: {})",
                                                     ip_str,
                                                     hex::encode(&our_genesis_hash[..8])
                                                 );
                                             } else {
                                                 // We don't have a genesis yet - request one from peer
                                                 tracing::info!(
-                                                    "≡ƒî▒ No local genesis - requesting genesis block from {}",
+                                                    "🌱 No local genesis - requesting genesis block from {}",
                                                     ip_str
                                                 );
                                                 let request_genesis_msg = NetworkMessage::RequestGenesis;
@@ -900,7 +900,7 @@ impl ConnectionDriver {
                                             break;
                                         }
                                         _ => {
-                                            tracing::warn!("ΓÜá∩╕Å  {} sent message before handshake - closing connection", peer_addr);
+                                            tracing::warn!("⚠️  {} sent message before handshake - closing connection", peer_addr);
                                             if let Some(ref ai) = self.ai_system {
                                                 ai.attack_detector.record_pre_handshake_violation(&ip_str);
                                             }
@@ -925,13 +925,13 @@ impl ConnectionDriver {
                             // Log what we're broadcasting
                             match &msg {
                                 NetworkMessage::BlockAnnouncement(block) => {
-                                    tracing::debug!("≡ƒôñ Sending block {} to peer {}", block.header.height, peer_addr);
+                                    tracing::debug!("📤 Sending block {} to peer {}", block.header.height, peer_addr);
                                 }
                                 NetworkMessage::BlockInventory(height) => {
-                                    tracing::debug!("≡ƒôñ Sending block {} inventory to peer {}", height, peer_addr);
+                                    tracing::debug!("📤 Sending block {} inventory to peer {}", height, peer_addr);
                                 }
                                 _ => {
-                                    tracing::debug!("≡ƒôñ Sending message to peer {}", peer_addr);
+                                    tracing::debug!("📤 Sending message to peer {}", peer_addr);
                                 }
                             }
 
@@ -946,7 +946,7 @@ impl ConnectionDriver {
                 // ongoing per-iteration overhead once the connection is fully established.
                 _ = &mut handshake_timeout, if !handshake_done => {
                     tracing::warn!(
-                        "ΓÅ░ Pre-handshake timeout from {} ΓÇö no handshake received within 10s, closing",
+                        "⏰ Pre-handshake timeout from {} — no handshake received within 10s, closing",
                         peer_addr
                     );
                     resources.banlist.write().await.record_handshake_violation(
@@ -1034,7 +1034,7 @@ impl ConnectionDriver {
             }
         }
 
-        tracing::info!("≡ƒöî Peer {} disconnected", peer_addr);
+        tracing::info!("🔌 Peer {} disconnected", peer_addr);
 
         Ok(())
     }
