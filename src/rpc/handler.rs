@@ -821,14 +821,10 @@ impl RpcHandler {
             NetworkType::Testnet => "testnet",
         };
 
-        // Live post-handshake writers for total; ConnectionManager for direction.
+        // Live post-handshake writers only — in + out always sum to connections.
         let (connections, connections_in, connections_out) =
             if let Some(pr) = self.blockchain.get_peer_registry().await {
-                (
-                    pr.peer_count().await,
-                    pr.inbound_count(),
-                    pr.outbound_count(),
-                )
+                pr.live_direction_counts().await
             } else {
                 (0, 0, 0)
             };
@@ -842,7 +838,7 @@ impl RpcHandler {
             "timeoffset": 0,
             "networkactive": true,
             "connections": connections,
-            // Bitcoin-compatible direction breakdown (from ConnectionManager).
+            // Bitcoin-compatible direction breakdown (live writers only).
             "connections_in": connections_in,
             "connections_out": connections_out,
             "networks": [{
@@ -867,20 +863,20 @@ impl RpcHandler {
 
         let mut peers: Vec<Value> = Vec::with_capacity(masternodes.len());
         for mn in &masternodes {
-            // Look up live connection state, height, and ping from the registry.
-            // Previously `inbound` was hardcoded false, so dashboards always
-            // showed "N out / 0 in" even when most peers were inbound.
+            // Live TCP = non-closed writer. Direction only when actually connected
+            // so disconnected peers don't inherit a stale "→ out" / "← in".
             let (height, pingtime, connected, inbound) = if let Some(ref pr) = peer_registry {
                 let h = pr
                     .get_peer_height(&mn.masternode.address)
                     .await
                     .unwrap_or(0);
                 let p = pr.get_peer_ping_time(&mn.masternode.address).await;
-                let connected = pr.is_connected(&mn.masternode.address);
-                let inbound = matches!(
-                    pr.get_direction(&mn.masternode.address),
-                    Some(ConnectionDirection::Inbound)
-                );
+                let connected = pr.has_live_writer(&mn.masternode.address).await;
+                let inbound = connected
+                    && matches!(
+                        pr.direction_if_connected(&mn.masternode.address),
+                        Some(ConnectionDirection::Inbound)
+                    );
                 (h, p, connected, inbound)
             } else {
                 (0u64, None, false, false)

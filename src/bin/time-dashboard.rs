@@ -1254,9 +1254,8 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
         ])
         .split(area);
 
-    // Prefer getnetworkinfo direction fields (live CM sessions). Fall back to
-    // counting only peers with a live TCP session so we never treat the full
-    // masternode list as "N out / 0 in" (legacy getpeerinfo hardcoded inbound=false).
+    // Prefer getnetworkinfo live-writer direction fields (in+out == connections).
+    // Fall back to counting peers with connected=true from getpeerinfo.
     let connected_out = app
         .data
         .peers
@@ -1270,11 +1269,16 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
         .filter(|p| p.connected && p.inbound)
         .count();
     let (outbound_count, inbound_count) = match &app.data.network {
+        Some(n) if n.connections_in + n.connections_out == n.connections => {
+            (n.connections_out, n.connections_in)
+        }
         Some(n) if n.connections_in + n.connections_out > 0 || n.connections == 0 => {
+            // Older daemon: trust in/out even if they don't sum (clamp display later).
             (n.connections_out, n.connections_in)
         }
         _ => (connected_out, connected_in),
     };
+    let tcp_connected_count = app.data.peers.iter().filter(|p| p.connected).count();
     let active_count = app.data.peers.iter().filter(|p| p.active).count();
 
     if let Some(network) = &app.data.network {
@@ -1307,10 +1311,15 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
                 Span::raw(")"),
             ]),
             Line::from(vec![
-                Span::raw("Active masternodes: "),
+                Span::raw("TCP connected: "),
+                Span::styled(
+                    format!("{}", tcp_connected_count),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::raw("  Active MNs: "),
                 Span::styled(
                     format!("{}", active_count),
-                    Style::default().fg(Color::Green),
+                    Style::default().fg(Color::Cyan),
                 ),
                 Span::raw(format!(" / {} peers", app.data.peers.len())),
             ]),
@@ -1322,7 +1331,7 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(block, chunks[0]);
     }
 
-    // Peer list — sorted: local node first, then active masternodes, then by ping
+    // Peer list — local first, then TCP-connected, then by ping
     let mut sorted_peers: Vec<&PeerInfo> = app.data.peers.iter().collect();
     sorted_peers.sort_by(|a, b| {
         let a_local = a.addr.ends_with("(you)") || a.addr == "(this node)";
@@ -1333,24 +1342,26 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
         if b_local {
             return std::cmp::Ordering::Greater;
         }
-        // Active masternodes first
+        // Live TCP sessions first (not merely gossip-active)
+        match (a.connected, b.connected) {
+            (true, false) => return std::cmp::Ordering::Less,
+            (false, true) => return std::cmp::Ordering::Greater,
+            _ => {}
+        }
         let a_mn = !a.tier.is_empty() && a.tier != "Unknown";
         let b_mn = !b.tier.is_empty() && b.tier != "Unknown";
         match (a.active, b.active, a_mn, b_mn) {
             (true, false, _, _) => std::cmp::Ordering::Less,
             (false, true, _, _) => std::cmp::Ordering::Greater,
-            _ => {
-                // Among peers of same status, masternodes before non-masternodes
-                match (a_mn, b_mn) {
-                    (true, false) => std::cmp::Ordering::Less,
-                    (false, true) => std::cmp::Ordering::Greater,
-                    _ => {
-                        let pa = a.pingtime.unwrap_or(f64::MAX);
-                        let pb = b.pingtime.unwrap_or(f64::MAX);
-                        pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
-                    }
+            _ => match (a_mn, b_mn) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => {
+                    let pa = a.pingtime.unwrap_or(f64::MAX);
+                    let pb = b.pingtime.unwrap_or(f64::MAX);
+                    pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
                 }
-            }
+            },
         }
     });
 
@@ -1366,8 +1377,11 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
                 .map(|p| format!("{:.0} ms", p * 1000.0))
                 .unwrap_or_else(|| "—".to_string());
             let is_local = peer.addr.ends_with("(you)") || peer.addr == "(this node)";
+            // Direction only for live TCP (or local). Disconnected → "—".
             let direction = if is_local {
                 "local"
+            } else if !peer.connected {
+                "—"
             } else if peer.inbound {
                 "← in"
             } else {
@@ -1378,20 +1392,30 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 peer.tier.clone()
             };
-            let height_str = if peer.height > 0 {
-                format!("{}", peer.height)
+            // Height only meaningful with a live session (or local node).
+            let height_str = if is_local || peer.connected {
+                if peer.height > 0 {
+                    format!("{}", peer.height)
+                } else {
+                    "—".to_string()
+                }
             } else {
                 "—".to_string()
             };
-            let status_marker = if peer.active { "●" } else { "○" };
+            // ● = live TCP (or local). ○ = not connected (may still be gossip-active).
+            let status_marker = if is_local || peer.connected {
+                "●"
+            } else {
+                "○"
+            };
 
             let row_style = if is_local {
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD)
-            } else if peer.active && !peer.inbound {
+            } else if peer.connected && !peer.inbound {
                 Style::default().fg(Color::Green)
-            } else if peer.active {
+            } else if peer.connected {
                 Style::default().fg(Color::Cyan)
             } else {
                 Style::default().fg(Color::DarkGray)
@@ -1415,7 +1439,15 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
         table_state.select(Some(scroll));
     }
 
-    let title = format!("Connected Peers ({})  [↑↓ scroll]", total_peers);
+    let live = sorted_peers
+        .iter()
+        .filter(|p| {
+            p.connected || p.addr.ends_with("(you)") || p.addr == "(this node)"
+        })
+        .count();
+    let title = format!(
+        "Peers ({live} TCP / {total_peers} listed)  [↑↓ scroll]  ●=TCP  ○=not connected"
+    );
 
     let peer_table = Table::new(
         rows,

@@ -54,6 +54,12 @@ impl PeerConnectionRegistry {
             .and_then(|cm| cm.connection_direction(ip))
     }
 
+    /// Direction only for a fully Connected CM session.
+    pub fn direction_if_connected(&self, ip: &str) -> Option<ConnectionDirection> {
+        self.connection_manager()
+            .and_then(|cm| cm.direction_if_connected(ip))
+    }
+
     /// Number of currently connected peers.
     ///
     /// Uses post-handshake writer channels as the source of truth (same basis as
@@ -71,16 +77,49 @@ impl PeerConnectionRegistry {
             .unwrap_or(0)
     }
 
+    /// CM-only inbound count (may include zombie Connected slots without writers).
     pub fn inbound_count(&self) -> usize {
         self.connection_manager()
             .map(|cm| cm.inbound_count())
             .unwrap_or(0)
     }
 
+    /// CM-only outbound count (may include zombie Connected slots without writers).
     pub fn outbound_count(&self) -> usize {
         self.connection_manager()
             .map(|cm| cm.outbound_count())
             .unwrap_or(0)
+    }
+
+    /// Live TCP direction counts: only peers with a non-closed writer channel.
+    /// Returns `(total, inbound, outbound)` so `inbound + outbound == total`.
+    pub async fn live_direction_counts(&self) -> (usize, usize, usize) {
+        let writers = self.peer_writers.read().await;
+        let mut inbound = 0usize;
+        let mut outbound = 0usize;
+        for (ip, w) in writers.iter() {
+            if w.is_closed() {
+                continue;
+            }
+            match self.direction_if_connected(ip) {
+                Some(ConnectionDirection::Inbound) => inbound += 1,
+                Some(ConnectionDirection::Outbound) => outbound += 1,
+                // Writer live but CM missing/stale — still a real session; don't
+                // drop it from totals. Treat as outbound for the in/out split.
+                None => outbound += 1,
+            }
+        }
+        (inbound + outbound, inbound, outbound)
+    }
+
+    /// True if this IP has a non-closed post-handshake writer (live TCP session).
+    pub async fn has_live_writer(&self, ip: &str) -> bool {
+        let ip_only = super::types::extract_ip(ip);
+        let writers = self.peer_writers.read().await;
+        writers
+            .get(ip_only)
+            .map(|w| !w.is_closed())
+            .unwrap_or(false)
     }
 
     pub fn is_reconnecting(&self, ip: &str) -> bool {

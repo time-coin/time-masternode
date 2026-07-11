@@ -102,6 +102,13 @@ impl ConnectionManager {
         self.connections.get(peer_ip).map(|info| info.direction)
     }
 
+    /// Direction only when the peer is fully `Connected` (not Connecting/Disconnected).
+    pub fn direction_if_connected(&self, peer_ip: &str) -> Option<ConnectionDirection> {
+        self.connections.get(peer_ip).and_then(|info| {
+            (info.state == PeerConnectionState::Connected).then_some(info.direction)
+        })
+    }
+
     /// True when our public IP ranks **above** `peer_ip` (octet/lex order).
     ///
     /// Used for simultaneous-open resolution and for who should **initiate** the
