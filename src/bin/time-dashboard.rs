@@ -1441,13 +1441,10 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
 
     let live = sorted_peers
         .iter()
-        .filter(|p| {
-            p.connected || p.addr.ends_with("(you)") || p.addr == "(this node)"
-        })
+        .filter(|p| p.connected || p.addr.ends_with("(you)") || p.addr == "(this node)")
         .count();
-    let title = format!(
-        "Peers ({live} TCP / {total_peers} listed)  [↑↓ scroll]  ●=TCP  ○=not connected"
-    );
+    let title =
+        format!("Peers ({live} TCP / {total_peers} listed)  [↑↓ scroll]  ●=TCP  ○=not connected");
 
     let peer_table = Table::new(
         rows,

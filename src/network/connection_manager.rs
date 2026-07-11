@@ -63,6 +63,12 @@ pub struct ConnectionManager {
     // Phase 2.1: Connection rate limiting
     recent_connections: Arc<DashMap<Instant, String>>, // timestamp -> peer_ip
     last_cleanup: Arc<std::sync::Mutex<Instant>>,
+    /// Peers first observed as "Connected with no live writer" by
+    /// `heal_connected_without_writers`, and when. A peer is only actually
+    /// disconnected once it is *still* zombie-looking on a later confirmation
+    /// pass — never on the first observation. This is what lets us say a
+    /// connection is confirmed gone rather than guessed gone from one snapshot.
+    zombie_since: Arc<DashMap<String, Instant>>,
 }
 
 impl ConnectionManager {
@@ -77,6 +83,7 @@ impl ConnectionManager {
             local_ip: OnceLock::new(),
             recent_connections: Arc::new(DashMap::new()),
             last_cleanup: Arc::new(std::sync::Mutex::new(Instant::now())),
+            zombie_since: Arc::new(DashMap::new()),
         }
     }
 
@@ -360,22 +367,72 @@ impl ConnectionManager {
     /// the node can collapse from ~N peers to 1 after short-lived sessions die
     /// without a clean unregister path.
     ///
+    /// A freshly `Connected` slot legitimately has no writer yet: inbound reserves
+    /// the CM slot before TLS even starts (`accept_inbound`), and the writer isn't
+    /// registered until TLS *and* the handshake message complete — which can take
+    /// up to the 10s pre-handshake timeout in `drive_inbound`. A single snapshot
+    /// comparing "Connected" against "has a live writer right now" can't tell a
+    /// zombie apart from a healthy connection that's simply still mid-handshake.
+    ///
+    /// So this never disconnects on the first sighting. A peer is only marked
+    /// "no live writer" *once*; it's actually force-disconnected only if it is
+    /// **still** in that state on a later call at least [`ZOMBIE_CONFIRM_WINDOW`]
+    /// after the first sighting — i.e. we confirm the connection is really gone
+    /// before acting, rather than guessing from one snapshot. Peers that regain a
+    /// live writer (or leave `Connected`) before confirmation are cleared and
+    /// never touched.
+    ///
     /// Returns the peer IPs that were force-disconnected.
     pub fn heal_connected_without_writers(
         &self,
         live_writer_ips: &std::collections::HashSet<String>,
     ) -> Vec<String> {
-        let dead: Vec<String> = self
-            .connections
-            .iter()
-            .filter(|entry| {
-                entry.value().state == PeerConnectionState::Connected
-                    && !live_writer_ips.contains(entry.key().as_str())
-            })
-            .map(|entry| entry.key().clone())
-            .collect();
+        const ZOMBIE_CONFIRM_WINDOW: Duration = Duration::from_secs(15);
+        self.heal_connected_without_writers_with_window(live_writer_ips, ZOMBIE_CONFIRM_WINDOW)
+    }
+
+    /// Test-injectable confirmation window so unit tests don't need to sleep real time.
+    fn heal_connected_without_writers_with_window(
+        &self,
+        live_writer_ips: &std::collections::HashSet<String>,
+        confirm_window: Duration,
+    ) -> Vec<String> {
+        // Clear tracking for anything that recovered a writer, left Connected,
+        // or was removed entirely — it no longer needs confirming.
+        self.zombie_since.retain(|ip, _| {
+            !live_writer_ips.contains(ip.as_str())
+                && self
+                    .connections
+                    .get(ip)
+                    .is_some_and(|info| info.state == PeerConnectionState::Connected)
+        });
+
+        let mut dead = Vec::new();
+        for entry in self.connections.iter() {
+            let ip = entry.key();
+            if entry.value().state != PeerConnectionState::Connected
+                || live_writer_ips.contains(ip.as_str())
+            {
+                continue;
+            }
+
+            match self.zombie_since.get(ip) {
+                Some(first_seen) if first_seen.elapsed() >= confirm_window => {
+                    dead.push(ip.clone());
+                }
+                Some(_) => {
+                    // Already flagged, not old enough to confirm yet — wait.
+                }
+                None => {
+                    // First sighting this call — flag it, don't act yet.
+                    self.zombie_since.insert(ip.clone(), Instant::now());
+                }
+            }
+        }
+
         for ip in &dead {
             self.mark_disconnected(ip);
+            self.zombie_since.remove(ip);
         }
         dead
     }
@@ -1159,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    fn heal_connected_without_writers_clears_zombies() {
+    fn heal_connected_without_writers_requires_two_confirmations() {
         let manager = ConnectionManager::new();
         assert!(manager.mark_connecting("10.0.0.2"));
         assert!(manager.mark_connected("10.0.0.2").is_some());
@@ -1167,15 +1224,60 @@ mod tests {
         assert!(manager.mark_connected("10.0.0.3").is_some());
         assert_eq!(manager.connected_count(), 2);
 
-        // Only 10.0.0.2 still has a "live writer"
+        // Only 10.0.0.2 still has a "live writer".
         let mut live = std::collections::HashSet::new();
         live.insert("10.0.0.2".to_string());
-        let healed = manager.heal_connected_without_writers(&live);
+
+        // First sighting of 10.0.0.3 as a zombie: flagged, but NOT disconnected —
+        // we don't act on a single snapshot.
+        let healed =
+            manager.heal_connected_without_writers_with_window(&live, Duration::from_secs(0));
+        assert!(healed.is_empty());
+        assert!(manager.is_connected("10.0.0.3"));
+
+        // Second sighting (confirm_window=0 so it's immediately "old enough"):
+        // now it's confirmed still gone, so it gets disconnected.
+        let healed =
+            manager.heal_connected_without_writers_with_window(&live, Duration::from_secs(0));
         assert_eq!(healed, vec!["10.0.0.3".to_string()]);
         assert!(manager.is_connected("10.0.0.2"));
         assert!(!manager.is_connected("10.0.0.3"));
         assert_eq!(manager.connected_count(), 1);
         // Can redial the healed peer
         assert!(manager.mark_connecting("10.0.0.3"));
+    }
+
+    #[test]
+    fn heal_connected_without_writers_spares_fresh_handshakes() {
+        // Regression test: inbound reserves the CM slot before TLS even starts
+        // (accept_inbound), and the writer isn't registered until TLS *and* the
+        // handshake message complete — up to the 10s pre-handshake timeout in
+        // drive_inbound. A single-snapshot heal pass would kill that connection
+        // while it's still legitimately mid-handshake.
+        let manager = ConnectionManager::new();
+        let gen = manager
+            .accept_inbound("10.0.0.2", false)
+            .expect("inbound reserved");
+        assert!(manager.is_connected("10.0.0.2"));
+
+        // No live writer yet (handshake still in flight) — first sighting must
+        // only flag, never disconnect, regardless of window length.
+        let live = std::collections::HashSet::new();
+        let healed =
+            manager.heal_connected_without_writers_with_window(&live, Duration::from_secs(15));
+        assert!(healed.is_empty());
+        assert!(manager.is_connected("10.0.0.2"));
+
+        // Handshake completes and registers a writer before the next heal tick —
+        // the flag must be cleared so it's never disconnected later.
+        let mut live = std::collections::HashSet::new();
+        live.insert("10.0.0.2".to_string());
+        let healed =
+            manager.heal_connected_without_writers_with_window(&live, Duration::from_secs(0));
+        assert!(healed.is_empty());
+        assert!(manager.is_connected("10.0.0.2"));
+
+        // The in-flight handshake can still complete normally afterwards.
+        assert!(manager.mark_inbound_disconnected("10.0.0.2", gen));
     }
 }
