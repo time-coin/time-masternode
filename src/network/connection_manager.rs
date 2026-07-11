@@ -1052,4 +1052,27 @@ mod tests {
         assert_eq!(manager.count_connections_from_ip("10.0.0.1"), 0);
         assert_eq!(manager.count_connections_from_ip("10.0.0.10"), 1);
     }
+
+    #[test]
+    fn inbound_reservation_blocks_outbound_dial_race() {
+        // Simulates reserving inbound before TLS completes: PHASE3 must not
+        // be able to mark_connecting the same peer and flip the session.
+        let manager = ConnectionManager::new();
+        manager.set_local_ip("10.0.0.9".to_string()); // would prefer outbound via tiebreaker
+
+        let in_gen = manager
+            .accept_inbound("10.0.0.2", false)
+            .expect("inbound reserved");
+        assert!(manager.is_active("10.0.0.2"));
+        assert!(manager.is_connected("10.0.0.2"));
+        assert!(!manager.mark_connecting("10.0.0.2"));
+        assert!(manager.mark_connected("10.0.0.2").is_none());
+
+        let entry = manager.connections.get("10.0.0.2").unwrap();
+        assert_eq!(entry.direction, ConnectionDirection::Inbound);
+        assert_eq!(entry.generation, in_gen);
+        drop(entry);
+        assert_eq!(manager.inbound_count(), 1);
+        assert_eq!(manager.outbound_count(), 0);
+    }
 }

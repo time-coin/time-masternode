@@ -236,6 +236,23 @@ impl ConnectionDriver {
 
         let ip_str = ip.to_string();
 
+        // Reserve the inbound slot BEFORE TLS.  If we wait until after TLS, PHASE3
+        // can mark_connecting + dial the same peer during the handshake window and
+        // win as Outbound; when TLS finishes we then reject the inbound (IP
+        // tiebreaker) and the node drifts to "all outbound" after restart.
+        // Failed TLS / SNI / handshake paths must release this generation.
+        let Some(generation) = self
+            .connection_manager
+            .accept_inbound(&ip_str, is_whitelisted)
+        else {
+            tracing::debug!(
+                "🔄 Dropping duplicate inbound from {} — ConnectionManager already has a connection",
+                peer_addr
+            );
+            return Ok(());
+        };
+        self.peer_registry.evict_writer(&ip_str).await;
+
         // Per-connection rate limiter: each peer gets its own instance, eliminating
         // the write-lock contention that the shared NetworkServer RateLimiter caused
         // under load (50+ peers × multiple msg/s = constant write-lock contention).
@@ -299,6 +316,9 @@ impl ConnectionDriver {
                                     ip,
                                     sni_desc
                                 );
+                                let _ = self
+                                    .connection_manager
+                                    .mark_inbound_disconnected(&ip_str, generation);
                                 return Ok(());
                             }
                         }
@@ -417,6 +437,9 @@ impl ConnectionDriver {
                             ip_str
                         );
                     }
+                    let _ = self
+                        .connection_manager
+                        .mark_inbound_disconnected(&ip_str, generation);
                     return Ok(());
                 }
             }
@@ -493,26 +516,7 @@ impl ConnectionDriver {
             });
         }
 
-        // ConnectionManager is the single authority for both inbound and outbound state.
-        // Reject here — after TLS succeeds but before any message work — so that:
-        //   (a) TLS failures / SNI rejections never consume a CM slot
-        //   (b) duplicate connections are dropped before the writer channel is registered
-        //   (c) can_accept_inbound (capacity only) in the accept loop stays a fast pre-check
-        let Some(generation) = self
-            .connection_manager
-            .accept_inbound(&ip_str, is_whitelisted)
-        else {
-            tracing::debug!(
-                "🔄 Dropping duplicate inbound from {} — ConnectionManager already has a connection",
-                peer_addr
-            );
-            return Ok(());
-        };
-
-        // If we yielded an outbound (or replaced a stale inbound), drop the old
-        // writer now so that session's write loop exits instead of remaining the
-        // registry owner through handshake.
-        self.peer_registry.evict_writer(&ip_str).await;
+        // CM slot already reserved before TLS (see accept_inbound at top of this fn).
 
         let mut handshake_done = false;
 

@@ -609,7 +609,8 @@ impl NetworkClient {
                         std::collections::HashMap::new();
                     for mn_info in &all_masternodes {
                         let addr = &mn_info.masternode.address;
-                        if connection_manager.is_connected(addr) {
+                        // Count pending handshakes too so Free-tier /24 caps apply during TLS.
+                        if connection_manager.is_active(addr) {
                             let ip = addr.split(':').next().unwrap_or(addr);
                             let parts: Vec<&str> = ip.split('.').collect();
                             let subnet = if parts.len() >= 3 {
@@ -626,10 +627,11 @@ impl NetworkClient {
                         if should_skip(mn_ip) {
                             continue;
                         }
-                        // First connection wins: skip outbound dial if any connection already
-                        // exists. ConnectionManager tracks both inbound and outbound so this
-                        // correctly catches the case where the peer connected to us first.
-                        if connection_manager.is_connected(mn_ip) {
+                        // First connection wins: skip outbound dial if any session is already
+                        // live OR still handshaking (inbound reserves CM before TLS completes).
+                        // Using is_active prevents PHASE3 from racing TLS and flipping a
+                        // pending inbound into an outbound dial.
+                        if connection_manager.is_active(mn_ip) {
                             continue;
                         }
                         if peer_registry.is_incompatible(mn_ip).await {
