@@ -334,6 +334,52 @@ impl ConnectionManager {
             .unwrap_or(false)
     }
 
+    /// True only while an outbound dial is in flight (TCP/TLS not finished yet).
+    pub fn is_connecting(&self, peer_ip: &str) -> bool {
+        self.connections
+            .get(peer_ip)
+            .map(|info| info.state == PeerConnectionState::Connecting)
+            .unwrap_or(false)
+    }
+
+    /// Clear a stuck/failed Connecting slot so PHASE3 can retry.
+    pub fn abort_connecting(&self, peer_ip: &str) -> bool {
+        if let Some(mut entry) = self.connections.get_mut(peer_ip) {
+            if entry.state == PeerConnectionState::Connecting {
+                entry.state = PeerConnectionState::Disconnected;
+                entry.disconnected_at = Some(Instant::now());
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Heal zombie sessions: CM says `Connected` but there is no live writer.
+    ///
+    /// Without this, PHASE3 skips redial (`is_active` / `is_connected`) forever and
+    /// the node can collapse from ~N peers to 1 after short-lived sessions die
+    /// without a clean unregister path.
+    ///
+    /// Returns the peer IPs that were force-disconnected.
+    pub fn heal_connected_without_writers(
+        &self,
+        live_writer_ips: &std::collections::HashSet<String>,
+    ) -> Vec<String> {
+        let dead: Vec<String> = self
+            .connections
+            .iter()
+            .filter(|entry| {
+                entry.value().state == PeerConnectionState::Connected
+                    && !live_writer_ips.contains(entry.key().as_str())
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+        for ip in &dead {
+            self.mark_disconnected(ip);
+        }
+        dead
+    }
+
     /// Check if we have an outbound connection to a peer
     pub fn has_outbound_connection(&self, peer_ip: &str) -> bool {
         self.connections
@@ -573,15 +619,18 @@ impl ConnectionManager {
     /// Mark a peer as being attempted for connection
     pub fn mark_connecting(&self, peer_ip: &str) -> bool {
         if let Some(mut entry) = self.connections.get_mut(peer_ip) {
-            // Allow reconnection from Disconnected state
-            if entry.state == PeerConnectionState::Disconnected {
-                entry.state = PeerConnectionState::Connecting;
-                entry.direction = ConnectionDirection::Outbound;
-                entry.generation = self.alloc_generation();
-                entry.last_message_at = Some(Instant::now()); // Track when connecting started
-                true
-            } else {
-                false
+            // Allow dial from Disconnected or Reconnecting. Refuse Connected
+            // (live or zombie — zombies are healed before PHASE3 dials) and
+            // Connecting (dial already in flight).
+            match entry.state {
+                PeerConnectionState::Disconnected | PeerConnectionState::Reconnecting => {
+                    entry.state = PeerConnectionState::Connecting;
+                    entry.direction = ConnectionDirection::Outbound;
+                    entry.generation = self.alloc_generation();
+                    entry.last_message_at = Some(Instant::now());
+                    true
+                }
+                _ => false,
             }
         } else {
             let info = ConnectionInfo {
@@ -1107,5 +1156,26 @@ mod tests {
         manager.set_local_ip("10.0.0.9".to_string());
         assert!(manager.is_preferred_dialer("10.0.0.2"));
         assert!(!manager.is_preferred_dialer("10.0.0.20"));
+    }
+
+    #[test]
+    fn heal_connected_without_writers_clears_zombies() {
+        let manager = ConnectionManager::new();
+        assert!(manager.mark_connecting("10.0.0.2"));
+        assert!(manager.mark_connected("10.0.0.2").is_some());
+        assert!(manager.mark_connecting("10.0.0.3"));
+        assert!(manager.mark_connected("10.0.0.3").is_some());
+        assert_eq!(manager.connected_count(), 2);
+
+        // Only 10.0.0.2 still has a "live writer"
+        let mut live = std::collections::HashSet::new();
+        live.insert("10.0.0.2".to_string());
+        let healed = manager.heal_connected_without_writers(&live);
+        assert_eq!(healed, vec!["10.0.0.3".to_string()]);
+        assert!(manager.is_connected("10.0.0.2"));
+        assert!(!manager.is_connected("10.0.0.3"));
+        assert_eq!(manager.connected_count(), 1);
+        // Can redial the healed peer
+        assert!(manager.mark_connecting("10.0.0.3"));
     }
 }

@@ -194,6 +194,9 @@ impl NetworkClient {
             }
 
             // Helper: should we skip connecting to this IP?
+            // Only skip when we already have a *live writer* or a dial in flight.
+            // Zombie CM `Connected` without a writer must NOT block redial (that
+            // was collapsing the mesh from ~18 peers down to 1).
             let should_skip = |ip: &str| -> bool {
                 if let Some(ref local) = local_ip {
                     if ip == local.as_str() {
@@ -203,9 +206,10 @@ impl NetworkClient {
                 if banned_peers.contains(ip) {
                     return true;
                 }
-                // ConnectionManager is authoritative for both directions — is_active
-                // covers Connecting/Connected/Reconnecting for inbound and outbound.
-                if connection_manager.is_active(ip) {
+                if peer_registry.has_live_writer_sync(ip) {
+                    return true;
+                }
+                if connection_manager.is_connecting(ip) {
                     return true;
                 }
                 false
@@ -592,15 +596,32 @@ impl NetworkClient {
                     tracing::info!("🧹 Reset {} stale connecting peer(s)", stale);
                 }
 
+                // Heal zombie Connected slots with no live writer so PHASE3 can redial.
+                let live_ips: std::collections::HashSet<String> = peer_registry
+                    .get_connected_peers()
+                    .await
+                    .into_iter()
+                    .collect();
+                let healed = connection_manager.heal_connected_without_writers(&live_ips);
+                if !healed.is_empty() {
+                    tracing::warn!(
+                        "🩹 Healed {} zombie Connected session(s) with no live writer: {:?}",
+                        healed.len(),
+                        healed
+                    );
+                    for ip in &healed {
+                        peer_registry.unregister_peer(ip).await;
+                    }
+                }
+
                 let active_count = masternode_registry.list_active().await.len();
-                let outbound_count = connection_manager.outbound_count();
-                let inbound_count = connection_manager.inbound_count();
+                let (live_total, live_in, live_out) = peer_registry.live_direction_counts().await;
 
                 tracing::debug!(
-                    "🔍 Peer check: {} connected ({} out, {} in), {} active masternodes, {} total slots",
-                    outbound_count + inbound_count,
-                    outbound_count,
-                    inbound_count,
+                    "🔍 Peer check: {} live ({} out, {} in), {} active masternodes, {} total slots",
+                    live_total,
+                    live_out,
+                    live_in,
                     active_count,
                     max_peers
                 );
@@ -624,8 +645,10 @@ impl NetworkClient {
                         std::collections::HashMap::new();
                     for mn_info in &all_masternodes {
                         let addr = &mn_info.masternode.address;
-                        // Count pending handshakes too so Free-tier /24 caps apply during TLS.
-                        if connection_manager.is_active(addr) {
+                        // Live writers + in-flight dials only (not zombie Connected).
+                        if peer_registry.has_live_writer_sync(addr)
+                            || connection_manager.is_connecting(addr)
+                        {
                             let ip = addr.split(':').next().unwrap_or(addr);
                             let parts: Vec<&str> = ip.split('.').collect();
                             let subnet = if parts.len() >= 3 {
@@ -642,17 +665,8 @@ impl NetworkClient {
                         if should_skip(mn_ip) {
                             continue;
                         }
-                        // First connection wins: skip outbound dial if any session is already
-                        // live OR still handshaking (inbound reserves CM before TLS completes).
-                        // Using is_active prevents PHASE3 from racing TLS and flipping a
-                        // pending inbound into an outbound dial.
-                        if connection_manager.is_active(mn_ip) {
-                            continue;
-                        }
+                        // should_skip already covers live writer + Connecting.
                         if peer_registry.is_incompatible(mn_ip).await {
-                            continue;
-                        }
-                        if connection_manager.is_reconnecting(mn_ip) {
                             continue;
                         }
                         // Respect AI advice to avoid hammering offline nodes.
@@ -792,7 +806,7 @@ impl NetworkClient {
 
                 // Fill remaining slots with regular peers — prefer less-loaded ones
                 // so new nodes naturally spread connections across the network.
-                let available_slots = max_peers.saturating_sub(outbound_count + inbound_count);
+                let available_slots = max_peers.saturating_sub(live_total);
                 if available_slots > 0 {
                     let mut unique_peers = dedup_peers(peer_manager.get_all_peers().await);
                     // Sort by known connection load (ascending) so we dial the least-loaded

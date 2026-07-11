@@ -122,6 +122,20 @@ impl PeerConnectionRegistry {
             .unwrap_or(false)
     }
 
+    /// Sync variant for dial-skip helpers (try_read; false if lock is busy).
+    pub fn has_live_writer_sync(&self, ip: &str) -> bool {
+        let ip_only = super::types::extract_ip(ip);
+        self.peer_writers
+            .try_read()
+            .map(|writers| {
+                writers
+                    .get(ip_only)
+                    .map(|w| !w.is_closed())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
+
     pub fn is_reconnecting(&self, ip: &str) -> bool {
         self.connection_manager()
             .map(|cm| cm.is_reconnecting(ip))

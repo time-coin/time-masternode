@@ -105,12 +105,14 @@ impl ConnectionDriver {
                 {
                     Ok(conn) => conn,
                     Err(e2) => {
+                        self.connection_manager.abort_connecting(ip);
                         self.peer_registry.unregister_peer(ip).await;
                         return Err(e2);
                     }
                 }
             }
             Err(e) => {
+                self.connection_manager.abort_connecting(ip);
                 self.peer_registry.unregister_peer(ip).await;
                 return Err(e);
             }
@@ -124,6 +126,9 @@ impl ConnectionDriver {
         // If this fails, an inbound accept already took the slot (simultaneous
         // open) — abort without registering a writer or marking MN inactive.
         let Some(generation) = self.connection_manager.mark_connected(&peer_ip) else {
+            // Only clear Connecting if we still own that state; if inbound won,
+            // state is already Connected/Inbound and must not be touched.
+            self.connection_manager.abort_connecting(&peer_ip);
             tracing::info!(
                 "🔄 Outbound to {} superseded before mark_connected — aborting",
                 peer_ip
