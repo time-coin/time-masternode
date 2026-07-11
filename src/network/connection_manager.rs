@@ -8,6 +8,7 @@
 use crate::network::connection_direction::ConnectionDirection;
 use dashmap::DashMap;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -35,6 +36,10 @@ enum PeerConnectionState {
 struct ConnectionInfo {
     state: PeerConnectionState,
     direction: ConnectionDirection,
+    /// Monotonic session id for this peer slot. Cleanup from an old task must
+    /// only proceed when `generation` still matches, so a superseded outbound
+    /// or replaced inbound cannot wipe a newer live session.
+    generation: u64,
     connected_at: Option<Instant>,
     disconnected_at: Option<Instant>,
     connection_count: usize, // Track how many times this IP has connected
@@ -49,9 +54,11 @@ struct ConnectionInfo {
 /// Manages the lifecycle of peer connections (inbound/outbound)
 pub struct ConnectionManager {
     connections: Arc<DashMap<String, ConnectionInfo>>,
-    connected_count: Arc<std::sync::atomic::AtomicUsize>,
-    inbound_count: Arc<std::sync::atomic::AtomicUsize>,
-    outbound_count: Arc<std::sync::atomic::AtomicUsize>,
+    connected_count: Arc<AtomicUsize>,
+    inbound_count: Arc<AtomicUsize>,
+    outbound_count: Arc<AtomicUsize>,
+    /// Global counter for [`ConnectionInfo::generation`] assignment.
+    next_generation: AtomicU64,
     local_ip: OnceLock<String>,
     // Phase 2.1: Connection rate limiting
     recent_connections: Arc<DashMap<Instant, String>>, // timestamp -> peer_ip
@@ -63,13 +70,23 @@ impl ConnectionManager {
     pub fn new() -> Self {
         Self {
             connections: Arc::new(DashMap::new()),
-            connected_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            inbound_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            outbound_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            connected_count: Arc::new(AtomicUsize::new(0)),
+            inbound_count: Arc::new(AtomicUsize::new(0)),
+            outbound_count: Arc::new(AtomicUsize::new(0)),
+            next_generation: AtomicU64::new(1),
             local_ip: OnceLock::new(),
             recent_connections: Arc::new(DashMap::new()),
             last_cleanup: Arc::new(std::sync::Mutex::new(Instant::now())),
         }
+    }
+
+    fn alloc_generation(&self) -> u64 {
+        self.next_generation.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Current connection generation for a peer, if tracked.
+    pub fn connection_generation(&self, peer_ip: &str) -> Option<u64> {
+        self.connections.get(peer_ip).map(|info| info.generation)
     }
 
     pub fn set_local_ip(&self, ip: String) {
@@ -122,21 +139,16 @@ impl ConnectionManager {
 
     fn reconcile_counts(&self) -> (usize, usize, usize) {
         let (connected, inbound, outbound) = self.recalculate_counts();
-        self.connected_count
-            .store(connected, std::sync::atomic::Ordering::Relaxed);
-        self.inbound_count
-            .store(inbound, std::sync::atomic::Ordering::Relaxed);
-        self.outbound_count
-            .store(outbound, std::sync::atomic::Ordering::Relaxed);
+        self.connected_count.store(connected, Ordering::Relaxed);
+        self.inbound_count.store(inbound, Ordering::Relaxed);
+        self.outbound_count.store(outbound, Ordering::Relaxed);
         (connected, inbound, outbound)
     }
 
-    fn decrement_counter(counter: &std::sync::atomic::AtomicUsize) {
-        let _ = counter.fetch_update(
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-            |current| Some(current.saturating_sub(1)),
-        );
+    fn decrement_counter(counter: &AtomicUsize) {
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_sub(1))
+        });
     }
 
     /// Phase 2.1: Check if we can accept a new inbound connection
@@ -226,15 +238,13 @@ impl ConnectionManager {
         Ok(())
     }
 
-    /// Phase 2.1: Count connections from a specific IP
+    /// Phase 2.1: Count connections from a specific IP (exact key match).
     fn count_connections_from_ip(&self, peer_ip: &str) -> usize {
         self.connections
-            .iter()
-            .filter(|entry| {
-                entry.key().starts_with(peer_ip)
-                    && entry.value().state == PeerConnectionState::Connected
-            })
-            .count()
+            .get(peer_ip)
+            .filter(|info| info.state == PeerConnectionState::Connected)
+            .map(|_| 1)
+            .unwrap_or(0)
     }
 
     /// Phase 3: Count regular (non-whitelisted) peer connections
@@ -323,8 +333,9 @@ impl ConnectionManager {
 
     /// Accept an inbound connection — the single authority for inbound registration.
     ///
-    /// Atomically registers the peer as Connected/Inbound and returns `true`.
-    /// Returns `false` (caller must close the socket immediately) if:
+    /// Atomically registers the peer as Connected/Inbound and returns the new
+    /// session `generation` on success. Returns `None` (caller must close the
+    /// socket immediately) if:
     ///   - The peer already has an incompatible active connection state.
     ///   - The connection would exceed capacity limits (unless whitelisted).
     ///
@@ -336,17 +347,22 @@ impl ConnectionManager {
     /// deterministic IP tiebreaker: one side yields its outbound slot and
     /// accepts the inbound replacement, preventing the "both peers dial each
     /// other and both reject inbound" disconnect loop.
-    pub fn accept_inbound(&self, peer_ip: &str, is_whitelisted: bool) -> bool {
+    ///
+    /// The returned generation must be passed to [`Self::mark_inbound_disconnected`]
+    /// so a superseded session cannot wipe a newer replacement.
+    pub fn accept_inbound(&self, peer_ip: &str, is_whitelisted: bool) -> Option<u64> {
         use dashmap::mapref::entry::Entry;
 
         // Check capacity before touching the map (fast path for overload)
         if let Err(_e) = self.can_accept_inbound(peer_ip, is_whitelisted) {
-            return false;
+            return None;
         }
 
+        let generation = self.alloc_generation();
         let new_info = ConnectionInfo {
             state: PeerConnectionState::Connected,
             direction: ConnectionDirection::Inbound,
+            generation,
             connected_at: Some(Instant::now()),
             disconnected_at: None,
             connection_count: 1,
@@ -362,11 +378,9 @@ impl ConnectionManager {
             Entry::Vacant(e) => {
                 e.insert(new_info);
                 self.record_new_connection(peer_ip);
-                self.connected_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.inbound_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                true
+                self.connected_count.fetch_add(1, Ordering::Relaxed);
+                self.inbound_count.fetch_add(1, Ordering::Relaxed);
+                Some(generation)
             }
             Entry::Occupied(mut e) => {
                 if e.get().state == PeerConnectionState::Disconnected {
@@ -375,11 +389,9 @@ impl ConnectionManager {
                     // we only increment the counters, not decrement first.
                     e.insert(new_info);
                     self.record_new_connection(peer_ip);
-                    self.connected_count
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    self.inbound_count
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    true
+                    self.connected_count.fetch_add(1, Ordering::Relaxed);
+                    self.inbound_count.fetch_add(1, Ordering::Relaxed);
+                    Some(generation)
                 } else if e.get().direction == ConnectionDirection::Outbound {
                     // Whitelisted peers are operator-trusted: never reject their
                     // inbound for tiebreaker reasons. A stuck outbound entry must
@@ -390,7 +402,7 @@ impl ConnectionManager {
                             peer_ip,
                             e.get().state
                         );
-                        false
+                        None
                     } else {
                         let was_connected = e.get().state == PeerConnectionState::Connected;
                         tracing::info!(
@@ -401,19 +413,17 @@ impl ConnectionManager {
 
                         if was_connected {
                             Self::decrement_counter(&self.outbound_count);
-                            self.inbound_count
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            self.inbound_count.fetch_add(1, Ordering::Relaxed);
                         } else {
-                            self.connected_count
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            self.inbound_count
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            self.connected_count.fetch_add(1, Ordering::Relaxed);
+                            self.inbound_count.fetch_add(1, Ordering::Relaxed);
                         }
 
                         let connection_count = e.get().connection_count.saturating_add(1);
                         e.insert(ConnectionInfo {
                             state: PeerConnectionState::Connected,
                             direction: ConnectionDirection::Inbound,
+                            generation,
                             connected_at: Some(Instant::now()),
                             disconnected_at: None,
                             connection_count,
@@ -424,13 +434,13 @@ impl ConnectionManager {
                             messages_received: 0,
                             is_whitelisted,
                         });
-                        true
+                        Some(generation)
                     }
                 } else if is_whitelisted {
                     // Whitelisted peers must never be locked out by a stale or
                     // duplicate inbound entry. Replace the existing slot in place;
-                    // the previous I/O bridge will exit naturally when its writer
-                    // channel drops.
+                    // the previous I/O bridge will exit when its writer is evicted
+                    // and generation-mismatched cleanup is a no-op.
                     let was_connected = e.get().state == PeerConnectionState::Connected;
                     let connection_count = e.get().connection_count.saturating_add(1);
                     tracing::info!(
@@ -441,6 +451,7 @@ impl ConnectionManager {
                     e.insert(ConnectionInfo {
                         state: PeerConnectionState::Connected,
                         direction: ConnectionDirection::Inbound,
+                        generation,
                         connected_at: Some(Instant::now()),
                         disconnected_at: None,
                         connection_count,
@@ -452,13 +463,11 @@ impl ConnectionManager {
                         is_whitelisted,
                     });
                     if !was_connected {
-                        self.connected_count
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        self.inbound_count
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.connected_count.fetch_add(1, Ordering::Relaxed);
+                        self.inbound_count.fetch_add(1, Ordering::Relaxed);
                     }
                     self.record_new_connection(peer_ip);
-                    true
+                    Some(generation)
                 } else {
                     // Active inbound session already exists.
                     tracing::debug!(
@@ -466,34 +475,37 @@ impl ConnectionManager {
                         peer_ip,
                         e.get().state
                     );
-                    false
+                    None
                 }
             }
         }
     }
 
-    /// Mark a peer as connected (inbound connection)
-    pub fn mark_inbound(&self, peer_ip: &str) -> bool {
+    /// Mark a peer as connected (inbound connection). Returns session generation.
+    pub fn mark_inbound(&self, peer_ip: &str) -> Option<u64> {
         self.record_new_connection(peer_ip);
 
         if let Some(mut entry) = self.connections.get_mut(peer_ip) {
             if entry.state == PeerConnectionState::Connecting {
+                let generation = self.alloc_generation();
                 entry.state = PeerConnectionState::Connected;
+                entry.direction = ConnectionDirection::Inbound;
+                entry.generation = generation;
                 entry.connected_at = Some(Instant::now());
                 entry.connection_count += 1;
 
-                self.connected_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.inbound_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                true
+                self.connected_count.fetch_add(1, Ordering::Relaxed);
+                self.inbound_count.fetch_add(1, Ordering::Relaxed);
+                Some(generation)
             } else {
-                false
+                None
             }
         } else {
+            let generation = self.alloc_generation();
             let info = ConnectionInfo {
                 state: PeerConnectionState::Connected,
                 direction: ConnectionDirection::Inbound,
+                generation,
                 connected_at: Some(Instant::now()),
                 disconnected_at: None,
                 connection_count: 1,
@@ -505,17 +517,19 @@ impl ConnectionManager {
                 is_whitelisted: false,
             };
             self.connections.insert(peer_ip.to_string(), info);
-            self.connected_count
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.inbound_count
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            true
+            self.connected_count.fetch_add(1, Ordering::Relaxed);
+            self.inbound_count.fetch_add(1, Ordering::Relaxed);
+            Some(generation)
         }
     }
 
-    /// Mark an inbound connection as disconnected
-    pub fn mark_inbound_disconnected(&self, peer_ip: &str) -> bool {
+    /// Mark an inbound connection as disconnected **only if** `generation` still
+    /// owns the slot. Returns `false` when a newer session has replaced this one.
+    pub fn mark_inbound_disconnected(&self, peer_ip: &str, generation: u64) -> bool {
         if let Some(mut entry) = self.connections.get_mut(peer_ip) {
+            if entry.generation != generation {
+                return false;
+            }
             if entry.state == PeerConnectionState::Connected {
                 entry.state = PeerConnectionState::Disconnected;
                 entry.disconnected_at = Some(Instant::now());
@@ -538,6 +552,7 @@ impl ConnectionManager {
             if entry.state == PeerConnectionState::Disconnected {
                 entry.state = PeerConnectionState::Connecting;
                 entry.direction = ConnectionDirection::Outbound;
+                entry.generation = self.alloc_generation();
                 entry.last_message_at = Some(Instant::now()); // Track when connecting started
                 true
             } else {
@@ -547,6 +562,7 @@ impl ConnectionManager {
             let info = ConnectionInfo {
                 state: PeerConnectionState::Connecting,
                 direction: ConnectionDirection::Outbound,
+                generation: self.alloc_generation(),
                 connected_at: None,
                 disconnected_at: None,
                 connection_count: 0,
@@ -562,28 +578,32 @@ impl ConnectionManager {
         }
     }
 
-    /// Mark a connection attempt as successfully connected
-    pub fn mark_connected(&self, peer_ip: &str) -> bool {
+    /// Mark a connection attempt as successfully connected.
+    ///
+    /// Returns the session generation on success. Returns `None` if the peer is
+    /// no longer in `Connecting` (e.g. superseded by an inbound accept) — the
+    /// outbound task must abort without touching registry/MN state.
+    pub fn mark_connected(&self, peer_ip: &str) -> Option<u64> {
         if let Some(mut entry) = self.connections.get_mut(peer_ip) {
             if entry.state == PeerConnectionState::Connecting {
+                let generation = self.alloc_generation();
                 entry.state = PeerConnectionState::Connected;
+                entry.generation = generation;
                 entry.connected_at = Some(Instant::now());
                 entry.last_message_at = Some(Instant::now());
                 entry.connection_count += 1;
 
-                self.connected_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.connected_count.fetch_add(1, Ordering::Relaxed);
 
                 if entry.direction == ConnectionDirection::Outbound {
-                    self.outbound_count
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.outbound_count.fetch_add(1, Ordering::Relaxed);
                 }
-                true
+                Some(generation)
             } else {
-                false
+                None
             }
         } else {
-            false
+            None
         }
     }
 
@@ -597,6 +617,7 @@ impl ConnectionManager {
             let info = ConnectionInfo {
                 state: PeerConnectionState::Reconnecting,
                 direction: ConnectionDirection::Outbound,
+                generation: self.alloc_generation(),
                 connected_at: None,
                 disconnected_at: Some(Instant::now()),
                 connection_count: 0,
@@ -674,14 +695,17 @@ impl ConnectionManager {
     }
 
     /// Mark an outbound connection as disconnected, but only if the current entry
-    /// still represents an outbound session.
+    /// still represents **this** outbound session (`generation` match + Outbound).
     ///
     /// This prevents a late-closing outbound task from wiping out a newer inbound
     /// replacement for the same peer, which would otherwise trigger unnecessary
     /// reconnect churn.
-    pub fn mark_outbound_disconnected(&self, peer_ip: &str) -> bool {
+    pub fn mark_outbound_disconnected(&self, peer_ip: &str, generation: u64) -> bool {
         if let Some(mut entry) = self.connections.get_mut(peer_ip) {
             if entry.direction != ConnectionDirection::Outbound {
+                return false;
+            }
+            if entry.generation != generation {
                 return false;
             }
 
@@ -912,16 +936,25 @@ mod tests {
         manager.set_local_ip("10.0.0.1".to_string());
 
         assert!(manager.mark_connecting("10.0.0.2"));
-        assert!(manager.mark_connected("10.0.0.2"));
-        assert!(manager.accept_inbound("10.0.0.2", true));
+        let out_gen = manager.mark_connected("10.0.0.2").expect("outbound gen");
+        let in_gen = manager
+            .accept_inbound("10.0.0.2", true)
+            .expect("inbound accepted");
+        assert_ne!(out_gen, in_gen);
 
         let entry = manager.connections.get("10.0.0.2").unwrap();
         assert_eq!(entry.direction, ConnectionDirection::Inbound);
         assert_eq!(entry.state, PeerConnectionState::Connected);
+        assert_eq!(entry.generation, in_gen);
         assert!(entry.is_whitelisted);
         drop(entry);
         assert_eq!(manager.connected_count(), 1);
         assert_eq!(manager.outbound_count(), 0);
+        assert_eq!(manager.inbound_count(), 1);
+
+        // Superseded outbound cleanup must not wipe the new inbound slot.
+        assert!(!manager.mark_outbound_disconnected("10.0.0.2", out_gen));
+        assert_eq!(manager.connected_count(), 1);
         assert_eq!(manager.inbound_count(), 1);
     }
 
@@ -931,12 +964,13 @@ mod tests {
         manager.set_local_ip("10.0.0.9".to_string());
 
         assert!(manager.mark_connecting("10.0.0.2"));
-        assert!(manager.mark_connected("10.0.0.2"));
-        assert!(!manager.accept_inbound("10.0.0.2", false));
+        let out_gen = manager.mark_connected("10.0.0.2").expect("outbound gen");
+        assert!(manager.accept_inbound("10.0.0.2", false).is_none());
 
         let entry = manager.connections.get("10.0.0.2").unwrap();
         assert_eq!(entry.direction, ConnectionDirection::Outbound);
         assert_eq!(entry.state, PeerConnectionState::Connected);
+        assert_eq!(entry.generation, out_gen);
         drop(entry);
         assert_eq!(manager.connected_count(), 1);
         assert_eq!(manager.outbound_count(), 1);
@@ -949,19 +983,44 @@ mod tests {
         manager.set_local_ip("10.0.0.1".to_string());
 
         assert!(manager.mark_connecting("10.0.0.2"));
-        assert!(manager.accept_inbound("10.0.0.2", true));
+        let in_gen = manager
+            .accept_inbound("10.0.0.2", true)
+            .expect("inbound accepted");
 
         let entry = manager.connections.get("10.0.0.2").unwrap();
         assert_eq!(entry.direction, ConnectionDirection::Inbound);
         assert_eq!(entry.state, PeerConnectionState::Connected);
+        assert_eq!(entry.generation, in_gen);
         drop(entry);
         assert_eq!(manager.connected_count(), 1);
         assert_eq!(manager.outbound_count(), 0);
         assert_eq!(manager.inbound_count(), 1);
 
-        assert!(manager.mark_inbound_disconnected("10.0.0.2"));
+        assert!(manager.mark_inbound_disconnected("10.0.0.2", in_gen));
         assert_eq!(manager.connected_count(), 0);
         assert_eq!(manager.outbound_count(), 0);
+        assert_eq!(manager.inbound_count(), 0);
+    }
+
+    #[test]
+    fn stale_inbound_cleanup_does_not_clear_replacement() {
+        let manager = ConnectionManager::new();
+        manager.set_local_ip("10.0.0.1".to_string());
+
+        let gen1 = manager
+            .accept_inbound("10.0.0.2", true)
+            .expect("first inbound");
+        let gen2 = manager
+            .accept_inbound("10.0.0.2", true)
+            .expect("whitelisted replace");
+        assert_ne!(gen1, gen2);
+
+        assert!(!manager.mark_inbound_disconnected("10.0.0.2", gen1));
+        assert_eq!(manager.connected_count(), 1);
+        assert_eq!(manager.inbound_count(), 1);
+
+        assert!(manager.mark_inbound_disconnected("10.0.0.2", gen2));
+        assert_eq!(manager.connected_count(), 0);
         assert_eq!(manager.inbound_count(), 0);
     }
 
@@ -970,17 +1029,27 @@ mod tests {
         let manager = ConnectionManager::new();
         manager
             .connected_count
-            .store(usize::MAX - 4, std::sync::atomic::Ordering::Relaxed);
+            .store(usize::MAX - 4, Ordering::Relaxed);
         manager
             .inbound_count
-            .store(usize::MAX - 5, std::sync::atomic::Ordering::Relaxed);
+            .store(usize::MAX - 5, Ordering::Relaxed);
         manager
             .outbound_count
-            .store(usize::MAX - 6, std::sync::atomic::Ordering::Relaxed);
+            .store(usize::MAX - 6, Ordering::Relaxed);
 
         assert_eq!(manager.connected_count(), 0);
         assert_eq!(manager.inbound_count(), 0);
         assert_eq!(manager.outbound_count(), 0);
         assert!(manager.can_accept_inbound("10.0.0.2", false).is_ok());
+    }
+
+    #[test]
+    fn count_connections_from_ip_is_exact_match() {
+        let manager = ConnectionManager::new();
+        assert!(manager.mark_connecting("10.0.0.10"));
+        assert!(manager.mark_connected("10.0.0.10").is_some());
+        // Prefix of a real peer key must not count as a hit.
+        assert_eq!(manager.count_connections_from_ip("10.0.0.1"), 0);
+        assert_eq!(manager.count_connections_from_ip("10.0.0.10"), 1);
     }
 }

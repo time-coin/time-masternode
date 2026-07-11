@@ -121,7 +121,18 @@ impl ConnectionDriver {
         let peer_ip = peer_conn.peer_ip().to_string();
 
         // Transition Connecting → Connected in the connection-state machine.
-        self.connection_manager.mark_connected(&peer_ip);
+        // If this fails, an inbound accept already took the slot (simultaneous
+        // open) — abort without registering a writer or marking MN inactive.
+        let Some(generation) = self.connection_manager.mark_connected(&peer_ip) else {
+            tracing::info!(
+                "🔄 Outbound to {} superseded before mark_connected — aborting",
+                peer_ip
+            );
+            return Err(format!(
+                "outbound to {} superseded by concurrent inbound",
+                peer_ip
+            ));
+        };
 
         if let Some(ref ai) = self.ai_system {
             ai.attack_detector.record_peer_connect(&peer_ip);
@@ -169,42 +180,40 @@ impl ConnectionDriver {
 
         // ── Cleanup ─────────────────────────────────────────────────────────────────
 
-        self.connection_manager.mark_outbound_disconnected(&peer_ip);
+        let still_owner = self
+            .connection_manager
+            .mark_outbound_disconnected(&peer_ip, generation);
 
-        // Only clean up peer_registry if we're still the active outbound connection.
-        // If the connection was superseded by an inbound (IP tiebreaker in
-        // try_register_inbound), skip cleanup to avoid corrupting the new inbound.
-        if self.connection_manager.has_outbound_connection(&peer_ip)
-            || !self.peer_registry.is_connected(&peer_ip)
-        {
+        if still_owner {
+            // We still owned the CM slot — safe to clear registry maps.
             self.peer_registry.unregister_peer(&peer_ip).await;
+
+            if let Some(ref ai) = self.ai_system {
+                ai.attack_detector.record_peer_disconnect(&peer_ip);
+            }
+
+            // Only mark MN inactive when this outbound was the live session.
+            // If inbound superseded us, the peer is still connected.
+            let elapsed = start.elapsed();
+            if self.masternode_registry.is_registered(&peer_ip).await {
+                if let Err(e) = self
+                    .masternode_registry
+                    .mark_inactive_on_disconnect_with_duration(&peer_ip, Some(elapsed))
+                    .await
+                {
+                    tracing::debug!("Could not mark masternode {} as inactive: {:?}", peer_ip, e);
+                }
+            }
+
+            tracing::debug!("🔌 Unregistered peer {}", peer_ip);
         } else {
             tracing::info!(
-                "🔄 Outbound to {} superseded by inbound — skipping cleanup",
+                "🔄 Outbound to {} superseded by newer session — skipping registry/MN cleanup",
                 peer_ip
             );
         }
 
         let elapsed = start.elapsed();
-
-        if let Some(ref ai) = self.ai_system {
-            ai.attack_detector.record_peer_disconnect(&peer_ip);
-        }
-
-        // If this peer is a registered masternode, mark it inactive so it stops
-        // receiving rewards until it reconnects.
-        if self.masternode_registry.is_registered(&peer_ip).await {
-            if let Err(e) = self
-                .masternode_registry
-                .mark_inactive_on_disconnect_with_duration(&peer_ip, Some(elapsed))
-                .await
-            {
-                tracing::debug!("Could not mark masternode {} as inactive: {:?}", peer_ip, e);
-            }
-        }
-
-        tracing::debug!("🔌 Unregistered peer {}", peer_ip);
-
         match result {
             Ok(_) => Ok(elapsed),
             Err(e) => Err(e),
@@ -489,16 +498,21 @@ impl ConnectionDriver {
         //   (a) TLS failures / SNI rejections never consume a CM slot
         //   (b) duplicate connections are dropped before the writer channel is registered
         //   (c) can_accept_inbound (capacity only) in the accept loop stays a fast pre-check
-        if !self
+        let Some(generation) = self
             .connection_manager
             .accept_inbound(&ip_str, is_whitelisted)
-        {
+        else {
             tracing::debug!(
-            "🔄 Dropping duplicate inbound from {} — ConnectionManager already has a connection",
-            peer_addr
-        );
+                "🔄 Dropping duplicate inbound from {} — ConnectionManager already has a connection",
+                peer_addr
+            );
             return Ok(());
-        }
+        };
+
+        // If we yielded an outbound (or replaced a stale inbound), drop the old
+        // writer now so that session's write loop exits instead of remaining the
+        // registry owner through handshake.
+        self.peer_registry.evict_writer(&ip_str).await;
 
         let mut handshake_done = false;
 
@@ -759,11 +773,13 @@ impl ConnectionDriver {
                                             handshake_done = true;
 
                                             // ConnectionManager is the single authority — accept_inbound()
-                                            // already ran at the top of handle_peer() and is the only
-                                            // gate needed.  register_peer() below wires the writer channel
-                                            // into PeerConnectionRegistry (the message router).
+                                            // already ran and assigned `generation`. register_peer_force
+                                            // installs this inbound writer even if an old outbound
+                                            // writer was still live (simultaneous-open yield).
                                             tracing::info!("📝 Registering {} in PeerConnectionRegistry (peer_addr: {})", ip_str, peer_addr);
-                                            self.peer_registry.register_peer(ip_str.clone(), writer_tx.clone()).await;
+                                            self.peer_registry
+                                                .register_peer_force(ip_str.clone(), writer_tx.clone())
+                                                .await;
                                             if let Some(ref ai) = self.ai_system {
                                                 ai.attack_detector.record_peer_connect(&ip_str);
                                             }
@@ -1007,34 +1023,46 @@ impl ConnectionDriver {
             }
         }
 
-        // Cleanup: mark inbound connection as disconnected in BOTH managers
-        self.connection_manager.mark_inbound_disconnected(&ip_str);
-        self.peer_registry.unregister_peer(&ip_str).await;
+        // Cleanup: only if this session still owns the CM slot. A newer inbound
+        // replacement (or concurrent yield) must not be wiped by our exit.
+        let still_owner = self
+            .connection_manager
+            .mark_inbound_disconnected(&ip_str, generation);
 
-        // Mark masternode as inactive only if the handshake completed.
-        // Connections that never completed the version exchange (e.g., old
-        // software that sends messages before the handshake) must not trigger
-        // registry changes: the peer never identified itself on this connection,
-        // so there is nothing meaningful to update.  Without this guard, inbound
-        // pre-handshake failures from old-software peers cause their previously
-        // registered entry (which may be a paid-tier node) to be removed as a
-        // "transient Free-tier" node, creating continuous reconnection churn.
-        if handshake_done {
-            if let Err(e) = self
-                .masternode_registry
-                .mark_inactive_on_disconnect(&ip_str)
-                .await
-            {
-                tracing::debug!("Note: {} is not a registered masternode ({})", ip_str, e);
+        if still_owner {
+            self.peer_registry.unregister_peer(&ip_str).await;
+
+            // Mark masternode as inactive only if the handshake completed.
+            // Connections that never completed the version exchange (e.g., old
+            // software that sends messages before the handshake) must not trigger
+            // registry changes: the peer never identified itself on this connection,
+            // so there is nothing meaningful to update.  Without this guard, inbound
+            // pre-handshake failures from old-software peers cause their previously
+            // registered entry (which may be a paid-tier node) to be removed as a
+            // "transient Free-tier" node, creating continuous reconnection churn.
+            if handshake_done {
+                if let Err(e) = self
+                    .masternode_registry
+                    .mark_inactive_on_disconnect(&ip_str)
+                    .await
+                {
+                    tracing::debug!("Note: {} is not a registered masternode ({})", ip_str, e);
+                }
+                // Notify AI detector of disconnect for sybil/eclipse tracking and AV3 subnet storms.
+                if let Some(ref ai) = self.ai_system {
+                    ai.attack_detector.record_peer_disconnect(&ip_str);
+                    ai.attack_detector.record_synchronized_disconnect(&ip_str);
+                }
             }
-            // Notify AI detector of disconnect for sybil/eclipse tracking and AV3 subnet storms.
-            if let Some(ref ai) = self.ai_system {
-                ai.attack_detector.record_peer_disconnect(&ip_str);
-                ai.attack_detector.record_synchronized_disconnect(&ip_str);
-            }
+
+            tracing::info!("🔌 Peer {} disconnected", peer_addr);
+        } else {
+            tracing::info!(
+                "🔄 Inbound session for {} superseded (gen {}) — skipping cleanup",
+                peer_addr,
+                generation
+            );
         }
-
-        tracing::info!("🔌 Peer {} disconnected", peer_addr);
 
         Ok(())
     }

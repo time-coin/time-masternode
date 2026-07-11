@@ -104,6 +104,12 @@ struct NetworkInfo {
     version: u32,
     subversion: String,
     connections: usize,
+    /// Live inbound sessions (from ConnectionManager). Default 0 for older daemons.
+    #[serde(default)]
+    connections_in: usize,
+    /// Live outbound sessions (from ConnectionManager). Default 0 for older daemons.
+    #[serde(default)]
+    connections_out: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +119,9 @@ struct PeerInfo {
     pingtime: Option<f64>,
     #[serde(default)]
     inbound: bool,
+    /// TCP session is live (from ConnectionManager). Older daemons omit this.
+    #[serde(default)]
+    connected: bool,
     #[serde(default)]
     tier: String,
     #[serde(default)]
@@ -654,6 +663,7 @@ impl App {
                 },
                 pingtime: None,
                 inbound: false,
+                connected: true,
                 tier: mn.tier.clone(),
                 active: mn.is_active,
                 height: local_height,
@@ -1244,9 +1254,27 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
         ])
         .split(area);
 
-    // Count inbound vs outbound
-    let outbound_count = app.data.peers.iter().filter(|p| !p.inbound).count();
-    let inbound_count = app.data.peers.iter().filter(|p| p.inbound).count();
+    // Prefer getnetworkinfo direction fields (live CM sessions). Fall back to
+    // counting only peers with a live TCP session so we never treat the full
+    // masternode list as "N out / 0 in" (legacy getpeerinfo hardcoded inbound=false).
+    let connected_out = app
+        .data
+        .peers
+        .iter()
+        .filter(|p| p.connected && !p.inbound)
+        .count();
+    let connected_in = app
+        .data
+        .peers
+        .iter()
+        .filter(|p| p.connected && p.inbound)
+        .count();
+    let (outbound_count, inbound_count) = match &app.data.network {
+        Some(n) if n.connections_in + n.connections_out > 0 || n.connections == 0 => {
+            (n.connections_out, n.connections_in)
+        }
+        _ => (connected_out, connected_in),
+    };
     let active_count = app.data.peers.iter().filter(|p| p.active).count();
 
     if let Some(network) = &app.data.network {

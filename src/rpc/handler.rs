@@ -821,12 +821,17 @@ impl RpcHandler {
             NetworkType::Testnet => "testnet",
         };
 
-        // Count live post-handshake peer writers (not ConnectionManager alone).
-        let connections = if let Some(pr) = self.blockchain.get_peer_registry().await {
-            pr.peer_count().await
-        } else {
-            0
-        };
+        // Live post-handshake writers for total; ConnectionManager for direction.
+        let (connections, connections_in, connections_out) =
+            if let Some(pr) = self.blockchain.get_peer_registry().await {
+                (
+                    pr.peer_count().await,
+                    pr.inbound_count(),
+                    pr.outbound_count(),
+                )
+            } else {
+                (0, 0, 0)
+            };
 
         Ok(json!({
             "version": 110000, // 1.1.0
@@ -837,6 +842,9 @@ impl RpcHandler {
             "timeoffset": 0,
             "networkactive": true,
             "connections": connections,
+            // Bitcoin-compatible direction breakdown (from ConnectionManager).
+            "connections_in": connections_in,
+            "connections_out": connections_out,
             "networks": [{
                 "name": network,
                 "limited": false,
@@ -852,25 +860,30 @@ impl RpcHandler {
     }
 
     async fn get_peer_info(&self) -> Result<Value, RpcError> {
+        use crate::network::connection_direction::ConnectionDirection;
+
         let masternodes = self.registry.list_all().await;
         let peer_registry = self.blockchain.get_peer_registry().await;
 
         let mut peers: Vec<Value> = Vec::with_capacity(masternodes.len());
         for mn in &masternodes {
-            // Look up the peer's actual reported height and ping time from the
-            // connection registry.  Previously this was gated behind is_active
-            // (gossip liveness), which meant newly-connected peers showed no
-            // height or ping until 3+ peers had gossiped about them.  Now we
-            // always check the registry — if we have a live connection, show it.
-            let (height, pingtime) = if let Some(ref pr) = peer_registry {
+            // Look up live connection state, height, and ping from the registry.
+            // Previously `inbound` was hardcoded false, so dashboards always
+            // showed "N out / 0 in" even when most peers were inbound.
+            let (height, pingtime, connected, inbound) = if let Some(ref pr) = peer_registry {
                 let h = pr
                     .get_peer_height(&mn.masternode.address)
                     .await
                     .unwrap_or(0);
                 let p = pr.get_peer_ping_time(&mn.masternode.address).await;
-                (h, p)
+                let connected = pr.is_connected(&mn.masternode.address);
+                let inbound = matches!(
+                    pr.get_direction(&mn.masternode.address),
+                    Some(ConnectionDirection::Inbound)
+                );
+                (h, p, connected, inbound)
             } else {
-                (0u64, None)
+                (0u64, None, false, false)
             };
 
             peers.push(json!({
@@ -878,7 +891,8 @@ impl RpcHandler {
                 "services": "0000000000000409",
                 "lastseen": mn.masternode.registered_at,
                 "subver": format!("/timed:{}/", env!("CARGO_PKG_VERSION")),
-                "inbound": false,
+                "connected": connected,
+                "inbound": inbound,
                 "conntime": mn.masternode.registered_at,
                 "timeoffset": 0,
                 "pingtime": pingtime,

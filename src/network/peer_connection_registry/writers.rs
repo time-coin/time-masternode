@@ -8,20 +8,43 @@ impl PeerConnectionRegistry {
     // ===== Peer Writer Registry (formerly peer_connection_registry.rs) =====
 
     pub async fn register_peer(&self, peer_ip: String, writer: PeerWriterTx) {
+        // Inbound handshake always owns the writer slot. A live outbound (or
+        // stale inbound) writer must be replaced so dual-connect yield cannot
+        // leave the registry pointing at a superseded channel.
+        self.register_peer_force(peer_ip, writer).await;
+    }
+
+    /// Always install `writer` for `peer_ip`, dropping any previous sender.
+    /// Dropping the old sender collapses the prior write loop and forces that
+    /// session to exit.
+    pub async fn register_peer_force(&self, peer_ip: String, writer: PeerWriterTx) {
         let mut writers = self.peer_writers.write().await;
-        // Only overwrite if no existing live writer (defensive, mirrors register_peer_shared)
-        if let Some(existing) = writers.get(&peer_ip) {
+        if let Some(existing) = writers.insert(peer_ip.clone(), writer) {
             if !existing.is_closed() {
-                debug!(
-                    "🔄 Inbound peer {} already has a live writer, skipping overwrite",
+                info!(
+                    "♻️ Replaced live writer for peer {} (superseded session will exit)",
                     peer_ip
                 );
-                return;
+            } else {
+                debug!("♻️ Replacing dead writer for peer {}", peer_ip);
             }
-            debug!("♻️ Replacing dead writer for inbound peer {}", peer_ip);
+        } else {
+            debug!("✅ Registered peer connection: {}", peer_ip);
         }
-        writers.insert(peer_ip.clone(), writer);
-        debug!("✅ Registered peer connection: {}", peer_ip);
+    }
+
+    /// Drop any live writer for `peer_ip` without clearing heights/ping maps.
+    /// Used immediately after ConnectionManager yields/replaces so the old
+    /// outbound (or replaced inbound) I/O task begins shutting down before the
+    /// new session finishes handshake.
+    pub async fn evict_writer(&self, peer_ip: &str) {
+        let mut writers = self.peer_writers.write().await;
+        if writers.remove(peer_ip).is_some() {
+            info!(
+                "🔌 Evicted writer for {} so superseded connection can tear down",
+                peer_ip
+            );
+        }
     }
 
     /// Register an outbound peer with a channel-based writer
