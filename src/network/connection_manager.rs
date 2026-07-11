@@ -125,18 +125,24 @@ impl ConnectionManager {
     /// "N out / 0 in" even when port 24000 is open.
     fn ip_ranks_above_peer(&self, peer_ip: &str) -> bool {
         if let Some(local_ip) = self.local_ip.get() {
-            if let (Ok(local_addr), Ok(peer_addr)) =
-                (local_ip.parse::<IpAddr>(), peer_ip.parse::<IpAddr>())
-            {
-                match (local_addr, peer_addr) {
-                    (IpAddr::V4(l), IpAddr::V4(p)) => l.octets() > p.octets(),
-                    (IpAddr::V6(l), IpAddr::V6(p)) => l.octets() > p.octets(),
-                    (IpAddr::V6(_), IpAddr::V4(_)) => true,
-                    (IpAddr::V4(_), IpAddr::V6(_)) => false,
+            if let Ok(local_addr) = local_ip.parse::<IpAddr>() {
+                if local_addr.is_unspecified() {
+                    // Public-IP detection failed and we fell back to the listen
+                    // address (0.0.0.0 / ::) — this is not a real IP to rank
+                    // against peers. Treat it as unknown so we don't silently
+                    // become permanently dial-passive (see full_external_address).
+                    return true;
                 }
-            } else {
-                local_ip.as_str() > peer_ip
+                if let Ok(peer_addr) = peer_ip.parse::<IpAddr>() {
+                    return match (local_addr, peer_addr) {
+                        (IpAddr::V4(l), IpAddr::V4(p)) => l.octets() > p.octets(),
+                        (IpAddr::V6(l), IpAddr::V6(p)) => l.octets() > p.octets(),
+                        (IpAddr::V6(_), IpAddr::V4(_)) => true,
+                        (IpAddr::V4(_), IpAddr::V6(_)) => false,
+                    };
+                }
             }
+            local_ip.as_str() > peer_ip
         } else {
             // Unknown local IP — fall back to dialing (legacy behaviour).
             true
@@ -1213,6 +1219,18 @@ mod tests {
         manager.set_local_ip("10.0.0.9".to_string());
         assert!(manager.is_preferred_dialer("10.0.0.2"));
         assert!(!manager.is_preferred_dialer("10.0.0.20"));
+    }
+
+    #[test]
+    fn preferred_dialer_falls_back_to_dialing_on_unspecified_local_ip() {
+        // Regression: full_external_address() falls back to the listen address
+        // (0.0.0.0) when public-IP auto-detection fails and no externalip= is
+        // configured. That must not make us permanently dial-passive against
+        // every peer — treat it like an unknown local IP and keep dialing.
+        let manager = ConnectionManager::new();
+        manager.set_local_ip("0.0.0.0".to_string());
+        assert!(manager.is_preferred_dialer("10.0.0.2"));
+        assert!(manager.is_preferred_dialer("255.255.255.255"));
     }
 
     #[test]
