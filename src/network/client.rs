@@ -495,6 +495,14 @@ impl NetworkClient {
                     }
                     continue;
                 }
+                // Higher IP dials lower IP — wait for inbound from peers that rank above us.
+                if !connection_manager.is_preferred_dialer(ip) {
+                    tracing::debug!(
+                        "⏳ [PHASE1] Waiting for inbound from {} (they are preferred dialer)",
+                        ip
+                    );
+                    continue;
+                }
                 if !connection_manager.mark_connecting(ip) {
                     continue;
                 }
@@ -534,6 +542,13 @@ impl NetworkClient {
                                 continue;
                             }
                         }
+                    }
+                    if !connection_manager.is_preferred_dialer(ip) {
+                        tracing::debug!(
+                            "⏳ [PHASE2] Waiting for inbound from {} (they are preferred dialer)",
+                            ip
+                        );
+                        continue;
                     }
                     if !connection_manager.mark_connecting(ip) {
                         continue;
@@ -578,8 +593,8 @@ impl NetworkClient {
                 }
 
                 let active_count = masternode_registry.list_active().await.len();
-                let outbound_count = connection_manager.connected_count();
-                let inbound_count = peer_registry.inbound_count();
+                let outbound_count = connection_manager.outbound_count();
+                let inbound_count = connection_manager.inbound_count();
 
                 tracing::debug!(
                     "🔍 Peer check: {} connected ({} out, {} in), {} active masternodes, {} total slots",
@@ -645,6 +660,17 @@ impl NetworkClient {
                         //   (a) paid-tier node on a priority-wake signal → reconnect immediately
                         //   (b) whitelisted peer → always bypass AI cooldown (operator trust)
                         let is_paid_tier = !matches!(mn_info.masternode.tier, MasternodeTier::Free);
+                        // Higher-IP-dials-lower: only the preferred dialer initiates.
+                        // Exception: priority wake after a paid-tier disconnect — either
+                        // side may redial so a dead higher-IP peer cannot leave us isolated.
+                        let force_dial = priority_wake && is_paid_tier;
+                        if !force_dial && !connection_manager.is_preferred_dialer(mn_ip) {
+                            tracing::debug!(
+                                "⏳ [PHASE3-MN] Waiting for inbound from {} (they dial us)",
+                                mn_ip
+                            );
+                            continue;
+                        }
                         let mn_is_whitelisted = if let Some(ref bl) = res.ip_banlist {
                             if let Ok(parsed) = mn_ip.parse::<std::net::IpAddr>() {
                                 bl.read().await.is_whitelisted(parsed)
@@ -781,6 +807,9 @@ impl NetworkClient {
                             continue;
                         }
                         if connection_manager.is_reconnecting(ip) {
+                            continue;
+                        }
+                        if !connection_manager.is_preferred_dialer(ip) {
                             continue;
                         }
                         // Check AI advice before spawning. If a peer has failed enough

@@ -102,7 +102,14 @@ impl ConnectionManager {
         self.connections.get(peer_ip).map(|info| info.direction)
     }
 
-    fn should_keep_outbound(&self, peer_ip: &str) -> bool {
+    /// True when our public IP ranks **above** `peer_ip` (octet/lex order).
+    ///
+    /// Used for simultaneous-open resolution and for who should **initiate** the
+    /// outbound dial. Higher IP dials lower IP → one connection per pair with a
+    /// deterministic direction (higher=outbound, lower=inbound). Without this,
+    /// every node dials everyone at startup and aggressive dialers show
+    /// "N out / 0 in" even when port 24000 is open.
+    fn ip_ranks_above_peer(&self, peer_ip: &str) -> bool {
         if let Some(local_ip) = self.local_ip.get() {
             if let (Ok(local_addr), Ok(peer_addr)) =
                 (local_ip.parse::<IpAddr>(), peer_ip.parse::<IpAddr>())
@@ -117,8 +124,19 @@ impl ConnectionManager {
                 local_ip.as_str() > peer_ip
             }
         } else {
+            // Unknown local IP — fall back to dialing (legacy behaviour).
             true
         }
+    }
+
+    fn should_keep_outbound(&self, peer_ip: &str) -> bool {
+        self.ip_ranks_above_peer(peer_ip)
+    }
+
+    /// True if we should initiate an outbound dial to `peer_ip` under the
+    /// higher-IP-dials-lower rule. Non-preferred side waits for inbound instead.
+    pub fn is_preferred_dialer(&self, peer_ip: &str) -> bool {
+        self.ip_ranks_above_peer(peer_ip)
     }
 
     fn recalculate_counts(&self) -> (usize, usize, usize) {
@@ -1074,5 +1092,13 @@ mod tests {
         drop(entry);
         assert_eq!(manager.inbound_count(), 1);
         assert_eq!(manager.outbound_count(), 0);
+    }
+
+    #[test]
+    fn preferred_dialer_is_higher_ip() {
+        let manager = ConnectionManager::new();
+        manager.set_local_ip("10.0.0.9".to_string());
+        assert!(manager.is_preferred_dialer("10.0.0.2"));
+        assert!(!manager.is_preferred_dialer("10.0.0.20"));
     }
 }

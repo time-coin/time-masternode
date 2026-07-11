@@ -29,6 +29,13 @@ impl PeerConnectionRegistry {
             .unwrap_or(true)
     }
 
+    /// Higher-IP-dials-lower: whether we should initiate outbound to this peer.
+    pub fn is_preferred_dialer(&self, peer_ip: &str) -> bool {
+        self.connection_manager()
+            .map(|cm| cm.is_preferred_dialer(peer_ip))
+            .unwrap_or(true)
+    }
+
     pub fn is_connected(&self, ip: &str) -> bool {
         if let Some(cm) = self.connection_manager() {
             return cm.is_connected(ip);
