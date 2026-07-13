@@ -118,6 +118,21 @@ if systemctl is-enabled --quiet mn-watchdog 2>/dev/null; then
         cp "$PWD/scripts/mn-watchdog.sh" /usr/local/bin/mn-watchdog
         chmod +x /usr/local/bin/mn-watchdog
     fi
+
+    # Heal a stale unit file still using the old hard BindsTo=timed(t)d.service
+    # dependency (fixed in 04a7d6d). BindsTo makes systemd kill mn-watchdog
+    # every time timed restarts — including restarts the watchdog itself
+    # triggers — leaving the node unprotected until someone notices and starts
+    # it manually. Patch the line in place rather than overwriting the whole
+    # file: install scripts bake network-specific ExecStart args (--testnet)
+    # and After= targets into it that must survive.
+    UNIT_FILE="/etc/systemd/system/mn-watchdog.service"
+    if [ -f "$UNIT_FILE" ] && grep -q '^BindsTo=' "$UNIT_FILE"; then
+        echo "==> Healing stale mn-watchdog.service (BindsTo -> Wants)..."
+        sed -i 's/^BindsTo=/Wants=/' "$UNIT_FILE"
+        systemctl daemon-reload
+    fi
+
     echo "==> Restarting mn-watchdog..."
     systemctl restart mn-watchdog 2>/dev/null || systemctl start mn-watchdog
 fi
