@@ -590,6 +590,11 @@ impl NetworkClient {
                     }
                 };
 
+                tracing::info!(
+                    "🩺 [PHASE3-STALL-TRACE] tick woke (priority_wake={})",
+                    priority_wake
+                );
+
                 // Clean up stale Connecting states (stuck >30s)
                 let stale = connection_manager.cleanup_stale_connecting(Duration::from_secs(30));
                 if stale > 0 {
@@ -666,7 +671,15 @@ impl NetworkClient {
                             continue;
                         }
                         // should_skip already covers live writer + Connecting.
-                        if peer_registry.is_incompatible(mn_ip).await {
+                        // Stall-diagnosis tracing (2026-07-13 incident): the reconnection
+                        // pass silently stopped logging for ~7h with RPC still responsive,
+                        // suggesting one specific await here never returned. These
+                        // before/after pairs pinpoint exactly which one if it recurs —
+                        // remove once the root cause is confirmed and fixed.
+                        tracing::info!("🩺 [PHASE3-STALL-TRACE] {} pre-is_incompatible", mn_ip);
+                        let incompatible = peer_registry.is_incompatible(mn_ip).await;
+                        tracing::info!("🩺 [PHASE3-STALL-TRACE] {} post-is_incompatible", mn_ip);
+                        if incompatible {
                             continue;
                         }
                         // Respect AI advice to avoid hammering offline nodes.
@@ -687,7 +700,16 @@ impl NetworkClient {
                         }
                         let mn_is_whitelisted = if let Some(ref bl) = res.ip_banlist {
                             if let Ok(parsed) = mn_ip.parse::<std::net::IpAddr>() {
-                                bl.read().await.is_whitelisted(parsed)
+                                tracing::info!(
+                                    "🩺 [PHASE3-STALL-TRACE] {} pre-banlist-read",
+                                    mn_ip
+                                );
+                                let whitelisted = bl.read().await.is_whitelisted(parsed);
+                                tracing::info!(
+                                    "🩺 [PHASE3-STALL-TRACE] {} post-banlist-read",
+                                    mn_ip
+                                );
+                                whitelisted
                             } else {
                                 false
                             }
@@ -729,7 +751,16 @@ impl NetworkClient {
                         // round-trip to banned subnets, which wastes tokio tasks + memory.
                         if let Some(ref bl) = res.ip_banlist {
                             if let Ok(parsed_ip) = mn_ip.parse::<std::net::IpAddr>() {
-                                if bl.write().await.is_banned(parsed_ip).is_some() {
+                                tracing::info!(
+                                    "🩺 [PHASE3-STALL-TRACE] {} pre-banlist-write",
+                                    mn_ip
+                                );
+                                let banned = bl.write().await.is_banned(parsed_ip).is_some();
+                                tracing::info!(
+                                    "🩺 [PHASE3-STALL-TRACE] {} post-banlist-write",
+                                    mn_ip
+                                );
+                                if banned {
                                     tracing::debug!("⏭️  [PHASE3-MN] Skipping {} (banned)", mn_ip);
                                     continue;
                                 }

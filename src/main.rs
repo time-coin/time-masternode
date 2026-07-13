@@ -320,6 +320,19 @@ async fn main() {
     tracing::info!("════════════════════════════════════════════════════════════");
     tracing::info!("");
 
+    // Independent liveness heartbeat (2026-07-13 incident): on 2026-07-13 the P2P
+    // reconnection loop went completely silent for ~7h while RPC kept responding,
+    // meaning at least one but not all tokio worker threads were starved. This task
+    // holds no locks and depends on nothing else, so if it ever stops logging too,
+    // that proves full runtime/thread starvation rather than a single-task deadlock.
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            tracing::info!("💓 heartbeat");
+        }
+    });
+
     let mut shutdown_manager = ShutdownManager::new();
     let shutdown_token = shutdown_manager.token();
 
