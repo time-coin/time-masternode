@@ -1148,50 +1148,54 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let testnet = args.testnet || url.contains("24101");
         (url.clone(), testnet)
     } else {
-        // Auto-detect: prefer HTTPS (server default) then fall back to HTTP
+        // `--testnet` is documented as authoritative ("Connect to testnet... instead
+        // of mainnet") and must not be overridden by auto-detection. Only probe the
+        // requested network's port — previously this probed testnet (24101) THEN
+        // mainnet (24001) regardless of args.testnet, so on any host running both
+        // daemons simultaneously (e.g. a mainnet masternode plus a local testnet
+        // node) the flag was silently ignored and testnet always won.
+        let testnet = args.testnet;
+        let base_url = if testnet {
+            "127.0.0.1:24101"
+        } else {
+            "127.0.0.1:24001"
+        };
+        let use_tls = read_conf_rpctls(testnet);
+        let schemes: &[&str] = if use_tls {
+            &["https", "http"]
+        } else {
+            &["http"]
+        };
         let mut detected = None;
-        for (base_url, testnet) in &[("127.0.0.1:24101", true), ("127.0.0.1:24001", false)] {
-            let use_tls = read_conf_rpctls(*testnet);
-            let schemes: &[&str] = if use_tls {
-                &["https", "http"]
+        for scheme in schemes {
+            let url = format!("{}://{}", scheme, base_url);
+            let (user, pass) = read_cookie_file(testnet)
+                .or_else(|| read_conf_credentials(testnet))
+                .unwrap_or_default();
+            let probe = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getblockchaininfo",
+                "params": []
+            });
+            let auth = if !user.is_empty() && !pass.is_empty() {
+                Some((user.as_str(), pass.as_str()))
             } else {
-                &["http"]
+                None
             };
-            for scheme in schemes {
-                let url = format!("{}://{}", scheme, base_url);
-                let (user, pass) = read_cookie_file(*testnet)
-                    .or_else(|| read_conf_credentials(*testnet))
-                    .unwrap_or_default();
-                let probe = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getblockchaininfo",
-                    "params": []
-                });
-                let auth = if !user.is_empty() && !pass.is_empty() {
-                    Some((user.as_str(), pass.as_str()))
-                } else {
-                    None
-                };
-                if let Ok(response) = detect_client.post_json(&url, &probe, auth).await {
-                    if response.is_success() {
-                        if let Ok(rpc_response) = response.json::<serde_json::Value>() {
-                            if rpc_response.get("result").is_some() {
-                                detected = Some((url, *testnet));
-                                break;
-                            }
+            if let Ok(response) = detect_client.post_json(&url, &probe, auth).await {
+                if response.is_success() {
+                    if let Ok(rpc_response) = response.json::<serde_json::Value>() {
+                        if rpc_response.get("result").is_some() {
+                            detected = Some(url);
+                            break;
                         }
                     }
                 }
             }
-            if detected.is_some() {
-                break;
-            }
         }
-        detected.unwrap_or_else(|| {
-            let testnet = args.testnet;
+        detected.map(|url| (url, testnet)).unwrap_or_else(|| {
             let port = if testnet { 24101 } else { 24001 };
-            let use_tls = read_conf_rpctls(testnet);
             let scheme = if use_tls { "https" } else { "http" };
             (format!("{}://127.0.0.1:{}", scheme, port), testnet)
         })
