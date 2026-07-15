@@ -717,12 +717,23 @@ impl NetworkClient {
                             false
                         };
                         if mn_is_whitelisted {
-                            // Whitelisted peers get a short cooldown only — reconnect within
-                            // one PHASE3-MN cycle. A short delay prevents tight spin loops on
-                            // frame-bomb peers while still achieving near-100% uptime for
-                            // trusted masternodes.  Max backoff: 10 s (well under the 30s tick).
+                            // Whitelisted peers get a short cooldown for the first several
+                            // failures — reconnect within one PHASE3-MN cycle so a brief blip
+                            // recovers almost instantly (near-100% uptime for trusted
+                            // masternodes). Max backoff while under the limit: 10s (well under
+                            // the 30s tick).
+                            //
+                            // Once a peer has failed WHITELISTED_FAST_RETRY_LIMIT times in a
+                            // row, it's not a blip — it's a peer that's actively rejecting us
+                            // (e.g. repeated TLS handshake resets). Retrying it at the same 10s/
+                            // 30s floor forever accomplishes nothing and looks like abuse both
+                            // to the remote and to our own AV3 IP-cycling detector (observed:
+                            // 2026-07-15, sustained TLS-handshake-eof loop against known Gold
+                            // masternodes). Fall through to the same exponential backoff used
+                            // for non-whitelisted peers instead of hammering indefinitely.
+                            const WHITELISTED_FAST_RETRY_LIMIT: u32 = 5;
                             let failures = res.reconnection_ai.consecutive_failures_for(mn_ip);
-                            if failures > 0 {
+                            if failures > 0 && failures <= WHITELISTED_FAST_RETRY_LIMIT {
                                 let min_delay_secs =
                                     (5u64 * 2u64.pow(failures.saturating_sub(1).min(1))).min(10);
                                 let elapsed = connection_manager
@@ -732,6 +743,16 @@ impl NetworkClient {
                                     tracing::debug!(
                                         "⏸️  [PHASE3-MN] Whitelisted {} cooling down ({} failures, {}s/{}s elapsed)",
                                         mn_ip, failures, elapsed.as_secs(), min_delay_secs
+                                    );
+                                    continue;
+                                }
+                            } else if failures > WHITELISTED_FAST_RETRY_LIMIT {
+                                let advice =
+                                    res.reconnection_ai.get_reconnection_advice(mn_ip, true);
+                                if !advice.should_attempt {
+                                    tracing::debug!(
+                                        "⏭️  [PHASE3-MN] Skipping whitelisted {} (sustained failures={}, AI cooldown: {})",
+                                        mn_ip, failures, advice.reasoning
                                     );
                                     continue;
                                 }
