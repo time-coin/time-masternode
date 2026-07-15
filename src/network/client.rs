@@ -698,6 +698,16 @@ impl NetworkClient {
                             );
                             continue;
                         }
+                        // Shared ceiling: once a peer has failed this many times in a row,
+                        // every "reconnect immediately" exception below (manual whitelist,
+                        // startup pass, paid-tier priority wake) stops bypassing the AI
+                        // cooldown. Without this, a paid-tier peer that keeps failing
+                        // re-fires `priority_reconnect_notify` on every disconnect (that's
+                        // what "genuine disconnect" triggers), which re-enters this loop
+                        // and bypasses backoff forever — observed 2026-07-15 as a permanent
+                        // ~30s hammer against Gold masternodes that were TLS-handshake-eof
+                        // rejecting us the entire time.
+                        const FAST_RETRY_FAILURE_LIMIT: u32 = 5;
                         let mn_is_whitelisted = if let Some(ref bl) = res.ip_banlist {
                             if let Ok(parsed) = mn_ip.parse::<std::net::IpAddr>() {
                                 tracing::info!(
@@ -723,17 +733,15 @@ impl NetworkClient {
                             // masternodes). Max backoff while under the limit: 10s (well under
                             // the 30s tick).
                             //
-                            // Once a peer has failed WHITELISTED_FAST_RETRY_LIMIT times in a
+                            // Once a peer has failed FAST_RETRY_FAILURE_LIMIT times in a
                             // row, it's not a blip — it's a peer that's actively rejecting us
                             // (e.g. repeated TLS handshake resets). Retrying it at the same 10s/
                             // 30s floor forever accomplishes nothing and looks like abuse both
-                            // to the remote and to our own AV3 IP-cycling detector (observed:
-                            // 2026-07-15, sustained TLS-handshake-eof loop against known Gold
-                            // masternodes). Fall through to the same exponential backoff used
-                            // for non-whitelisted peers instead of hammering indefinitely.
-                            const WHITELISTED_FAST_RETRY_LIMIT: u32 = 5;
+                            // to the remote and to our own AV3 IP-cycling detector. Fall through
+                            // to the same exponential backoff used for non-whitelisted peers
+                            // instead of hammering indefinitely.
                             let failures = res.reconnection_ai.consecutive_failures_for(mn_ip);
-                            if failures > 0 && failures <= WHITELISTED_FAST_RETRY_LIMIT {
+                            if failures > 0 && failures <= FAST_RETRY_FAILURE_LIMIT {
                                 let min_delay_secs =
                                     (5u64 * 2u64.pow(failures.saturating_sub(1).min(1))).min(10);
                                 let elapsed = connection_manager
@@ -746,7 +754,7 @@ impl NetworkClient {
                                     );
                                     continue;
                                 }
-                            } else if failures > WHITELISTED_FAST_RETRY_LIMIT {
+                            } else if failures > FAST_RETRY_FAILURE_LIMIT {
                                 let advice =
                                     res.reconnection_ai.get_reconnection_advice(mn_ip, true);
                                 if !advice.should_attempt {
@@ -757,15 +765,28 @@ impl NetworkClient {
                                     continue;
                                 }
                             }
-                        } else if !(startup_pass || priority_wake && is_paid_tier) {
-                            let advice = res.reconnection_ai.get_reconnection_advice(mn_ip, true);
-                            if !advice.should_attempt {
-                                tracing::debug!(
-                                    "⏭️  [PHASE3-MN] Skipping {} (AI cooldown: {})",
-                                    mn_ip,
-                                    advice.reasoning
-                                );
-                                continue;
+                        } else {
+                            let failures = res.reconnection_ai.consecutive_failures_for(mn_ip);
+                            // startup_pass and paid-tier priority wakes normally bypass the AI
+                            // cooldown entirely so a fresh boot or a genuine one-off disconnect
+                            // reconnects immediately. But a paid-tier peer that keeps failing
+                            // re-fires priority_wake on every disconnect — past
+                            // FAST_RETRY_FAILURE_LIMIT that stops being a one-off and the
+                            // bypass must stop too, or backoff never engages.
+                            let bypass_cooldown = (startup_pass || (priority_wake && is_paid_tier))
+                                && failures <= FAST_RETRY_FAILURE_LIMIT;
+                            if !bypass_cooldown {
+                                let advice =
+                                    res.reconnection_ai.get_reconnection_advice(mn_ip, true);
+                                if !advice.should_attempt {
+                                    tracing::debug!(
+                                        "⏭️  [PHASE3-MN] Skipping {} (AI cooldown: {}, failures={})",
+                                        mn_ip,
+                                        advice.reasoning,
+                                        failures
+                                    );
+                                    continue;
+                                }
                             }
                         }
                         // Skip IPs that are currently banned — avoids full TCP+TLS
