@@ -499,8 +499,11 @@ impl NetworkClient {
                     }
                     continue;
                 }
-                // Higher IP dials lower IP — wait for inbound from peers that rank above us.
-                if !connection_manager.is_preferred_dialer(ip) {
+                // Higher IP dials lower IP — wait for inbound from peers that rank above us,
+                // unless we've been waiting long enough that they're likely unreachable.
+                if !connection_manager.is_preferred_dialer(ip)
+                    && !connection_manager.passive_wait_expired(ip)
+                {
                     tracing::debug!(
                         "⏳ [PHASE1] Waiting for inbound from {} (they are preferred dialer)",
                         ip
@@ -547,7 +550,9 @@ impl NetworkClient {
                             }
                         }
                     }
-                    if !connection_manager.is_preferred_dialer(ip) {
+                    if !connection_manager.is_preferred_dialer(ip)
+                        && !connection_manager.passive_wait_expired(ip)
+                    {
                         tracing::debug!(
                             "⏳ [PHASE2] Waiting for inbound from {} (they are preferred dialer)",
                             ip
@@ -688,10 +693,15 @@ impl NetworkClient {
                         //   (b) whitelisted peer → always bypass AI cooldown (operator trust)
                         let is_paid_tier = !matches!(mn_info.masternode.tier, MasternodeTier::Free);
                         // Higher-IP-dials-lower: only the preferred dialer initiates.
-                        // Exception: priority wake after a paid-tier disconnect — either
-                        // side may redial so a dead higher-IP peer cannot leave us isolated.
+                        // Exceptions: (a) priority wake after a paid-tier disconnect — either
+                        // side may redial so a dead higher-IP peer cannot leave us isolated;
+                        // (b) we've been waiting passively long enough that they're likely
+                        // unreachable (down/firewalled/NAT'd) and will never dial us.
                         let force_dial = priority_wake && is_paid_tier;
-                        if !force_dial && !connection_manager.is_preferred_dialer(mn_ip) {
+                        if !force_dial
+                            && !connection_manager.is_preferred_dialer(mn_ip)
+                            && !connection_manager.passive_wait_expired(mn_ip)
+                        {
                             tracing::debug!(
                                 "⏳ [PHASE3-MN] Waiting for inbound from {} (they dial us)",
                                 mn_ip
@@ -896,7 +906,9 @@ impl NetworkClient {
                         if connection_manager.is_reconnecting(ip) {
                             continue;
                         }
-                        if !connection_manager.is_preferred_dialer(ip) {
+                        if !connection_manager.is_preferred_dialer(ip)
+                            && !connection_manager.passive_wait_expired(ip)
+                        {
                             continue;
                         }
                         // Check AI advice before spawning. If a peer has failed enough

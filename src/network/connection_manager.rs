@@ -23,6 +23,13 @@ const MAX_REGULAR_PEER_CONNECTIONS: usize = 150; // Remaining slots for regular 
 const MAX_CONNECTIONS_PER_IP: usize = 3;
 const CONNECTION_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60); // 1 minute
 const MAX_NEW_CONNECTIONS_PER_WINDOW: usize = 25; // 25 new connections per minute
+                                                  // How long to passively wait for a higher-IP peer to dial us before we give
+                                                  // up on the IP-rank rule and dial them ourselves. Without this, a peer that
+                                                  // outranks us but is down/firewalled/NAT'd leaves us permanently isolated
+                                                  // from it — neither side ever initiates. Simultaneous-open resolution
+                                                  // (`accept_inbound`'s tiebreaker) already handles the case where both sides
+                                                  // end up dialing, so this fallback dial is safe.
+const PASSIVE_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PeerConnectionState {
@@ -69,6 +76,10 @@ pub struct ConnectionManager {
     /// pass — never on the first observation. This is what lets us say a
     /// connection is confirmed gone rather than guessed gone from one snapshot.
     zombie_since: Arc<DashMap<String, Instant>>,
+    /// Peers we've been passively waiting on inbound from (IP-rank rule says
+    /// they're the preferred dialer) — first-observed timestamp per peer_ip.
+    /// Cleared once a connection to that peer actually succeeds.
+    passive_wait_since: Arc<DashMap<String, Instant>>,
 }
 
 impl ConnectionManager {
@@ -84,6 +95,7 @@ impl ConnectionManager {
             recent_connections: Arc::new(DashMap::new()),
             last_cleanup: Arc::new(std::sync::Mutex::new(Instant::now())),
             zombie_since: Arc::new(DashMap::new()),
+            passive_wait_since: Arc::new(DashMap::new()),
         }
     }
 
@@ -157,6 +169,32 @@ impl ConnectionManager {
     /// higher-IP-dials-lower rule. Non-preferred side waits for inbound instead.
     pub fn is_preferred_dialer(&self, peer_ip: &str) -> bool {
         self.ip_ranks_above_peer(peer_ip)
+    }
+
+    /// True once we've been passively waiting on inbound from `peer_ip` for
+    /// longer than `PASSIVE_WAIT_TIMEOUT` with no connection ever arriving.
+    /// Callers should dial anyway when this returns true, overriding the
+    /// IP-rank rule so a dead/unreachable higher-IP peer can't leave us
+    /// permanently isolated from it. Starts the clock on first call.
+    pub fn passive_wait_expired(&self, peer_ip: &str) -> bool {
+        self.passive_wait_expired_after(peer_ip, PASSIVE_WAIT_TIMEOUT)
+    }
+
+    fn passive_wait_expired_after(&self, peer_ip: &str, timeout: Duration) -> bool {
+        match self.passive_wait_since.get(peer_ip) {
+            Some(since) => since.elapsed() >= timeout,
+            None => {
+                self.passive_wait_since
+                    .insert(peer_ip.to_string(), Instant::now());
+                false
+            }
+        }
+    }
+
+    /// Clear passive-wait tracking for `peer_ip`, e.g. once a connection to it
+    /// actually succeeds, so a later disconnect restarts the wait from zero.
+    fn clear_passive_wait(&self, peer_ip: &str) {
+        self.passive_wait_since.remove(peer_ip);
     }
 
     fn recalculate_counts(&self) -> (usize, usize, usize) {
@@ -492,6 +530,7 @@ impl ConnectionManager {
             return None;
         }
 
+        self.clear_passive_wait(peer_ip);
         let generation = self.alloc_generation();
         let new_info = ConnectionInfo {
             state: PeerConnectionState::Connected,
@@ -723,6 +762,7 @@ impl ConnectionManager {
     pub fn mark_connected(&self, peer_ip: &str) -> Option<u64> {
         if let Some(mut entry) = self.connections.get_mut(peer_ip) {
             if entry.state == PeerConnectionState::Connecting {
+                self.clear_passive_wait(peer_ip);
                 let generation = self.alloc_generation();
                 entry.state = PeerConnectionState::Connected;
                 entry.generation = generation;
@@ -1231,6 +1271,37 @@ mod tests {
         manager.set_local_ip("0.0.0.0".to_string());
         assert!(manager.is_preferred_dialer("10.0.0.2"));
         assert!(manager.is_preferred_dialer("255.255.255.255"));
+    }
+
+    #[test]
+    fn passive_wait_expires_and_forces_dial() {
+        // Lower-IP side must eventually give up waiting for inbound from an
+        // unreachable higher-IP peer and dial it anyway.
+        let manager = ConnectionManager::new();
+        manager.set_local_ip("10.0.0.2".to_string());
+        assert!(!manager.is_preferred_dialer("10.0.0.9"));
+
+        // First observation just starts the clock — not expired yet.
+        assert!(!manager.passive_wait_expired_after("10.0.0.9", Duration::from_millis(20)));
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(manager.passive_wait_expired_after("10.0.0.9", Duration::from_millis(20)));
+    }
+
+    #[test]
+    fn passive_wait_clears_on_successful_connection() {
+        // Once a connection actually succeeds, the wait clock resets so a
+        // later disconnect doesn't inherit stale elapsed time.
+        let manager = ConnectionManager::new();
+        manager.set_local_ip("10.0.0.2".to_string());
+        assert!(!manager.passive_wait_expired_after("10.0.0.9", Duration::from_millis(10)));
+        std::thread::sleep(Duration::from_millis(20));
+
+        // Inbound arrives from the higher-IP peer before the timeout check runs again.
+        assert!(manager.accept_inbound("10.0.0.9", false).is_some());
+        assert!(!manager.passive_wait_since.contains_key("10.0.0.9"));
+
+        // Freshly re-seeded clock must not be considered expired immediately.
+        assert!(!manager.passive_wait_expired_after("10.0.0.9", Duration::from_millis(10)));
     }
 
     #[test]
