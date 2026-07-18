@@ -136,3 +136,6 @@ if systemctl is-enabled --quiet mn-watchdog 2>/dev/null; then
     echo "==> Restarting mn-watchdog..."
     systemctl restart mn-watchdog 2>/dev/null || systemctl start mn-watchdog
 fi
+
+echo "==> Cleaning build artifacts..."
+cargo clean
