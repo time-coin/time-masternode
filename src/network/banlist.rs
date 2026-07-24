@@ -263,6 +263,12 @@ impl IPBanlist {
         }
     }
 
+    fn remove_genesis(&self, ip: IpAddr) {
+        if let Some(tree) = &self.db_genesis {
+            let _ = tree.remove(ip.to_string().as_bytes());
+        }
+    }
+
     fn remove_subnet(&self, cidr: &str) {
         if let Some(tree) = &self.db_subnet {
             let _ = tree.remove(cidr.as_bytes());
@@ -847,15 +853,27 @@ impl IPBanlist {
         (permanent, temporary, subnets, violations)
     }
 
-    /// Remove an IP from permanent and temporary bans, and clear its violations.
-    /// Returns true if the IP was actually banned (and is now cleared).
+    /// Remove an IP from every ban category — permanent, temporary, frame-bomb,
+    /// and wrong-genesis — and clear its violations. Returns true if the IP was
+    /// actually banned under any of those (and is now cleared).
+    ///
+    /// This is an explicit, operator-initiated override: unlike the automatic
+    /// whitelist exemption in `is_banned()` (which frame-bomb and wrong-genesis
+    /// bans deliberately bypass), a human explicitly calling `unban` on a specific
+    /// IP is a considered decision that should actually take effect — including
+    /// for whitelisted (operator-trusted) nodes that got caught by one of those
+    /// categories, e.g. a false-positive genesis mismatch from a protocol bug
+    /// rather than a genuinely incompatible chain.
     pub fn unban(&mut self, ip: IpAddr) -> bool {
-        let was_banned =
-            self.permanent_banlist.remove(&ip).is_some() | self.temp_banlist.remove(&ip).is_some();
+        let was_banned = self.permanent_banlist.remove(&ip).is_some()
+            | self.temp_banlist.remove(&ip).is_some()
+            | self.frame_bomb_bans.remove(&ip).is_some()
+            | self.wrong_genesis_banlist.remove(&ip).is_some();
         self.violations.remove(&ip);
         self.remove_permanent(ip);
         self.remove_temp(ip);
         self.remove_violation(ip);
+        self.remove_genesis(ip);
         was_banned
     }
 
