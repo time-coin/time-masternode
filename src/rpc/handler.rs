@@ -4037,6 +4037,7 @@ impl RpcHandler {
                         "daemon_started_at": mn.daemon_started_at,
                         "collateral_locked": collateral_locked,
                         "collateral_outpoint": collateral_outpoint,
+                        "pubkey": hex::encode(mn.masternode.public_key.as_bytes()),
                     })
                 },
             )
