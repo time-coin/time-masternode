@@ -211,7 +211,7 @@ pub struct PeerConnection {
     direction: ConnectionDirection,
 
     /// Channel receiver for incoming parsed messages (from I/O bridge task)
-    msg_reader: tokio::sync::mpsc::UnboundedReceiver<Result<Option<NetworkMessage>, String>>,
+    msg_reader: tokio::sync::mpsc::Receiver<Result<Option<NetworkMessage>, String>>,
 
     /// Channel sender for outgoing serialized frame bytes (to I/O bridge task)
     writer_tx: crate::network::peer_connection_registry::PeerWriterTx,
@@ -368,6 +368,11 @@ impl MessageLoopConfig {
     }
 }
 
+/// Max decoded messages buffered between a peer's socket reader task and its
+/// message loop. Bounded so a peer can't outrun processing and grow memory
+/// without limit; when full the reader waits, applying TCP backpressure.
+pub const PEER_READ_QUEUE_MSGS: usize = 128;
+
 /// Map a `NetworkMessage` to the rate-limit bucket name used in both the inbound
 /// `check_rate_limit!` macro (server.rs) and the outbound path (handle_message_unified).
 fn rate_limit_key(msg: &NetworkMessage) -> &'static str {
@@ -455,7 +460,9 @@ impl PeerConnection {
 
         // Create channel-based I/O to avoid tokio::io::split() on TLS streams
         let (msg_read_tx, msg_read_rx) =
-            tokio::sync::mpsc::unbounded_channel::<Result<Option<NetworkMessage>, String>>();
+            tokio::sync::mpsc::channel::<Result<Option<NetworkMessage>, String>>(
+                crate::network::peer_connection::PEER_READ_QUEUE_MSGS,
+            );
         let (write_tx, mut write_rx) =
             crate::network::peer_connection_registry::peer_writer_channel();
 
@@ -488,7 +495,7 @@ impl PeerConnection {
                     let result = crate::network::wire::read_message(&mut tls_read).await;
                     let is_eof = matches!(&result, Ok(None));
                     let is_err = result.is_err();
-                    if msg_read_tx.send(result).is_err() {
+                    if msg_read_tx.send(result).await.is_err() {
                         break;
                     }
                     if is_eof || is_err {
@@ -522,7 +529,7 @@ impl PeerConnection {
                     let result = crate::network::wire::read_message(&mut reader).await;
                     let is_eof = matches!(&result, Ok(None));
                     let is_err = result.is_err();
-                    if msg_read_tx.send(result).is_err() {
+                    if msg_read_tx.send(result).await.is_err() {
                         break;
                     }
                     if is_eof || is_err {
@@ -582,7 +589,7 @@ impl PeerConnection {
         is_whitelisted: bool,
         network_type: crate::network_type::NetworkType,
         writer_tx: crate::network::peer_connection_registry::PeerWriterTx,
-        msg_reader: tokio::sync::mpsc::UnboundedReceiver<Result<Option<NetworkMessage>, String>>,
+        msg_reader: tokio::sync::mpsc::Receiver<Result<Option<NetworkMessage>, String>>,
     ) -> Result<Self, String> {
         Ok(Self {
             peer_ip,

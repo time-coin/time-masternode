@@ -49,6 +49,7 @@ pub struct RpcError {
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -108,8 +109,10 @@ impl RpcAuthenticator {
             None => return false,
         };
 
-        // Check plaintext credentials first
-        if !self.plaintext_token.is_empty() && token == self.plaintext_token {
+        // Check plaintext credentials first (constant-time to avoid a timing oracle)
+        if !self.plaintext_token.is_empty()
+            && bool::from(token.as_bytes().ct_eq(self.plaintext_token.as_bytes()))
+        {
             return true;
         }
 
@@ -134,7 +137,7 @@ impl RpcAuthenticator {
                 if let Ok(mut mac) = HmacSha256::new_from_slice(entry.salt.as_bytes()) {
                     mac.update(password.as_bytes());
                     let result = hex::encode(mac.finalize().into_bytes());
-                    if result == entry.hash {
+                    if bool::from(result.as_bytes().ct_eq(entry.hash.as_bytes())) {
                         return true;
                     }
                 }

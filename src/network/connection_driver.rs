@@ -233,11 +233,25 @@ impl ConnectionDriver {
         resources: InboundResources,
     ) -> Result<(), std::io::Error> {
         // Extract IP from address
-        let ip: IpAddr = peer_addr
-            .split(':')
-            .next()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
+        // Parse as a full SocketAddr so IPv6 ("[2001:db8::1]:24000") works —
+        // splitting on ':' yielded "[2001", which fell back to 127.0.0.1 and made
+        // every IPv6 peer share one slot and accrue bans against loopback.
+        // IPv4-mapped IPv6 is normalised to plain IPv4.
+        let ip: IpAddr = match peer_addr
+            .parse::<std::net::SocketAddr>()
+            .map(|a| a.ip())
+            .or_else(|_| peer_addr.parse::<IpAddr>())
+        {
+            Ok(IpAddr::V6(v6)) => v6
+                .to_ipv4_mapped()
+                .map(IpAddr::V4)
+                .unwrap_or(IpAddr::V6(v6)),
+            Ok(v4) => v4,
+            Err(_) => {
+                tracing::warn!("🚫 Dropping inbound with unparseable address {}", peer_addr);
+                return Ok(());
+            }
+        };
 
         let ip_str = ip.to_string();
 
@@ -283,7 +297,9 @@ impl ConnectionDriver {
         // the handshake completes.
         // For non-TLS: `TcpStream::into_split()` is already correct (true full-duplex).
         let (msg_read_tx, mut msg_read_rx) =
-            tokio::sync::mpsc::unbounded_channel::<Result<Option<NetworkMessage>, String>>();
+            tokio::sync::mpsc::channel::<Result<Option<NetworkMessage>, String>>(
+                crate::network::peer_connection::PEER_READ_QUEUE_MSGS,
+            );
         let (writer_tx, mut write_rx) =
             crate::network::peer_connection_registry::peer_writer_channel();
 
@@ -386,15 +402,17 @@ impl ConnectionDriver {
                             } else {
                                 gate_drop_streak += 1;
                                 if !gate_is_whitelisted && gate_drop_streak > GATE_HARD_DROPS {
-                                    let _ = msg_read_tx.send(Err(
-                                        "Message flood detected: pre-channel gate triggered"
-                                            .to_string(),
-                                    ));
+                                    let _ = msg_read_tx
+                                        .send(Err(
+                                            "Message flood detected: pre-channel gate triggered"
+                                                .to_string(),
+                                        ))
+                                        .await;
                                     break;
                                 }
                                 continue; // soft drop
                             }
-                            if msg_read_tx.send(result).is_err() {
+                            if msg_read_tx.send(result).await.is_err() {
                                 break; // receiver dropped
                             }
                             if is_eof || is_err {
@@ -507,12 +525,13 @@ impl ConnectionDriver {
                         if !gate_is_whitelisted && gate_drop_streak > GATE_HARD_DROPS {
                             let _ = msg_read_tx
                                 .send(Err("Message flood detected: pre-channel gate triggered"
-                                    .to_string()));
+                                    .to_string()))
+                                .await;
                             break;
                         }
                         continue; // soft drop
                     }
-                    if msg_read_tx.send(result).is_err() {
+                    if msg_read_tx.send(result).await.is_err() {
                         break;
                     }
                     if is_eof || is_err {

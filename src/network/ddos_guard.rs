@@ -49,17 +49,11 @@ impl DDoSGuard {
     ///
     /// Updates the sliding window as a side effect.  Returns `true` if the
     /// limit is exceeded (the caller should reject the connection).
-    /// IPv6 addresses always return `false` — no /24 equivalent is defined.
+    /// IPv4 is bucketed by /24; IPv6 by /48 (a single site/customer allocation,
+    /// so one attacker can't rotate through 2^80 addresses to dodge the limit).
+    /// IPv4-mapped IPv6 is treated as IPv4.
     pub fn check_and_record_subnet_rate(&self, ip: IpAddr) -> bool {
-        let ip_str = ip.to_string();
-        if ip_str.contains(':') {
-            return false;
-        }
-        let parts: Vec<&str> = ip_str.splitn(4, '.').collect();
-        if parts.len() < 3 {
-            return false;
-        }
-        let subnet = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
+        let subnet = subnet_key(ip);
         let now = Instant::now();
         let mut entry = self.subnet_rates.entry(subnet).or_default();
         while entry
@@ -81,6 +75,24 @@ impl DDoSGuard {
             v.retain(|t| now.duration_since(*t).as_secs() < 60);
             !v.is_empty()
         });
+    }
+}
+
+/// Rate-limit bucket key: "A.B.C" for IPv4 (/24), "v6:xxxx:xxxx:xxxx" for IPv6 (/48).
+fn subnet_key(ip: IpAddr) -> String {
+    let ip = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+        v4 => v4,
+    };
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            format!("{}.{}.{}", o[0], o[1], o[2])
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            format!("v6:{:x}:{:x}:{:x}", s[0], s[1], s[2])
+        }
     }
 }
 

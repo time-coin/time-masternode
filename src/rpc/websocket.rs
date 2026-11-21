@@ -32,6 +32,8 @@ const MAX_WS_CONNECTIONS: usize = 5_000;
 const MAX_WS_CONNECTIONS_PER_IP: usize = 20;
 /// Max distinct addresses one connection may subscribe to (matches getbalances cap).
 const MAX_WS_SUBSCRIPTIONS_PER_CONN: usize = 1_000;
+/// Per-connection queued notification cap.
+const WS_NOTIFY_QUEUE: usize = 1_024;
 /// Time allowed for TLS + WebSocket upgrade handshake.
 const WS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Max inbound WebSocket message size (subscribe_batch of 1000 addresses is ~50 KB).
@@ -134,7 +136,7 @@ struct ServerNotification {
 
 /// Manages WebSocket subscriptions: address → list of notification senders
 pub struct SubscriptionManager {
-    subscriptions: DashMap<String, Vec<mpsc::UnboundedSender<ServerNotification>>>,
+    subscriptions: DashMap<String, Vec<mpsc::Sender<ServerNotification>>>,
 }
 
 impl Default for SubscriptionManager {
@@ -151,7 +153,7 @@ impl SubscriptionManager {
     }
 
     /// Subscribe a client to an address
-    fn subscribe(&self, address: &str, sender: mpsc::UnboundedSender<ServerNotification>) {
+    fn subscribe(&self, address: &str, sender: mpsc::Sender<ServerNotification>) {
         self.subscriptions
             .entry(address.to_string())
             .or_default()
@@ -164,7 +166,7 @@ impl SubscriptionManager {
     }
 
     /// Unsubscribe `sender` from an address (also prunes closed senders).
-    fn unsubscribe(&self, address: &str, sender: &mpsc::UnboundedSender<ServerNotification>) {
+    fn unsubscribe(&self, address: &str, sender: &mpsc::Sender<ServerNotification>) {
         if let Some(mut senders) = self.subscriptions.get_mut(address) {
             senders.retain(|s| !s.is_closed() && !s.same_channel(sender));
             if senders.is_empty() {
@@ -292,7 +294,7 @@ impl SubscriptionManager {
                 };
 
                 for sender in senders.iter() {
-                    let _ = sender.send(notification.clone());
+                    let _ = sender.try_send(notification.clone());
                 }
             }
         }
@@ -307,7 +309,7 @@ impl SubscriptionManager {
                 data: Some(data),
             };
             for sender in senders.iter() {
-                let _ = sender.send(notification.clone());
+                let _ = sender.try_send(notification.clone());
             }
         }
     }
@@ -328,7 +330,7 @@ impl SubscriptionManager {
             for sender in entry.value().iter() {
                 let ptr = sender as *const _ as usize;
                 if notified.insert(ptr) {
-                    let _ = sender.send(notification.clone());
+                    let _ = sender.try_send(notification.clone());
                 }
             }
         }
@@ -577,7 +579,11 @@ where
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
     // Channel for sending notifications to this client
-    let (notif_tx, mut notif_rx) = mpsc::unbounded_channel::<ServerNotification>();
+    // Bounded: a client that stops reading can't grow server memory. If the
+    // queue fills, notifications are being dropped, so we disconnect the client
+    // (below) and let the wallet reconnect and resync rather than silently
+    // missing payment events.
+    let (notif_tx, mut notif_rx) = mpsc::channel::<ServerNotification>(WS_NOTIFY_QUEUE);
     let mut subscribed_addresses: std::collections::HashSet<String> =
         std::collections::HashSet::new();
 
@@ -672,6 +678,12 @@ where
 
             // Outgoing notification to client
             Some(notification) = notif_rx.recv() => {
+                // capacity()==0 here means the queue was full a moment ago, i.e.
+                // try_send has been dropping notifications for this client.
+                if notif_tx.capacity() == 0 {
+                    tracing::warn!("📡 WebSocket client too slow (notification queue full) — disconnecting");
+                    break;
+                }
                 let json = serde_json::to_string(&notification)?;
                 if ws_sender.send(Message::Text(json.into())).await.is_err() {
                     break;
