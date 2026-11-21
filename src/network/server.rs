@@ -564,7 +564,17 @@ impl NetworkServer {
         // Note: Deduplication filter handles its own cleanup with automatic rotation
 
         loop {
-            let (stream, addr) = self.listener.accept().await?;
+            // A transient accept() error (e.g. EMFILE under fd exhaustion) must not
+            // terminate the P2P listener — that would silently cut all inbound peers
+            // until restart. Back off briefly and keep accepting.
+            let (stream, addr) = match self.listener.accept().await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("P2P accept error (retrying): {}", e);
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+            };
             let addr_str = addr.to_string();
 
             // Configure TCP socket options for persistent connections

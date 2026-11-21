@@ -28,12 +28,37 @@ use tokio_tungstenite::tungstenite::Message;
 /// Maximum concurrent WebSocket connections. When reached, new connections
 /// receive an HTTP 503 with a JSON body so the wallet can failover to another node.
 const MAX_WS_CONNECTIONS: usize = 5_000;
+/// Max concurrent WebSocket connections from one IP.
+const MAX_WS_CONNECTIONS_PER_IP: usize = 20;
+/// Max distinct addresses one connection may subscribe to (matches getbalances cap).
+const MAX_WS_SUBSCRIPTIONS_PER_CONN: usize = 1_000;
+/// Time allowed for TLS + WebSocket upgrade handshake.
+const WS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Max inbound WebSocket message size (subscribe_batch of 1000 addresses is ~50 KB).
+const WS_MAX_MESSAGE_SIZE: usize = 256 * 1024;
 
 /// RAII guard that decrements the connection counter when dropped.
 struct ConnGuard(Arc<AtomicUsize>);
 impl Drop for ConnGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// RAII guard for the per-IP connection counter.
+struct IpConnGuard {
+    ip: std::net::IpAddr,
+    map: Arc<dashmap::DashMap<std::net::IpAddr, usize>>,
+}
+impl Drop for IpConnGuard {
+    fn drop(&mut self) {
+        if let dashmap::mapref::entry::Entry::Occupied(mut e) = self.map.entry(self.ip) {
+            let v = e.get_mut();
+            *v = v.saturating_sub(1);
+            if *v == 0 {
+                e.remove();
+            }
+        }
     }
 }
 
@@ -138,10 +163,10 @@ impl SubscriptionManager {
         );
     }
 
-    /// Unsubscribe a client from an address (by removing closed senders)
-    fn unsubscribe(&self, address: &str) {
+    /// Unsubscribe `sender` from an address (also prunes closed senders).
+    fn unsubscribe(&self, address: &str, sender: &mpsc::UnboundedSender<ServerNotification>) {
         if let Some(mut senders) = self.subscriptions.get_mut(address) {
-            senders.retain(|s| !s.is_closed());
+            senders.retain(|s| !s.is_closed() && !s.same_channel(sender));
             if senders.is_empty() {
                 drop(senders);
                 self.subscriptions.remove(address);
@@ -420,6 +445,8 @@ pub async fn start_ws_server(
         }
     });
 
+    let per_ip: Arc<dashmap::DashMap<std::net::IpAddr, usize>> = Arc::new(dashmap::DashMap::new());
+
     // Accept connections
     loop {
         tokio::select! {
@@ -427,29 +454,53 @@ pub async fn start_ws_server(
                 match result {
                     Ok((stream, addr)) => {
                         let current = conn_count.load(Ordering::Relaxed);
+                        // Hard ceiling on in-flight sockets (including ones still in
+                        // handshake or being sent a 503) so a flood can't exhaust fds.
+                        if current >= MAX_WS_CONNECTIONS * 2 {
+                            drop(stream);
+                            continue;
+                        }
+                        let ip = addr.ip();
+                        {
+                            let mut n = per_ip.entry(ip).or_insert(0);
+                            if *n >= MAX_WS_CONNECTIONS_PER_IP {
+                                drop(n);
+                                drop(stream);
+                                continue;
+                            }
+                            *n += 1;
+                        }
+                        let ip_guard = IpConnGuard { ip, map: per_ip.clone() };
                         let mgr = sub_manager.clone();
                         let conn_shutdown = shutdown.clone();
                         let cc = conn_count.clone();
                         if let Some(ref acceptor) = tls_acceptor {
                             let acceptor = acceptor.clone();
                             tokio::spawn(async move {
-                                match acceptor.accept(stream).await {
-                                    Ok(tls_stream) => {
+                                let _ip_guard = ip_guard;
+                                match tokio::time::timeout(WS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+                                    Ok(Ok(tls_stream)) => {
                                         dispatch_connection(tls_stream, addr, current, mgr, conn_shutdown, cc).await;
                                     }
-                                    Err(e) => {
+                                    Ok(Err(e)) => {
                                         tracing::debug!("TLS handshake failed from {}: {}", addr, e);
+                                    }
+                                    Err(_) => {
+                                        tracing::debug!("TLS handshake timeout from {}", addr);
                                     }
                                 }
                             });
                         } else {
                             tokio::spawn(async move {
+                                let _ip_guard = ip_guard;
                                 dispatch_connection(stream, addr, current, mgr, conn_shutdown, cc).await;
                             });
                         }
                     }
                     Err(e) => {
+                        // Back off so fd exhaustion (EMFILE) doesn't become a hot loop.
                         tracing::error!("WebSocket accept error: {}", e);
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                     }
                 }
             }
@@ -488,7 +539,7 @@ async fn dispatch_connection<S>(
             body.len(), body
         );
         let mut s = stream;
-        let _ = s.write_all(response.as_bytes()).await;
+        let _ = tokio::time::timeout(WS_HANDSHAKE_TIMEOUT, s.write_all(response.as_bytes())).await;
     } else {
         conn_count.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(
@@ -514,12 +565,21 @@ where
 {
     // Auto-decrement the connection counter when this function exits for any reason
     let _guard = ConnGuard(conn_count);
-    let ws_stream = tokio_tungstenite::accept_async(stream).await?;
+    let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(WS_MAX_MESSAGE_SIZE))
+        .max_frame_size(Some(WS_MAX_MESSAGE_SIZE));
+    let ws_stream = tokio::time::timeout(
+        WS_HANDSHAKE_TIMEOUT,
+        tokio_tungstenite::accept_async_with_config(stream, Some(ws_config)),
+    )
+    .await
+    .map_err(|_| "WebSocket upgrade timeout")??;
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
     // Channel for sending notifications to this client
     let (notif_tx, mut notif_rx) = mpsc::unbounded_channel::<ServerNotification>();
-    let mut subscribed_addresses: Vec<String> = Vec::new();
+    let mut subscribed_addresses: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     // Heartbeat: send ping every 30s
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -534,8 +594,13 @@ where
                             match client_msg.method.as_str() {
                                 "subscribe" => {
                                     if let Some(addr) = client_msg.params.get("address").and_then(|v| v.as_str()) {
-                                        sub_manager.subscribe(addr, notif_tx.clone());
-                                        subscribed_addresses.push(addr.to_string());
+                                        if !subscribed_addresses.contains(addr) {
+                                            if subscribed_addresses.len() >= MAX_WS_SUBSCRIPTIONS_PER_CONN {
+                                                continue;
+                                            }
+                                            sub_manager.subscribe(addr, notif_tx.clone());
+                                            subscribed_addresses.insert(addr.to_string());
+                                        }
                                         let resp = ServerNotification {
                                             msg_type: "subscribed".to_string(),
                                             data: Some(serde_json::json!({"address": addr})),
@@ -549,8 +614,13 @@ where
                                         let mut subscribed: Vec<&str> = Vec::new();
                                         for val in addrs {
                                             if let Some(addr) = val.as_str() {
-                                                sub_manager.subscribe(addr, notif_tx.clone());
-                                                subscribed_addresses.push(addr.to_string());
+                                                if !subscribed_addresses.contains(addr) {
+                                                    if subscribed_addresses.len() >= MAX_WS_SUBSCRIPTIONS_PER_CONN {
+                                                        break;
+                                                    }
+                                                    sub_manager.subscribe(addr, notif_tx.clone());
+                                                    subscribed_addresses.insert(addr.to_string());
+                                                }
                                                 subscribed.push(addr);
                                             }
                                         }
@@ -564,8 +634,8 @@ where
                                 }
                                 "unsubscribe" => {
                                     if let Some(addr) = client_msg.params.get("address").and_then(|v| v.as_str()) {
-                                        sub_manager.unsubscribe(addr);
-                                        subscribed_addresses.retain(|a| a != addr);
+                                        sub_manager.unsubscribe(addr, &notif_tx);
+                                        subscribed_addresses.remove(addr);
                                         let resp = ServerNotification {
                                             msg_type: "unsubscribed".to_string(),
                                             data: Some(serde_json::json!({"address": addr})),
@@ -622,7 +692,7 @@ where
 
     // Clean up subscriptions for this connection
     for addr in &subscribed_addresses {
-        sub_manager.unsubscribe(addr);
+        sub_manager.unsubscribe(addr, &notif_tx);
     }
 
     Ok(())

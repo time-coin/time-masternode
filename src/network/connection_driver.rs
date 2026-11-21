@@ -288,7 +288,26 @@ impl ConnectionDriver {
         let writer_tx: crate::network::peer_connection_registry::PeerWriterTx = write_tx;
 
         if let Some(tls) = self.tls_config.clone() {
-            match tls.accept_server(stream).await {
+            // Bound the TLS handshake: the CM slot is already reserved, and the 10s
+            // post-TLS handshake timer below doesn't start until TLS completes, so
+            // an idle TCP connection (no ClientHello) would otherwise hold the slot
+            // indefinitely (TCP keepalive keeps it alive).
+            const TLS_ACCEPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+            let accepted =
+                match tokio::time::timeout(TLS_ACCEPT_TIMEOUT, tls.accept_server(stream)).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        tracing::debug!("⏱️ TLS handshake timeout for inbound {}", peer_addr);
+                        if let Some(ref ai) = self.ai_system {
+                            ai.attack_detector.record_tls_failure(&ip_str);
+                        }
+                        let _ = self
+                            .connection_manager
+                            .mark_inbound_disconnected(&ip_str, generation);
+                        return Ok(());
+                    }
+                };
+            match accepted {
                 Ok(tls_stream) => {
                     // Enforce SNI = "timecoin.local": every legitimate TIME node sets this
                     // exact SNI when opening an outbound TLS connection (peer_connection.rs).
