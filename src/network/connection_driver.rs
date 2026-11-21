@@ -284,8 +284,8 @@ impl ConnectionDriver {
         // For non-TLS: `TcpStream::into_split()` is already correct (true full-duplex).
         let (msg_read_tx, mut msg_read_rx) =
             tokio::sync::mpsc::unbounded_channel::<Result<Option<NetworkMessage>, String>>();
-        let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        let writer_tx: crate::network::peer_connection_registry::PeerWriterTx = write_tx;
+        let (writer_tx, mut write_rx) =
+            crate::network::peer_connection_registry::peer_writer_channel();
 
         if let Some(tls) = self.tls_config.clone() {
             // Bound the TLS handshake: the CM slot is already reserved, and the 10s

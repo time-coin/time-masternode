@@ -374,7 +374,11 @@ fn rate_limit_key(msg: &NetworkMessage) -> &'static str {
     match msg {
         NetworkMessage::TransactionBroadcast(_) => "tx",
         NetworkMessage::TransactionFinalized { .. } => "tx_finalized",
-        NetworkMessage::GetBlocks(..) => "get_blocks",
+        // GetBlockRange returns up to MAX_BLOCKS_PER_RESPONSE blocks just like
+        // GetBlocks — it must share the get_blocks budget, not the 100/s "general".
+        NetworkMessage::GetBlocks(..) | NetworkMessage::GetBlockRange { .. } => "get_blocks",
+        NetworkMessage::GetUTXOSet => "utxo_set",
+        NetworkMessage::GetUTXOStateHash | NetworkMessage::GetLockedCollaterals => "utxo_scan",
         NetworkMessage::GetPeers => "get_peers",
         NetworkMessage::GetMasternodes => "get_masternodes",
         NetworkMessage::MasternodesResponse(_) => "masternodes_response",
@@ -452,7 +456,8 @@ impl PeerConnection {
         // Create channel-based I/O to avoid tokio::io::split() on TLS streams
         let (msg_read_tx, msg_read_rx) =
             tokio::sync::mpsc::unbounded_channel::<Result<Option<NetworkMessage>, String>>();
-        let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let (write_tx, mut write_rx) =
+            crate::network::peer_connection_registry::peer_writer_channel();
 
         if let Some(tls) = tls_config {
             debug!("🔒 [OUTBOUND] TLS handshake with {}", addr);

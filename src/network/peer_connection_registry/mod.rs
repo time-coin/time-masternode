@@ -11,7 +11,7 @@ mod resources;
 mod types;
 mod writers;
 
-pub use types::{PeerWriterTx, SharedPeerWriter};
+pub use types::{peer_writer_channel, PeerWriterRx, PeerWriterTx, SharedPeerWriter};
 
 /// Chain tip reported by a peer: (height, block_hash).
 pub type ChainTip = types::ChainTip;

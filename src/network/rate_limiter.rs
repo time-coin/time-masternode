@@ -53,7 +53,12 @@ impl RateLimiter {
                     "masternodes_response".to_string(),
                     (Duration::from_secs(60), 12),
                 ), // 12 responses/min (covers rotating samples + handshake discovery)
-                ("ping".to_string(), (Duration::from_secs(10), 6)),            // 6 pings/10sec
+                // Full UTXO-set transfer: loads, serialises and queues the entire set
+                // per request. Legit use is a one-off reconciliation, so keep it tight.
+                ("utxo_set".to_string(), (Duration::from_secs(60), 3)), // 3 GetUTXOSet/min
+                // Full-scan queries (UTXO state hash = scan + sort; locked collaterals).
+                ("utxo_scan".to_string(), (Duration::from_secs(60), 20)), // 20/min
+                ("ping".to_string(), (Duration::from_secs(10), 6)),       // 6 pings/10sec
                 ("pong".to_string(), (Duration::from_secs(10), 6)), // 6 pongs/10sec (replies to our pings)
                 ("general".to_string(), (Duration::from_secs(1), 100)), // 100 general msgs/sec
                 // Bulk sync responses (BlocksResponse, UTXO chunks) arrive in bursts by design.
