@@ -248,12 +248,23 @@ pub async fn read_message<R: AsyncRead + Unpin>(
         ));
     }
 
-    // Read payload
-    let mut payload = vec![0u8; len as usize];
-    reader
-        .read_exact(&mut payload)
+    // Read payload. Grow the buffer as bytes actually arrive instead of
+    // allocating the declared length up front — otherwise any peer can pin
+    // MAX_FRAME_SIZE (8 MB) per connection by sending a 4-byte header and
+    // trickling the body.
+    const INITIAL_PAYLOAD_CAPACITY: usize = 64 * 1024;
+    let mut payload = Vec::with_capacity((len as usize).min(INITIAL_PAYLOAD_CAPACITY));
+    let read = (&mut *reader)
+        .take(len as u64)
+        .read_to_end(&mut payload)
         .await
         .map_err(|e| format!("Failed to read frame payload: {}", e))?;
+    if read != len as usize {
+        return Err(format!(
+            "Failed to read frame payload: early eof ({} of {} bytes)",
+            read, len
+        ));
+    }
 
     let message: NetworkMessage = match bincode::deserialize(&payload) {
         Ok(msg) => msg,

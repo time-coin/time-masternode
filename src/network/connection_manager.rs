@@ -22,13 +22,19 @@ const RESERVED_MASTERNODE_SLOTS: usize = 100; // Reserve slots for whitelisted m
 const MAX_REGULAR_PEER_CONNECTIONS: usize = 150; // Remaining slots for regular peers
 const MAX_CONNECTIONS_PER_IP: usize = 3;
 const CONNECTION_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60); // 1 minute
-const MAX_NEW_CONNECTIONS_PER_WINDOW: usize = 25; // 25 new connections per minute
-                                                  // How long to passively wait for a higher-IP peer to dial us before we give
-                                                  // up on the IP-rank rule and dial them ourselves. Without this, a peer that
-                                                  // outranks us but is down/firewalled/NAT'd leaves us permanently isolated
-                                                  // from it — neither side ever initiates. Simultaneous-open resolution
-                                                  // (`accept_inbound`'s tiebreaker) already handles the case where both sides
-                                                  // end up dialing, so this fallback dial is safe.
+                                                                        // Per-IP cap on new connections per window. This used to be a single global cap
+                                                                        // of 25/min shared by every IP, which let an attacker reconnecting from a couple
+                                                                        // of /24s lock out every new non-whitelisted peer. Now each IP has its own budget
+                                                                        // and the global cap is only a high backstop (the per-/24 limit in ddos_guard.rs
+                                                                        // sits in between).
+const MAX_NEW_CONNECTIONS_PER_IP_PER_WINDOW: usize = 10;
+const MAX_NEW_CONNECTIONS_PER_WINDOW: usize = 300;
+// How long to passively wait for a higher-IP peer to dial us before we give
+// up on the IP-rank rule and dial them ourselves. Without this, a peer that
+// outranks us but is down/firewalled/NAT'd leaves us permanently isolated
+// from it — neither side ever initiates. Simultaneous-open resolution
+// (`accept_inbound`'s tiebreaker) already handles the case where both sides
+// end up dialing, so this fallback dial is safe.
 const PASSIVE_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,7 +74,7 @@ pub struct ConnectionManager {
     next_generation: AtomicU64,
     local_ip: OnceLock<String>,
     // Phase 2.1: Connection rate limiting
-    recent_connections: Arc<DashMap<Instant, String>>, // timestamp -> peer_ip
+    recent_connections: Arc<DashMap<String, std::collections::VecDeque<Instant>>>, // peer_ip -> connect times
     last_cleanup: Arc<std::sync::Mutex<Instant>>,
     /// Peers first observed as "Connected with no live writer" by
     /// `heal_connected_without_writers`, and when. A peer is only actually
@@ -280,7 +286,19 @@ impl ConnectionManager {
 
         // Phase 2.1: Check connection rate limit
         self.cleanup_old_connections();
-        let recent_count = self.recent_connections.len();
+        let cutoff = Instant::now() - CONNECTION_RATE_LIMIT_WINDOW;
+        let ip_recent = self
+            .recent_connections
+            .get(peer_ip)
+            .map(|q| q.iter().filter(|t| **t > cutoff).count())
+            .unwrap_or(0);
+        if ip_recent >= MAX_NEW_CONNECTIONS_PER_IP_PER_WINDOW {
+            return Err(format!(
+                "Connection rate limit exceeded for {}: {} connections in last minute",
+                peer_ip, ip_recent
+            ));
+        }
+        let recent_count: usize = self.recent_connections.iter().map(|e| e.len()).sum();
         if recent_count >= MAX_NEW_CONNECTIONS_PER_WINDOW {
             return Err(format!(
                 "Connection rate limit exceeded: {} connections in last minute",
@@ -360,8 +378,12 @@ impl ConnectionManager {
         }
 
         let cutoff = now - CONNECTION_RATE_LIMIT_WINDOW;
-        self.recent_connections
-            .retain(|timestamp, _| *timestamp > cutoff);
+        self.recent_connections.retain(|_, times| {
+            while times.front().is_some_and(|t| *t <= cutoff) {
+                times.pop_front();
+            }
+            !times.is_empty()
+        });
 
         *last_cleanup = now;
     }
@@ -369,7 +391,9 @@ impl ConnectionManager {
     /// Phase 2.1: Record a new connection for rate limiting
     fn record_new_connection(&self, peer_ip: &str) {
         self.recent_connections
-            .insert(Instant::now(), peer_ip.to_string());
+            .entry(peer_ip.to_string())
+            .or_default()
+            .push_back(Instant::now());
     }
 
     /// Check if we're already connected to a peer
@@ -1371,5 +1395,22 @@ mod tests {
 
         // The in-flight handshake can still complete normally afterwards.
         assert!(manager.mark_inbound_disconnected("10.0.0.2", gen));
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::*;
+
+    #[test]
+    fn per_ip_rate_limit_does_not_lock_out_other_ips() {
+        let manager = ConnectionManager::new();
+        // One noisy IP burns through its own budget...
+        for _ in 0..MAX_NEW_CONNECTIONS_PER_IP_PER_WINDOW {
+            manager.record_new_connection("198.51.100.1");
+        }
+        assert!(manager.can_accept_inbound("198.51.100.1", false).is_err());
+        // ...but a different peer can still connect.
+        assert!(manager.can_accept_inbound("203.0.113.5", false).is_ok());
     }
 }
