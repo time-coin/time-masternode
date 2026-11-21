@@ -5950,6 +5950,7 @@ async fn main() {
             let rpc_user = config.rpc.rpcuser.clone();
             let rpc_pass = config.rpc.rpcpassword.clone();
             let rpc_auth_entries = config.rpc.rpcauth.clone();
+            let rpc_allow_ips = config.rpc.rpcallowip.clone();
             let rpc_tls_enabled = config.rpc.rpctls;
             let rpc_tls_cert = config.rpc.rpctlscert.clone();
             let rpc_tls_key = config.rpc.rpctlskey.clone();
@@ -5981,6 +5982,7 @@ async fn main() {
                 .await
                 {
                     Ok(mut server) => {
+                        server.set_allow_ips(&rpc_allow_ips);
                         // Contacts book and P2P registry always available (all nodes)
                         server.set_contacts_book(rpc_contacts_book);
                         server.set_peer_registry(rpc_peer_registry.clone());

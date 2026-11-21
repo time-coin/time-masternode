@@ -167,6 +167,11 @@ pub struct RpcConfig {
     pub enabled: bool,
     pub listen_address: String,
     pub allow_origins: Vec<String>,
+    /// IPs / CIDR ranges allowed to connect to RPC (`rpcallowip=` in time.conf).
+    /// Empty = no IP restriction (public read-only methods stay reachable;
+    /// privileged methods still require credentials, or loopback if none are set).
+    #[serde(default)]
+    pub rpcallowip: Vec<String>,
     #[serde(default)]
     pub rpcuser: String,
     #[serde(default)]
@@ -589,6 +594,7 @@ impl Config {
                     "http://localhost".to_string(),
                     "http://127.0.0.1".to_string(),
                 ],
+                rpcallowip: Vec::new(),
                 rpcuser: String::new(),
                 rpcpassword: String::new(),
                 rpcauth: Vec::new(),
@@ -668,6 +674,7 @@ impl Config {
             let saved_rpc_enabled = config.rpc.enabled;
             let saved_rpc_addr = config.rpc.listen_address.clone();
             let saved_rpc_origins = config.rpc.allow_origins.clone();
+            let saved_rpc_allowip = config.rpc.rpcallowip.clone();
             let saved_log_level = config.logging.level.clone();
             let saved_mn = config.masternode.clone();
 
@@ -684,6 +691,7 @@ impl Config {
             config.rpc.enabled = saved_rpc_enabled;
             config.rpc.listen_address = saved_rpc_addr;
             config.rpc.allow_origins = saved_rpc_origins;
+            config.rpc.rpcallowip = saved_rpc_allowip;
             config.logging.level = saved_log_level;
             config.masternode = saved_mn;
 
@@ -849,6 +857,7 @@ impl Config {
             }
             if let Some(v) = entries.get("rpcallowip") {
                 config.rpc.allow_origins = v.iter().map(|ip| format!("http://{}", ip)).collect();
+                config.rpc.rpcallowip = v.clone();
             }
             if let Some(v) = entries.get("rpcuser") {
                 if let Some(user) = v.last() {
@@ -1244,7 +1253,8 @@ server=1
 rpcuser={}
 rpcpassword={}
 
-# IP addresses allowed to connect to RPC
+# IP addresses / CIDR ranges allowed to connect to RPC (repeat for several;
+# loopback is always allowed). Unset = any IP may call public methods.
 #rpcallowip=127.0.0.1
 
 # ─── Masternode ──────────────────────────────────────────────

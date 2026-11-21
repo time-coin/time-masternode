@@ -4847,7 +4847,14 @@ impl RpcHandler {
                 message: "Transaction ID parameter required".to_string(),
             })?;
 
-        let timeout_secs = params.get(1).and_then(|v| v.as_u64()).unwrap_or(300);
+        // Cap caller-supplied timeout: this method is public and each call pins
+        // a task + socket for its full duration.
+        const MAX_WAIT_SECS: u64 = 300;
+        let timeout_secs = params
+            .get(1)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(MAX_WAIT_SECS)
+            .min(MAX_WAIT_SECS);
 
         let txid_bytes = hex::decode(txid).map_err(|_| RpcError {
             code: -32602,
